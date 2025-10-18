@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"nordik-drive-api/config"
 	"nordik-drive-api/internal/auth"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"google.golang.org/genai"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -52,7 +54,16 @@ func main() {
 
 	logs.RegisterRoutes(r, logService)
 
-	chatService := &chat.ChatService{DB: db}
+	// Create client with ADC (production)
+	ctx := context.Background()
+	client, err := genai.NewClient(ctx, &genai.ClientConfig{
+		Backend:  genai.BackendVertexAI,
+		Project:  "planar-ray-472112-e8", // <-- REPLACE with your Project ID
+		Location: "us-west1",             // <-- REPLACE with your project location
+		// Note: No APIKey is needed when using Vertex AI with ADC.
+	})
+
+	chatService := &chat.ChatService{DB: db, Client: client}
 	chat.RegisterRoutes(r, chatService)
 
 	// --- Cloud Run expects plain HTTP, on $PORT, bind to 0.0.0.0 ---

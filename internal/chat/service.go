@@ -6,18 +6,17 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
-	"os"
 
 	f "nordik-drive-api/internal/file"
 
-	"github.com/google/generative-ai-go/genai"
-	"google.golang.org/api/option"
+	"google.golang.org/genai"
 	"gorm.io/gorm"
 )
 
 type ChatService struct {
 	DB     *gorm.DB
 	APIKey string
+	Client *genai.Client
 }
 
 func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, filename string) (string, error) {
@@ -36,6 +35,7 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 	for _, row := range fileData {
 		allRows = append(allRows, json.RawMessage(row.RowData))
 	}
+
 	fileDataJSON, err := json.Marshal(allRows)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal file data: %w", err)
@@ -43,33 +43,9 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 
 	ctx := context.Background()
 
-	// Load GEMINI_KEY from env if not provided
-	apiKey := cs.APIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("GEMINI_KEY")
-	}
-	if apiKey == "" {
-		return "", fmt.Errorf("missing GEMINI_KEY")
-	}
-
-	// Create Gemini client (public API)
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
-	if err != nil {
-		return "", fmt.Errorf("failed to create Gemini client: %w", err)
-	}
-	defer client.Close()
-
-	// Pick correct model
-	var model *genai.GenerativeModel
-	if audioFile != nil {
-		model = client.GenerativeModel("gemini-2.5-flash") // multimodal flash
-	} else {
-		model = client.GenerativeModel("gemini-2.5-flash") // text-only flash
-	}
-
 	// Compose prompt
 	prompt := question + "\n\nFile name: " + filename +
-		"\n\nAnswer the question based on the provided data, no json format response please: " + string(fileDataJSON)
+		"\n\nAnswer the question based on file data. Please don't take extra data from internet: " + string(fileDataJSON)
 
 	var response string
 
@@ -91,39 +67,56 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 			audioMimeType = "audio/webm"
 		}
 
-		// Send multimodal request
-		resp, err := model.GenerateContent(ctx,
-			genai.Text(prompt),
-			genai.Blob{MIMEType: audioMimeType, Data: audioBytes},
-		)
+		// Generate content (multimodal)
+		genResp, err := cs.Client.Models.GenerateContent(ctx, "gemini-2.5-flash", []*genai.Content{
+			{
+				Role: "user",
+				Parts: []*genai.Part{
+					{Text: prompt},
+					{InlineData: &genai.Blob{Data: audioBytes, MIMEType: audioMimeType}},
+				},
+			},
+		}, nil)
+
 		if err != nil {
 			return "", fmt.Errorf("generation error: %w", err)
 		}
 
-		for _, cand := range resp.Candidates {
-			if cand.Content != nil {
-				for _, part := range cand.Content.Parts {
-					if text, ok := part.(genai.Text); ok {
-						response = string(text)
-						break
+		if len(genResp.Candidates) > 0 {
+			for _, candidate := range genResp.Candidates {
+				if candidate.Content != nil {
+					for _, part := range candidate.Content.Parts {
+						if part.Text != "" {
+							response = part.Text
+							break
+						}
 					}
 				}
 			}
 		}
-
 	} else {
-		// Text-only request
-		resp, err := model.GenerateContent(ctx, genai.Text(prompt))
+		// Generate text-only content
+		genResp, err := cs.Client.Models.GenerateContent(ctx, "gemini-2.5-flash", []*genai.Content{
+			{
+				Role: "user",
+				Parts: []*genai.Part{
+					{Text: prompt},
+				},
+			},
+		}, nil)
+
 		if err != nil {
 			return "", fmt.Errorf("generation error: %w", err)
 		}
 
-		for _, cand := range resp.Candidates {
-			if cand.Content != nil {
-				for _, part := range cand.Content.Parts {
-					if text, ok := part.(genai.Text); ok {
-						response = string(text)
-						break
+		if len(genResp.Candidates) > 0 {
+			for _, candidate := range genResp.Candidates {
+				if candidate.Content != nil {
+					for _, part := range candidate.Content.Parts {
+						if part.Text != "" {
+							response = part.Text
+							break
+						}
 					}
 				}
 			}
