@@ -18,13 +18,14 @@ func (cc *ChatController) Chat(c *gin.Context) {
 	question := c.PostForm("question")
 	filename := c.PostForm("filename")
 	audioFile, _ := c.FormFile("audio")
+	communities := c.PostFormArray("communities")
 
 	if filename == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "filename is required"})
 		return
 	}
 
-	answer, err := cc.ChatService.Chat(question, audioFile, filename)
+	answer, err := cc.ChatService.Chat(question, audioFile, filename, communities)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS file (
     inserted_by INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     private BOOLEAN DEFAULT FALSE,
+    community_filter BOOLEAN DEFAULT FALSE,
     is_delete BOOLEAN DEFAULT FALSE,
     size DECIMAL NOT NULL,
     version INT DEFAULT 1 NOT NULL,
@@ -143,6 +144,35 @@ CREATE TABLE logs (
     metadata JSONB NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS file_edit_request (
+    request_id SERIAL PRIMARY KEY,
+
+    user_id INT NOT NULL
+        REFERENCES users(id)
+        ON DELETE CASCADE,
+
+    status VARCHAR(50) NOT NULL DEFAULT 'pending',
+
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+
+CREATE TABLE IF NOT EXISTS file_edit_request_details (
+    id SERIAL PRIMARY KEY,
+    request_id INT NOT NULL REFERENCES file_edit_request(request_id) ON DELETE CASCADE,
+
+    file_id INT NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    filename VARCHAR(255) NOT NULL,
+
+    row_id INT NOT NULL,                 -- e.g., 15048 in your example
+    field_name VARCHAR(255) NOT NULL,    -- like "Parents Names"
+    old_value TEXT,
+    new_value TEXT,
+
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 
 CREATE INDEX idx_logs_user_id ON logs(user_id);
 CREATE INDEX idx_logs_service ON logs(service);

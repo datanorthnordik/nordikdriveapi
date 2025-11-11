@@ -16,8 +16,9 @@ type FileController struct {
 }
 
 type FileUploadInput struct {
-	FileNames []string `form:"filenames" binding:"required"`
-	Private   []bool   `form:"private" binding:"required"`
+	FileNames       []string `form:"filenames" binding:"required"`
+	Private         []bool   `form:"private" binding:"required"`
+	CommunityFilter []bool   `form:"community_filter" binding:"required"`
 }
 
 type ReplaceFileInput struct {
@@ -446,4 +447,73 @@ func (fc *FileController) RevertFile(c *gin.Context) {
 		"message": fmt.Sprintf("file reverted to version %d successfully", input.Version),
 	})
 
+}
+
+func (fc *FileController) CreateEditRequest(c *gin.Context) {
+	var input EditRequestInput
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON input"})
+		return
+	}
+
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user ID not found"})
+		return
+	}
+
+	userID, ok := userIDVal.(float64)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+
+	request, err := fc.FileService.CreateEditRequest(input, uint(userID))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	uid := uint(userID)
+	if err := fc.LogService.Log("INFO", "file_edit", "CREATE_EDIT_REQUEST",
+		fmt.Sprintf("Edit request created for file: %s", input.Filename), &uid, nil); err != nil {
+		fmt.Printf("Failed to insert log: %v\n", err)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "edit request submitted",
+		"request": request,
+	})
+}
+
+func (fc *FileController) GetPendingEditRequests(c *gin.Context) {
+	requests, err := fc.FileService.GetPendingEditRequests()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"requests": requests,
+	})
+}
+
+func (fc *FileController) ApproveEditRequest(c *gin.Context) {
+	var input struct {
+		RequestID uint                     `json:"request_id"`
+		Updates   []FileEditRequestDetails `json:"updates"`
+	}
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid input"})
+		return
+	}
+
+	if err := fc.FileService.ApproveEditRequest(input.RequestID, input.Updates); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Request approved and file updated"})
 }

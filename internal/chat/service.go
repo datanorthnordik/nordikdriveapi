@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"strings"
 
 	f "nordik-drive-api/internal/file"
 
@@ -19,16 +20,37 @@ type ChatService struct {
 	Client *genai.Client
 }
 
-func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, filename string) (string, error) {
+func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, filename string, communities []string) (string, error) {
 	// Fetch latest file version
 	var file f.File
 	if err := cs.DB.Where("filename = ?", filename).Order("version DESC").First(&file).Error; err != nil {
 		return "", fmt.Errorf("file not found")
 	}
 
+	// normalize/filter incoming communities (remove empty entries)
+	var filtered []string
+	for _, c := range communities {
+		c = strings.TrimSpace(c)
+		if c != "" {
+			filtered = append(filtered, c)
+		}
+	}
+
+	// Fetch all file data for this file/version, then apply JSON-level filtering by key "First Nation/Home".
+	var rawFileData []f.FileData
+	if err := cs.DB.Where("file_id = ? AND version = ?", file.ID, file.Version).Find(&rawFileData).Error; err != nil {
+		return "", fmt.Errorf("file data not found: %w", err)
+	}
+
 	var fileData []f.FileData
-	if err := cs.DB.Where("file_id = ? AND version = ?", file.ID, file.Version).Find(&fileData).Error; err != nil {
-		return "", fmt.Errorf("file data not found")
+	if len(filtered) == 0 {
+		fileData = rawFileData
+	} else {
+		for _, r := range rawFileData {
+			if matchesCommunities([]byte(r.RowData), filtered) {
+				fileData = append(fileData, r)
+			}
+		}
 	}
 
 	var allRows []json.RawMessage
@@ -45,7 +67,7 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 
 	// Compose prompt
 	prompt := question + "\n\nFile name: " + filename +
-		"\n\nAnswer the question based on file data. Please don't take extra data from internet: " + string(fileDataJSON)
+		"\n\nAnswer the question based on file data. Please don't take extra data from internet. Don't answer anything technical such as JSON response and details about the file (file name, columns etc...): " + string(fileDataJSON)
 
 	var response string
 
@@ -128,4 +150,23 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 	}
 
 	return response, nil
+}
+
+func matchesCommunities(rowData []byte, communities []string) bool {
+	var rowMap map[string]interface{}
+	if err := json.Unmarshal(rowData, &rowMap); err != nil {
+		return false
+	}
+
+	// Assuming the key is "First Nation/Home", adjust if different
+	key := "First Nation/Home"
+	if val, ok := rowMap[key]; ok {
+		for _, c := range communities {
+			if c == val {
+				return true
+			}
+		}
+	}
+
+	return false
 }
