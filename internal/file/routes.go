@@ -24,10 +24,13 @@ func RegisterRoutes(r *gin.Engine, fileService *FileService, logService *logs.Lo
 		userGroup.GET("/history", fileController.GetFileHistory)
 		userGroup.POST("/replace", fileController.ReplaceFile)
 		userGroup.POST("/revert", fileController.RevertFile)
-		//userGroup.POST("/edit", fileController.Edit)
 		userGroup.POST("/edit/request", fileController.CreateEditRequest)
 		userGroup.GET("/edit/request", fileController.GetPendingEditRequests)
+		userGroup.GET("/edit/photos/:requestId", fileController.GetPhotosByRequest)
+		userGroup.GET("/photos/:rowId", fileController.GetPhotosByRow)
+		userGroup.GET("/photo/:photoId", fileController.GetPhoto)
 		userGroup.PUT("/approve/request", fileController.ApproveEditRequest)
+		userGroup.POST("/photos/review", fileController.ReviewPhotos)
 	}
 
 }

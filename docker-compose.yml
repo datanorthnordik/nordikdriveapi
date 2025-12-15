@@ -13,6 +13,7 @@ services:
       DB_NAME: postgres
       JWT_SECRET: 12DH9111hbhos5AW
       GEMINI_KEY: AIzaSyBHsvcGZKwjuW0ohOjiBW7kBws8say3no0
+      BUCKET_NAME: nordik-drive-photos
     depends_on:
       postgres:
         condition: service_healthy

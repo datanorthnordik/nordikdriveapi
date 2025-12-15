@@ -145,17 +145,39 @@ CREATE TABLE logs (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS file_edit_request (
+CREATE TABLE file_edit_request (
     request_id SERIAL PRIMARY KEY,
-
-    user_id INT NOT NULL
-        REFERENCES users(id)
-        ON DELETE CASCADE,
-
-    status VARCHAR(50) NOT NULL DEFAULT 'pending',
-
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    user_id INT NOT NULL,
+    status VARCHAR(50) DEFAULT 'pending',
+    firstname VARCHAR(100),
+    lastname VARCHAR(100),
+    consent BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT NOW(),
+    row_id INT NULL,
+    is_edited BOOLEAN DEFAULT TRUE
 );
+
+
+CREATE TABLE file_edit_request_photos (
+    id SERIAL PRIMARY KEY,
+
+    request_id INT NOT NULL,
+
+
+    photo_url TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    size_bytes BIGINT NOT NULL,
+
+    is_gallery_photo BOOLEAN DEFAULT FALSE,
+
+    is_approved BOOLEAN DEFAULT FALSE,
+    approved_by VARCHAR(255),
+    approved_at TIMESTAMP,
+    row_id INT,
+
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
 
 
 CREATE TABLE IF NOT EXISTS file_edit_request_details (
@@ -165,7 +187,7 @@ CREATE TABLE IF NOT EXISTS file_edit_request_details (
     file_id INT NOT NULL REFERENCES file(id) ON DELETE CASCADE,
     filename VARCHAR(255) NOT NULL,
 
-    row_id INT NOT NULL,                 -- e.g., 15048 in your example
+    row_id INT NULL,                 -- e.g., 15048 in your example
     field_name VARCHAR(255) NOT NULL,    -- like "Parents Names"
     old_value TEXT,
     new_value TEXT,
@@ -177,5 +199,23 @@ CREATE TABLE IF NOT EXISTS file_edit_request_details (
 CREATE INDEX idx_logs_user_id ON logs(user_id);
 CREATE INDEX idx_logs_service ON logs(service);
 CREATE INDEX idx_logs_created_at ON logs(created_at);
+
+-- Communities table --
+
+CREATE TABLE communities (
+    id SERIAL PRIMARY KEY,
+    community_name VARCHAR(100) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    approved BOOLEAN NOT NULL DEFAULT TRUE,
+);
+
+-- Query for inserting all unique communities --
+INSERT INTO communities (community_name)
+SELECT DISTINCT row_data ->> 'First Nation/Community'
+FROM public.file_data
+WHERE file_id = 40
+  AND row_data ? 'First Nation/Community'
+  AND row_data ->> 'First Nation/Community' IS NOT NULL;
 
 

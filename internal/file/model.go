@@ -75,11 +75,14 @@ type FileWithUser struct {
 
 type FileEditRequest struct {
 	RequestID uint      `gorm:"primaryKey;autoIncrement" json:"request_id"`
+	RowID     int       `gorm:"not null" json:"row_id"`
 	UserID    uint      `gorm:"not null" json:"user_id"`
 	Status    string    `gorm:"type:varchar(50);default:'pending'" json:"status"`
 	FirstName string    `gorm:"type:varchar(100);column:firstname" json:"firstname"`
 	LastName  string    `gorm:"type:varchar(100);column:lastname" json:"lastname"`
+	Consent   bool      `gorm:"default:false" json:"consent"`
 	CreatedAt time.Time `gorm:"autoCreateTime" json:"created_at"`
+	IsEdited  bool      `gorm:"default:false" json:"is_edited"`
 }
 
 type FileEditRequestDetails struct {
@@ -96,6 +99,7 @@ type FileEditRequestDetails struct {
 
 type FileEditRequestWithUser struct {
 	RequestID  uint                     `json:"request_id"`
+	RowID      int                      `json:"row_id"`
 	UserID     uint                     `json:"user_id"`
 	Firstname  string                   `json:"firstname"`
 	Lastname   string                   `json:"lastname"`
@@ -104,14 +108,21 @@ type FileEditRequestWithUser struct {
 	Details    []FileEditRequestDetails `json:"details"`
 	EFirstName string                   `json:"efirstname"`
 	ELastName  string                   `json:"elastname"`
+	IsEdited   bool                     `gorm:"default:true" json:"is_edited"`
+	Consent    bool                     `json:"consent"`
 }
 
 type EditRequestInput struct {
-	FileID    uint                       `json:"file_id"`
-	Filename  string                     `json:"filename"`
-	Changes   map[string]EditChangeInput `json:"changes"`
-	FirstName string                     `json:"firstname"`
-	LastName  string                     `json:"lastname"`
+	FileID           uint                         `json:"file_id"`
+	Filename         string                       `json:"filename"`
+	Changes          map[string][]EditChangeInput `json:"changes"`
+	FirstName        string                       `json:"firstname"`
+	LastName         string                       `json:"lastname"`
+	RowID            int                          `json:"row_id"`
+	PhotosInApp      []string                     `json:"photos_in_app"`
+	PhotosForGallery []string                     `json:"photos_for_gallery_review"`
+	Consent          bool                         `json:"consent"`
+	IsEdited         bool                         `gorm:"default:false" json:"is_edited"`
 }
 
 type EditChangeInput struct {
@@ -119,6 +130,20 @@ type EditChangeInput struct {
 	FieldName string `json:"field_name"`
 	OldValue  string `json:"old_value"`
 	NewValue  string `json:"new_value"`
+}
+
+type FileEditRequestPhoto struct {
+	ID             uint      `gorm:"primaryKey" json:"id"`
+	RequestID      uint      `json:"request_id"`
+	RowID          int       `json:"row_id"`
+	PhotoURL       string    `json:"photo_url"`
+	FileName       string    `json:"file_name"`
+	SizeBytes      int64     `json:"size_bytes"`
+	IsGalleryPhoto bool      `json:"is_gallery_photo"`
+	IsApproved     bool      `json:"is_approved"`
+	ApprovedBy     string    `json:"approved_by"`
+	ApprovedAt     time.Time `json:"approved_at"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 func (FileEditRequest) TableName() string {
@@ -143,4 +168,8 @@ func (FileAccess) TableName() string {
 
 func (FileVersion) TableName() string {
 	return "file_version"
+}
+
+func (FileEditRequestPhoto) TableName() string {
+	return "file_edit_request_photos"
 }

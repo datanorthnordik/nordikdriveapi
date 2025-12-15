@@ -2,17 +2,20 @@ package auth
 
 import (
 	"time"
+
+	"github.com/lib/pq"
 )
 
 type Auth struct {
-	ID        int       `gorm:"primaryKey;autoIncrement" json:"id"`
-	FirstName string    `gorm:"size:100;not null;column:firstname" json:"firstname"`
-	LastName  string    `gorm:"size:100;not null;column:lastname" json:"lastname"`
-	Email     string    `gorm:"size:100;uniqueIndex;not null" json:"email"`
-	Password  string    `gorm:"not null" json:"-"`
-	Role      string    `json:"role"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID        int            `gorm:"primaryKey;autoIncrement" json:"id"`
+	FirstName string         `gorm:"size:100;not null;column:firstname" json:"firstname"`
+	LastName  string         `gorm:"size:100;not null;column:lastname" json:"lastname"`
+	Email     string         `gorm:"size:100;uniqueIndex;not null" json:"email"`
+	Community pq.StringArray `gorm:"type:text[];column:community" json:"community"`
+	Password  string         `gorm:"not null" json:"-"`
+	Role      string         `json:"role"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
 }
 
 type Access struct {
@@ -43,8 +46,8 @@ type RequestAction struct {
 
 type UserRole struct {
 	ID            uint    `gorm:"primaryKey;autoIncrement" json:"id"`
-	Role          string  `gorm:"size:100;not null" json:"role"` // references Role.Role
-	UserID        int     `gorm:"not null" json:"user_id"`       // references Auth.ID
+	Role          string  `gorm:"size:100;not null" json:"role"`
+	UserID        int     `gorm:"not null" json:"user_id"`
 	CommunityName *string `gorm:"size:255" json:"community_name,omitempty"`
 }
 
@@ -54,13 +57,14 @@ type FileAccessResponse struct {
 }
 
 type LoginResponse struct {
-	Token       string `json:"token"`
-	FirstName   string `json:"firstname"`
-	LastName    string `json:"lastname"`
-	ID          int    `json:"id"`
-	Email       string `json:"email"`
-	PhoneNumber string `json:"phonenumber"`
-	Role        string `json:"role"`
+	Token       string         `json:"token"`
+	FirstName   string         `json:"firstname"`
+	LastName    string         `json:"lastname"`
+	ID          int            `json:"id"`
+	Email       string         `json:"email"`
+	PhoneNumber string         `json:"phonenumber"`
+	Role        string         `json:"role"`
+	Community   pq.StringArray `gorm:"type:text[];column:community" json:"community"`
 }
 
 type SendOTPRequest struct {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/lib/pq"
 )
 
 type AuthController struct {
@@ -19,10 +20,11 @@ type AuthController struct {
 
 func (ac *AuthController) SignUp(c *gin.Context) {
 	var req struct {
-		FirstName string `json:"firstname" binding:"required"`
-		LastName  string `json:"lastname" binding:"required"`
-		Email     string `json:"email" binding:"required,email"`
-		Password  string `json:"password" binding:"required,min=6"`
+		FirstName string   `json:"firstname" binding:"required"`
+		LastName  string   `json:"lastname" binding:"required"`
+		Email     string   `json:"email" binding:"required,email"`
+		Password  string   `json:"password" binding:"required,min=6"`
+		Community []string `json:"community"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -42,6 +44,10 @@ func (ac *AuthController) SignUp(c *gin.Context) {
 		LastName:  req.LastName,
 		Email:     req.Email,
 		Password:  password,
+	}
+
+	if len(req.Community) > 0 {
+		user.Community = pq.StringArray(req.Community)
 	}
 
 	newuser, err := ac.AuthService.CreateUser(user)
@@ -64,6 +70,7 @@ func (ac *AuthController) SignUp(c *gin.Context) {
 			"firstname": newuser.FirstName,
 			"lastname":  newuser.LastName,
 			"email":     newuser.Email,
+			"community": newuser.Community,
 		},
 	})
 }
@@ -149,6 +156,7 @@ func (ac *AuthController) Login(c *gin.Context) {
 			LastName:  user.LastName,
 			Email:     user.Email,
 			Role:      user.Role,
+			Community: user.Community,
 		},
 	})
 }

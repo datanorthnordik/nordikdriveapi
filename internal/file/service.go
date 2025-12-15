@@ -2,16 +2,21 @@ package file
 
 import (
 	"bytes"
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"nordik-drive-api/internal/auth"
+	"nordik-drive-api/internal/util"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"cloud.google.com/go/storage"
 	"github.com/iancoleman/orderedmap"
 	"github.com/xuri/excelize/v2"
 	"gorm.io/datatypes"
@@ -571,33 +576,125 @@ func (fs *FileService) RevertFile(filename string, version int, userID uint) err
 
 func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*FileEditRequest, error) {
 
-	// Create the main request
+	// Step 1: Insert main request
 	request := FileEditRequest{
 		UserID:    userID,
 		Status:    "pending",
 		CreatedAt: time.Now(),
 		FirstName: input.FirstName,
 		LastName:  input.LastName,
+		Consent:   input.Consent,
+		RowID:     input.RowID,    // 0 allowed
+		IsEdited:  input.IsEdited, // should come from payload
 	}
 
+	// Keep as-is; if you ever see bool issues, use Select("*") here.
 	if err := fs.DB.Create(&request).Error; err != nil {
 		return nil, err
 	}
 
-	// Insert each detail item
-	for _, change := range input.Changes {
-		detail := FileEditRequestDetails{
-			RequestID: request.RequestID,
-			FileID:    input.FileID,
-			Filename:  input.Filename,
-			RowID:     change.RowID,
-			FieldName: change.FieldName,
-			OldValue:  change.OldValue,
-			NewValue:  change.NewValue,
-			CreatedAt: time.Now(),
+	// Step 2: Insert change details
+	var details []FileEditRequestDetails
+	now := time.Now()
+	rowId := input.RowID
+
+	for _, edits := range input.Changes {
+		for _, item := range edits {
+			details = append(details, FileEditRequestDetails{
+				RequestID: request.RequestID,
+				FileID:    input.FileID,
+				Filename:  input.Filename,
+				RowID:     item.RowID,
+				FieldName: item.FieldName,
+				OldValue:  item.OldValue,
+				NewValue:  item.NewValue,
+				CreatedAt: now,
+			})
+		}
+	}
+
+	if len(details) > 0 {
+		if err := fs.DB.Create(&details).Error; err != nil {
+			return nil, err
+		}
+	}
+
+	// Step 3: Upload images to GCS
+	bucket := "nordik-drive-photos"
+	timestamp := time.Now().Format("20060102150405")
+
+	// ✅ Folder rule:
+	// - if is_edited=false OR row_id==0 => requests/<requestID>_<first>_<last>
+	// - else => requests/<row_id>
+	var basePrefix string
+	if input.IsEdited && rowId != 0 {
+		basePrefix = util.RowPrefix(rowId)
+	} else {
+		basePrefix = util.TempPrefix(request.RequestID, input.FirstName, input.LastName)
+	}
+
+	// App photos
+	for i, base64Img := range input.PhotosInApp {
+
+		fileName := fmt.Sprintf("%s_%s_%s_%d.jpg",
+			input.FirstName,
+			input.LastName,
+			timestamp,
+			i+1,
+		)
+
+		objectPath := fmt.Sprintf("%s/%s", basePrefix, fileName)
+
+		url, sizeBytes, err := util.UploadPhotoToGCS(base64Img, bucket, objectPath)
+		if err != nil {
+			return nil, err
 		}
 
-		if err := fs.DB.Create(&detail).Error; err != nil {
+		photoRecord := FileEditRequestPhoto{
+			RequestID:      request.RequestID,
+			RowID:          rowId, // 0 for new request, as you want
+			PhotoURL:       url,
+			FileName:       fileName,
+			SizeBytes:      sizeBytes,
+			IsGalleryPhoto: false,
+			IsApproved:     false,
+			CreatedAt:      time.Now(),
+		}
+
+		if err := fs.DB.Create(&photoRecord).Error; err != nil {
+			return nil, err
+		}
+	}
+
+	// Gallery photos
+	for i, base64Img := range input.PhotosForGallery {
+
+		fileName := fmt.Sprintf("%s_%s_%s_gallery_%d.jpg",
+			input.FirstName,
+			input.LastName,
+			timestamp,
+			i+1,
+		)
+
+		objectPath := fmt.Sprintf("%s/%s", basePrefix, fileName)
+
+		url, sizeBytes, err := util.UploadPhotoToGCS(base64Img, bucket, objectPath)
+		if err != nil {
+			return nil, err
+		}
+
+		photoRecord := FileEditRequestPhoto{
+			RequestID:      request.RequestID,
+			RowID:          rowId, // 0 for new request
+			PhotoURL:       url,
+			FileName:       fileName,
+			SizeBytes:      sizeBytes,
+			IsGalleryPhoto: true,
+			IsApproved:     false,
+			CreatedAt:      time.Now(),
+		}
+
+		if err := fs.DB.Create(&photoRecord).Error; err != nil {
 			return nil, err
 		}
 	}
@@ -608,6 +705,7 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 func (fs *FileService) GetPendingEditRequests() ([]FileEditRequestWithUser, error) {
 	var baseRequests []struct {
 		RequestID  uint
+		RowID      int
 		UserID     uint
 		Firstname  string
 		Lastname   string
@@ -615,10 +713,12 @@ func (fs *FileService) GetPendingEditRequests() ([]FileEditRequestWithUser, erro
 		CreatedAt  time.Time
 		EFirstName string `gorm:"column:efirstname"`
 		ELastName  string `gorm:"column:elastname"`
+		IsEdited   bool   `gorm:"default:true"`
+		Consent    bool
 	}
 
 	err := fs.DB.Table("file_edit_request").
-		Select("file_edit_request.request_id, file_edit_request.user_id, users.firstname, users.lastname, file_edit_request.status, file_edit_request.created_at, file_edit_request.firstname as efirstname, file_edit_request.lastname as elastname").
+		Select("file_edit_request.request_id, file_edit_request.row_id, file_edit_request.user_id, users.firstname, users.lastname, file_edit_request.status, file_edit_request.created_at, file_edit_request.firstname as efirstname, file_edit_request.lastname as elastname, file_edit_request.is_edited, file_edit_request.consent").
 		Joins("JOIN users ON users.id = file_edit_request.user_id").
 		Where("file_edit_request.status = ?", "pending").
 		Order("file_edit_request.created_at DESC").
@@ -649,6 +749,9 @@ func (fs *FileService) GetPendingEditRequests() ([]FileEditRequestWithUser, erro
 			Details:    details,
 			EFirstName: req.EFirstName,
 			ELastName:  req.ELastName,
+			RowID:      req.RowID,
+			IsEdited:   req.IsEdited,
+			Consent:    req.Consent,
 		})
 	}
 
@@ -656,57 +759,252 @@ func (fs *FileService) GetPendingEditRequests() ([]FileEditRequestWithUser, erro
 }
 
 func (fs *FileService) ApproveEditRequest(requestID uint, updates []FileEditRequestDetails) error {
+	return fs.DB.Transaction(func(tx *gorm.DB) error {
 
-	// 1. Update changed details (new_value)
-	for _, upd := range updates {
-		err := fs.DB.Model(&FileEditRequestDetails{}).
-			Where("id = ?", upd.ID).
-			Update("new_value", upd.NewValue).Error
+		// 0) Update changed details (new_value) coming from UI
+		for _, upd := range updates {
+			if err := tx.Model(&FileEditRequestDetails{}).
+				Where("id = ?", upd.ID).
+				Update("new_value", upd.NewValue).Error; err != nil {
+				return err
+			}
+		}
 
-		if err != nil {
+		// 1) Load request (need is_edited + name for folder)
+		var req FileEditRequest
+		if err := tx.Where("request_id = ?", requestID).First(&req).Error; err != nil {
 			return err
 		}
+
+		// 2) Fetch all details for this request
+		var allDetails []FileEditRequestDetails
+		if err := tx.Where("request_id = ?", requestID).Find(&allDetails).Error; err != nil {
+			return err
+		}
+		if len(allDetails) == 0 {
+			return fmt.Errorf("no details found for request_id=%d", requestID)
+		}
+
+		// 3) If is_edited=false => create new FileData row FIRST, use its ID as rowID
+		var finalRowID uint
+		if !req.IsEdited {
+
+			// Build row_data JSON from details (field -> new_value)
+			row := make(map[string]string, len(allDetails))
+			for _, d := range allDetails {
+				row[d.FieldName] = d.NewValue
+			}
+
+			newJSON, err := json.Marshal(row)
+			if err != nil {
+				return fmt.Errorf("failed to build row_data json: %v", err)
+			}
+
+			// Create file_data row (row_id will be new FileData.ID)
+			fileID := allDetails[0].FileID
+
+			fd := FileData{
+				FileID:     fileID,
+				RowData:    datatypes.JSON(newJSON),
+				InsertedBy: req.UserID, // keeps your current meaning (creator)
+				CreatedAt:  time.Now(),
+				Version:    1,
+			}
+
+			if err := tx.Create(&fd).Error; err != nil {
+				return fmt.Errorf("failed to insert file_data: %v", err)
+			}
+
+			finalRowID = fd.ID
+
+			// Update ALL details row_id (they were 0) to new row id
+			if err := tx.Model(&FileEditRequestDetails{}).
+				Where("request_id = ?", requestID).
+				Update("row_id", finalRowID).Error; err != nil {
+				return err
+			}
+
+			// Update request row_id (optional but usually needed)
+			if err := tx.Model(&FileEditRequest{}).
+				Where("request_id = ?", requestID).
+				Update("row_id", finalRowID).Error; err != nil {
+				return err
+			}
+
+			// ---- Move photos folder: requests/<requestID>_<first>_<last> -> requests/<rowID> ----
+			bucket := "nordik-drive-photos"
+
+			srcPrefix := util.TempPrefix(req.RequestID, req.FirstName, req.LastName)
+			dstPrefix := util.RowPrefix(int(finalRowID))
+
+			mapping, err := util.MoveGCSFolder(bucket, srcPrefix, dstPrefix)
+			if err != nil {
+				return err
+			}
+
+			// Update photo rows: row_id + photo_url
+			var photos []FileEditRequestPhoto
+			if err := tx.Where("request_id = ?", requestID).Find(&photos).Error; err != nil {
+				return err
+			}
+
+			for _, p := range photos {
+
+				// ✅ old object path is deterministic, no URL parsing needed
+				oldObj := fmt.Sprintf("%s/%s", srcPrefix, p.FileName)
+
+				// new object path comes from MoveGCSFolder mapping
+				newObj, ok := mapping[oldObj]
+				if !ok {
+					// fallback: assume it should exist in the destination folder
+					newObj = fmt.Sprintf("%s/%s", dstPrefix, p.FileName)
+				}
+
+				// ✅ force gs:// format (what you want)
+				newURL := fmt.Sprintf("gs://%s/%s", bucket, newObj)
+
+				if err := tx.Model(&FileEditRequestPhoto{}).
+					Where("id = ?", p.ID).
+					Updates(map[string]any{
+						"row_id":    finalRowID,
+						"photo_url": newURL,
+					}).Error; err != nil {
+					return err
+				}
+			}
+
+			// Since it’s a NEW row, we’re done with updating file_data (already inserted with all fields)
+		} else {
+			// 4) Existing edit: your current logic (update the existing file_data row)
+			for _, det := range allDetails {
+
+				var fileData FileData
+				err := tx.Where("file_id = ? AND id = ?", det.FileID, det.RowID).First(&fileData).Error
+				if err != nil {
+					return fmt.Errorf("file data row not found for file %d row %d", det.FileID, det.RowID)
+				}
+
+				var row map[string]string
+				if err := json.Unmarshal(fileData.RowData, &row); err != nil {
+					return fmt.Errorf("failed to parse row_data: %v", err)
+				}
+
+				row[det.FieldName] = det.NewValue
+
+				newJSON, _ := json.Marshal(row)
+				if err := tx.Model(&fileData).
+					Update("row_data", datatypes.JSON(newJSON)).Error; err != nil {
+					return fmt.Errorf("failed to update file_data: %v", err)
+				}
+			}
+		}
+
+		// 5) Mark request as approved
+		if err := tx.Model(&FileEditRequest{}).
+			Where("request_id = ?", requestID).
+			Update("status", "approved").Error; err != nil {
+			return err
+		}
+
+		return nil
+	})
+}
+
+func (fs *FileService) GetPhotosByRequest(requestID uint) ([]FileEditRequestPhoto, error) {
+	var photos []FileEditRequestPhoto
+
+	if err := fs.DB.Where("request_id = ?", requestID).Find(&photos).Error; err != nil {
+		return nil, err
 	}
 
-	// 2. Fetch all details for this request
-	var allDetails []FileEditRequestDetails
-	if err := fs.DB.Where("request_id = ?", requestID).Find(&allDetails).Error; err != nil {
-		return err
+	return photos, nil
+}
+
+func (fs *FileService) GetPhotosByRow(requestID uint) ([]FileEditRequestPhoto, error) {
+	var photos []FileEditRequestPhoto
+
+	if err := fs.DB.Where("row_id = ? and is_approved = ?", requestID, true).Find(&photos).Error; err != nil {
+		return nil, err
 	}
 
-	// 3. For each field change → update corresponding FileData row
-	for _, det := range allDetails {
+	return photos, nil
+}
 
-		// Load the file data row for this row_id
-		var fileData FileData
-		err := fs.DB.Where("file_id = ? AND id = ?", det.FileID, det.RowID).First(&fileData).Error
+func (fs *FileService) GetPhotoBytes(photoID uint) ([]byte, string, error) {
+	var photo FileEditRequestPhoto
+
+	// 1. Fetch photo record
+	if err := fs.DB.First(&photo, photoID).Error; err != nil {
+		return nil, "", err
+	}
+
+	bucketName := os.Getenv("BUCKET_NAME")
+
+	// 2. Extract object path from: gs://bucket/OBJECT_PATH
+	prefix := "gs://" + bucketName + "/"
+	objectPath := strings.TrimPrefix(photo.PhotoURL, prefix)
+
+	ctx := context.Background()
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	defer client.Close()
+
+	// 3. Read the file
+	rc, err := client.Bucket(bucketName).Object(objectPath).NewReader(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, "", err
+	}
+
+	contentType := rc.ContentType()
+
+	return data, contentType, nil
+}
+
+func (fs *FileService) ReviewPhotos(approved []uint, rejected []uint, reviewer string) error {
+
+	now := time.Now()
+
+	// -------------------------------
+	// APPROVE PHOTOS
+	// -------------------------------
+	if len(approved) > 0 {
+		err := fs.DB.Model(&FileEditRequestPhoto{}).
+			Where("id IN ?", approved).
+			Updates(map[string]interface{}{
+				"is_approved": true,
+				"approved_by": reviewer,
+				"approved_at": now,
+			}).Error
+
 		if err != nil {
-			return fmt.Errorf("file data row not found for file %d row %d", det.FileID, det.RowID)
-		}
-
-		// Convert row_data JSON → map
-		var row map[string]string
-		if err := json.Unmarshal(fileData.RowData, &row); err != nil {
-			return fmt.Errorf("failed to parse row_data: %v", err)
-		}
-
-		// Update the changed field
-		row[det.FieldName] = det.NewValue
-
-		// Convert back to JSON
-		newJSON, _ := json.Marshal(row)
-
-		// Save updated row
-		err = fs.DB.Model(&fileData).
-			Update("row_data", datatypes.JSON(newJSON)).Error
-
-		if err != nil {
-			return fmt.Errorf("failed to update file_data: %v", err)
+			return fmt.Errorf("failed to approve photos: %v", err)
 		}
 	}
 
-	// 4. Mark request as approved
-	return fs.DB.Model(&FileEditRequest{}).
-		Where("request_id = ?", requestID).
-		Update("status", "approved").Error
+	// -------------------------------
+	// REJECT PHOTOS
+	// -------------------------------
+	if len(rejected) > 0 {
+		err := fs.DB.Model(&FileEditRequestPhoto{}).
+			Where("id IN ?", rejected).
+			Updates(map[string]interface{}{
+				"is_approved": false,
+				"approved_by": reviewer,
+				"approved_at": now,
+			}).Error
+
+		if err != nil {
+			return fmt.Errorf("failed to reject photos: %v", err)
+		}
+	}
+
+	return nil
 }

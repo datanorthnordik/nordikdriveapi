@@ -453,7 +453,9 @@ func (fc *FileController) CreateEditRequest(c *gin.Context) {
 	var input EditRequestInput
 
 	if err := c.ShouldBindJSON(&input); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON input"})
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": err.Error(),
+		})
 		return
 	}
 
@@ -475,14 +477,8 @@ func (fc *FileController) CreateEditRequest(c *gin.Context) {
 		return
 	}
 
-	uid := uint(userID)
-	if err := fc.LogService.Log("INFO", "file_edit", "CREATE_EDIT_REQUEST",
-		fmt.Sprintf("Edit request created for file: %s", input.Filename), &uid, nil); err != nil {
-		fmt.Printf("Failed to insert log: %v\n", err)
-	}
-
 	c.JSON(http.StatusOK, gin.H{
-		"message": "edit request submitted",
+		"message": "Edit request submitted",
 		"request": request,
 	})
 }
@@ -516,4 +512,88 @@ func (fc *FileController) ApproveEditRequest(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Request approved and file updated"})
+}
+
+// POST /api/file/photos/review
+func (fc *FileController) ReviewPhotos(c *gin.Context) {
+
+	var input struct {
+		Approved []uint `json:"approved_photos"`
+		Rejected []uint `json:"rejected_photos"`
+	}
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid input"})
+		return
+	}
+
+	// Get reviewer name (optional)
+	reviewer := c.GetString("user_email")
+
+	if err := fc.FileService.ReviewPhotos(input.Approved, input.Rejected, reviewer); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Photo review updated"})
+}
+
+func (fc *FileController) GetPhotosByRequest(c *gin.Context) {
+	requestIDParam := c.Param("requestId")
+	requestIDInt, err := strconv.Atoi(requestIDParam)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request ID"})
+		return
+	}
+
+	requestID := uint(requestIDInt)
+
+	photos, err := fc.FileService.GetPhotosByRequest(requestID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"photos": photos,
+	})
+}
+
+func (fc *FileController) GetPhotosByRow(c *gin.Context) {
+	rowIDParam := c.Param("rowId")
+	rowIDInt, err := strconv.Atoi(rowIDParam)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid row ID"})
+		return
+	}
+
+	rowID := uint(rowIDInt)
+
+	photos, err := fc.FileService.GetPhotosByRow(rowID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"photos": photos,
+	})
+}
+
+func (fc *FileController) GetPhoto(c *gin.Context) {
+	photoIDParam := c.Param("photoId")
+	photoID, err := strconv.Atoi(photoIDParam)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid photo ID"})
+		return
+	}
+
+	data, contentType, err := fc.FileService.GetPhotoBytes(uint(photoID))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Return as image
+	c.Data(http.StatusOK, contentType, data)
 }
