@@ -659,6 +659,7 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 			IsGalleryPhoto: false,
 			IsApproved:     false,
 			CreatedAt:      time.Now(),
+			SourceFile:     input.Filename,
 		}
 
 		if err := fs.DB.Create(&photoRecord).Error; err != nil {
@@ -692,6 +693,7 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 			IsGalleryPhoto: true,
 			IsApproved:     false,
 			CreatedAt:      time.Now(),
+			SourceFile:     input.Filename,
 		}
 
 		if err := fs.DB.Create(&photoRecord).Error; err != nil {

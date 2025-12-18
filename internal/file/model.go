@@ -144,6 +144,7 @@ type FileEditRequestPhoto struct {
 	ApprovedBy     string    `json:"approved_by"`
 	ApprovedAt     time.Time `json:"approved_at"`
 	CreatedAt      time.Time `json:"created_at"`
+	SourceFile     string    `json:"source_file"`
 }
 
 func (FileEditRequest) TableName() string {

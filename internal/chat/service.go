@@ -159,7 +159,7 @@ func matchesCommunities(rowData []byte, communities []string) bool {
 	}
 
 	// Assuming the key is "First Nation/Home", adjust if different
-	key := "First Nation/Home"
+	key := "First Nation/Community"
 	if val, ok := rowMap[key]; ok {
 		for _, c := range communities {
 			if c == val {
