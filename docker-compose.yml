@@ -6,13 +6,13 @@ services:
     ports:
       - "8080:8080"
     environment:
-      DB_HOST: 34.11.220.37
-      DB_PORT: 5432
-      DB_USER: postgres
-      DB_PASSWORD: Algoma@2024
-      DB_NAME: postgres
-      JWT_SECRET: 12DH9111hbhos5AW
-      GEMINI_KEY: AIzaSyBHsvcGZKwjuW0ohOjiBW7kBws8say3no0
+      DB_HOST: {}
+      DB_PORT: {}
+      DB_USER: {}
+      DB_PASSWORD: {}
+      DB_NAME: {}
+      JWT_SECRET: {}
+      GEMINI_KEY: {}
     depends_on:
       postgres:
         condition: service_healthy
