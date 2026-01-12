@@ -49,7 +49,21 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		raw := claims["communities"]
+
+		communities := []string{}
+		if raw != nil {
+			if arr, ok := raw.([]interface{}); ok {
+				for _, v := range arr {
+					if s, ok := v.(string); ok && s != "" {
+						communities = append(communities, s)
+					}
+				}
+			}
+		}
+
 		c.Set("userID", userID)
+		c.Set("communities", communities)
 		c.Next()
 	}
 }

@@ -88,6 +88,20 @@ type OTP struct {
 	CreatedAt time.Time `gorm:"autoCreateTime"`
 }
 
+type mediaZipRow struct {
+	ID               uint
+	RequestID        uint
+	RowID            int
+	PhotoURL         string
+	FileName         string
+	DocumentType     string // "photos" or "document"
+	DocumentCategory string
+
+	UserID    uint
+	UserFirst string
+	UserLast  string
+}
+
 type VerifyPasswordResponse struct {
 	Match bool `json:"match"`
 }

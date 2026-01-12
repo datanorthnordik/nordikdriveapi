@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"nordik-drive-api/config"
+	"nordik-drive-api/internal/admin"
 	"nordik-drive-api/internal/auth"
 	"nordik-drive-api/internal/chat"
 	"nordik-drive-api/internal/community"
@@ -63,12 +64,15 @@ func main() {
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Backend:  genai.BackendVertexAI,
 		Project:  "planar-ray-472112-e8", // <-- REPLACE with your Project ID
-		Location: "us-west1",             // <-- REPLACE with your project location
+		Location: "global",               // <-- REPLACE with your project location
 		// Note: No APIKey is needed when using Vertex AI with ADC.
 	})
 
 	chatService := &chat.ChatService{DB: db, Client: client}
 	chat.RegisterRoutes(r, chatService)
+
+	adminService := &admin.AdminService{DB: db}
+	admin.RegisterRoutes(r, adminService)
 
 	// --- Cloud Run expects plain HTTP, on $PORT, bind to 0.0.0.0 ---
 	port := os.Getenv("PORT")

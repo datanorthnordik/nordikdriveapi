@@ -12,13 +12,12 @@ type LogController struct {
 
 func (lc *LogController) GetLogs(c *gin.Context) {
 	var input LogFilterInput
-
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	logs, total, totalPages, err := lc.LogService.GetLogs(input)
+	logs, aggs, total, totalPages, err := lc.LogService.GetLogs(input)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -30,5 +29,6 @@ func (lc *LogController) GetLogs(c *gin.Context) {
 		"page_size":   input.PageSize,
 		"total":       total,
 		"total_pages": totalPages,
+		"aggregates":  aggs, // ✅ NEW
 	})
 }

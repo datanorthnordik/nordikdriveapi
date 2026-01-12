@@ -3,6 +3,7 @@ package file
 import (
 	"time"
 
+	"cloud.google.com/go/storage"
 	"gorm.io/datatypes"
 )
 
@@ -74,17 +75,19 @@ type FileWithUser struct {
 }
 
 type FileEditRequest struct {
-	RequestID uint      `gorm:"primaryKey;autoIncrement" json:"request_id"`
-	RowID     int       `gorm:"not null" json:"row_id"`
-	UserID    uint      `gorm:"not null" json:"user_id"`
-	Status    string    `gorm:"type:varchar(50);default:'pending'" json:"status"`
-	FirstName string    `gorm:"type:varchar(100);column:firstname" json:"firstname"`
-	LastName  string    `gorm:"type:varchar(100);column:lastname" json:"lastname"`
-	Consent   bool      `gorm:"default:false" json:"consent"`
-	CreatedAt time.Time `gorm:"autoCreateTime" json:"created_at"`
-	IsEdited  bool      `gorm:"default:false" json:"is_edited"`
+	RequestID      uint      `gorm:"primaryKey;autoIncrement" json:"request_id"`
+	RowID          int       `gorm:"not null" json:"row_id"`
+	UserID         uint      `gorm:"not null" json:"user_id"`
+	Status         string    `gorm:"type:varchar(50);default:'pending'" json:"status"`
+	FirstName      string    `gorm:"type:varchar(100);column:firstname" json:"firstname"`
+	LastName       string    `gorm:"type:varchar(100);column:lastname" json:"lastname"`
+	Consent        bool      `gorm:"default:false" json:"consent"`
+	ArchiveConsent bool      `gorm:"column:archive_consent;default:false" json:"archive_consent"`
+	CreatedAt      time.Time `gorm:"autoCreateTime" json:"created_at"`
+	IsEdited       bool      `gorm:"default:false" json:"is_edited"`
+	FileID         uint      `gorm:"column:file_id;not null;" json:"file_id"`
+	ApprovedBy     *int      `gorm:"column:approved_by" json:"approved_by"`
 }
-
 type FileEditRequestDetails struct {
 	ID        uint      `gorm:"primaryKey;autoIncrement" json:"id"`
 	RequestID uint      `gorm:"not null" json:"request_id"`
@@ -113,16 +116,31 @@ type FileEditRequestWithUser struct {
 }
 
 type EditRequestInput struct {
-	FileID           uint                         `json:"file_id"`
-	Filename         string                       `json:"filename"`
-	Changes          map[string][]EditChangeInput `json:"changes"`
-	FirstName        string                       `json:"firstname"`
-	LastName         string                       `json:"lastname"`
-	RowID            int                          `json:"row_id"`
-	PhotosInApp      []string                     `json:"photos_in_app"`
-	PhotosForGallery []string                     `json:"photos_for_gallery_review"`
-	Consent          bool                         `json:"consent"`
-	IsEdited         bool                         `gorm:"default:false" json:"is_edited"`
+	FileID    uint                         `json:"file_id"`
+	Filename  string                       `json:"filename"`
+	Changes   map[string][]EditChangeInput `json:"changes"`
+	FirstName string                       `json:"firstname"`
+	LastName  string                       `json:"lastname"`
+	RowID     int                          `json:"row_id"`
+
+	PhotosInApp      []string `json:"photos_in_app"`
+	PhotosForGallery []string `json:"photos_for_gallery_review"`
+
+	Consent        bool `json:"consent"`
+	ArchiveConsent bool `json:"archive_consent"`
+
+	IsEdited bool `json:"is_edited"`
+
+	Documents []DocumentInput `json:"documents"`
+}
+
+type DocumentInput struct {
+	DocumentType     string `json:"document_type"`
+	DocumentCategory string `json:"document_category"`
+	Filename         string `json:"filename"`
+	MimeType         string `json:"mime_type"`
+	Size             int64  `json:"size"`
+	DataBase64       string `json:"data_base64"`
 }
 
 type EditChangeInput struct {
@@ -133,18 +151,26 @@ type EditChangeInput struct {
 }
 
 type FileEditRequestPhoto struct {
-	ID             uint      `gorm:"primaryKey" json:"id"`
-	RequestID      uint      `json:"request_id"`
-	RowID          int       `json:"row_id"`
-	PhotoURL       string    `json:"photo_url"`
-	FileName       string    `json:"file_name"`
-	SizeBytes      int64     `json:"size_bytes"`
-	IsGalleryPhoto bool      `json:"is_gallery_photo"`
-	IsApproved     bool      `json:"is_approved"`
-	ApprovedBy     string    `json:"approved_by"`
-	ApprovedAt     time.Time `json:"approved_at"`
-	CreatedAt      time.Time `json:"created_at"`
-	SourceFile     string    `json:"source_file"`
+	ID               uint      `gorm:"primaryKey" json:"id"`
+	RequestID        uint      `json:"request_id"`
+	RowID            int       `json:"row_id"`
+	PhotoURL         string    `json:"photo_url"`
+	FileName         string    `json:"file_name"`
+	SizeBytes        int64     `json:"size_bytes"`
+	IsGalleryPhoto   bool      `json:"is_gallery_photo"`
+	IsApproved       bool      `json:"is_approved"`
+	ApprovedBy       string    `json:"approved_by"`
+	ApprovedAt       time.Time `json:"approved_at"`
+	CreatedAt        time.Time `json:"created_at"`
+	SourceFile       string    `json:"source_file"`
+	FileID           uint      `json:"file_id"`
+	DocumentType     string    `gorm:"type:varchar(20);default:'photos'" json:"document_type"`
+	DocumentCategory string    `gorm:"type:varchar(50)" json:"document_category"`
+}
+
+type gcsReadHandle struct {
+	Client *storage.Client
+	Reader *storage.Reader
 }
 
 func (FileEditRequest) TableName() string {

@@ -57,9 +57,18 @@ func (ac *AuthController) SignUp(c *gin.Context) {
 		return
 	}
 
-	uid := uint(user.ID)
+	uid := uint(newuser.ID)
 
-	if err := ac.LS.Log("INFO", "auth", "SIGNUP", fmt.Sprintf("Account created with email %s", user.Email), &uid, user); err != nil {
+	log := logs.SystemLog{
+		Level:       "INFO",
+		Service:     "auth",
+		Action:      "SIGNUP",
+		Message:     fmt.Sprintf("Account created with email %s", user.Email),
+		UserID:      &uid,
+		Communities: user.Community,
+	}
+
+	if err := ac.LS.Log(log, user); err != nil {
 		fmt.Printf("Failed to insert log: %v\n", err)
 	}
 
@@ -104,8 +113,9 @@ func (ac *AuthController) Login(c *gin.Context) {
 	// Short-lived access token
 	accessExp := time.Now().Add(15 * time.Minute)
 	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"user_id": user.ID,
-		"exp":     accessExp.Unix(),
+		"user_id":     user.ID,
+		"communities": user.Community,
+		"exp":         accessExp.Unix(),
 	})
 	accessTokenString, _ := accessToken.SignedString([]byte(cfg.JWTSecret))
 
@@ -116,8 +126,9 @@ func (ac *AuthController) Login(c *gin.Context) {
 	}
 	refreshExp := time.Now().Add(refreshDuration)
 	refreshToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"user_id": user.ID,
-		"exp":     refreshExp.Unix(),
+		"user_id":     user.ID,
+		"communities": user.Community,
+		"exp":         refreshExp.Unix(),
 	})
 	refreshTokenString, _ := refreshToken.SignedString([]byte(cfg.JWTSecret))
 
@@ -144,7 +155,16 @@ func (ac *AuthController) Login(c *gin.Context) {
 
 	uid := uint(user.ID)
 
-	if err := ac.LS.Log("INFO", "auth", "LOGIN", fmt.Sprintf("User logged in with email: %s", user.Email), &uid, req); err != nil {
+	log := logs.SystemLog{
+		Level:       "INFO",
+		Service:     "auth",
+		Action:      "LOGIN",
+		Message:     fmt.Sprintf("User logged in with email: %s", user.Email),
+		UserID:      &uid,
+		Communities: user.Community,
+	}
+
+	if err := ac.LS.Log(log, req); err != nil {
 		fmt.Printf("Failed to insert log: %v\n", err)
 	}
 
@@ -245,12 +265,25 @@ func (ac *AuthController) Refresh(c *gin.Context) {
 
 	claims := token.Claims.(jwt.MapClaims)
 	userID := int(claims["user_id"].(float64))
+	raw, ok := claims["communities"]
+	var communities []string
+
+	if ok && raw != nil {
+		if arr, ok := raw.([]interface{}); ok {
+			for _, v := range arr {
+				if s, ok := v.(string); ok {
+					communities = append(communities, s)
+				}
+			}
+		}
+	}
 
 	// Generate new access token
 	accessExp := time.Now().Add(15 * time.Minute)
 	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"user_id": userID,
-		"exp":     accessExp.Unix(),
+		"user_id":     userID,
+		"communities": communities,
+		"exp":         accessExp.Unix(),
 	})
 	accessTokenString, _ := accessToken.SignedString([]byte(cfg.JWTSecret))
 
@@ -328,7 +361,16 @@ func (ac *AuthController) VerifyPassword(c *gin.Context) {
 
 	uid := uint(user.ID)
 
-	if err := ac.LS.Log("INFO", "auth", "PASSWORD_VERIFICATION", fmt.Sprintf("Verified password for file access by : %s", user.Email), &uid, req); err != nil {
+	logs := logs.SystemLog{
+		Level:       "INFO",
+		Service:     "auth",
+		Action:      "PASSWORD_VERIFICATION",
+		Message:     fmt.Sprintf("Verified password for file access by : %s", user.Email),
+		UserID:      &uid,
+		Communities: user.Community,
+	}
+
+	if err := ac.LS.Log(logs, req); err != nil {
 		fmt.Printf("Failed to insert log: %v\n", err)
 	}
 
@@ -347,9 +389,30 @@ func (ac *AuthController) SendOTP(c *gin.Context) {
 		return
 	}
 
-	if _, err := ac.AuthService.SendOTP(req.Email); err != nil {
+	user, _, err := ac.AuthService.SendOTP(req.Email)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	if user == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user not found"})
+		return
+	}
+
+	uid := uint(user.ID)
+
+	logs := logs.SystemLog{
+		Level:       "INFO",
+		Service:     "auth",
+		Action:      "SEND_OTP",
+		Message:     fmt.Sprintf("Sent OTP to email: %s", req.Email),
+		UserID:      &uid,
+		Communities: user.Community,
+	}
+
+	if err := ac.LS.Log(logs, req); err != nil {
+		fmt.Printf("Failed to insert log: %v\n", err)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "OTP sent successfully"})
@@ -363,9 +426,30 @@ func (ac *AuthController) ResetPassword(c *gin.Context) {
 		return
 	}
 
-	if err := ac.AuthService.ResetPassword(req.Email, req.OTP, req.Password); err != nil {
+	user, err := ac.AuthService.ResetPassword(req.Email, req.OTP, req.Password)
+
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	if user == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user not found"})
+		return
+	}
+
+	uid := uint(user.ID)
+	logs := logs.SystemLog{
+		Level:       "INFO",
+		Service:     "auth",
+		Action:      "RESET_PASSWORD",
+		Message:     fmt.Sprintf("Password reset for email: %s", req.Email),
+		UserID:      &uid,
+		Communities: user.Community,
+	}
+
+	if err := ac.LS.Log(logs, req); err != nil {
+		fmt.Printf("Failed to insert log: %v\n", err)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Password reset successfully"})

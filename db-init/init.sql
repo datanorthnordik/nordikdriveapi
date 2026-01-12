@@ -7,14 +7,16 @@ CREATE TABLE IF NOT EXISTS roles (
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     firstname VARCHAR(100) NOT NULL,
-    lastname VARCHAR(100) NOT NULL,
-    email VARCHAR(100) UNIQUE NOT NULL,
-    password TEXT NOT NULL,
-    role VARCHAR(100) NOT NULL DEFAULT 'User'
-        REFERENCES roles(role) ON DELETE CASCADE,
+    lastname  VARCHAR(100) NOT NULL,
+    email     VARCHAR(100) UNIQUE NOT NULL,
+    password  TEXT NOT NULL,
+    role      VARCHAR(100) NOT NULL DEFAULT 'User'
+      REFERENCES roles(role) ON DELETE CASCADE,
+    community TEXT[] NOT NULL DEFAULT '{}',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
 
 CREATE TABLE otps (
     id BIGINT PRIMARY KEY,
@@ -134,7 +136,7 @@ VALUES
 -- ('Muskoday First Nation'),
 -- ('Sagkeeng First Nation');
 
-CREATE TABLE logs (
+CREATE TABLE IF NOT EXISTS logs (
     id SERIAL PRIMARY KEY,
     level VARCHAR(20) NOT NULL,
     service VARCHAR(50) NOT NULL,
@@ -142,8 +144,14 @@ CREATE TABLE logs (
     action VARCHAR(50) NOT NULL,
     message TEXT NOT NULL,
     metadata JSONB NULL,
+
+    -- ✅ optional fields
+    filename VARCHAR(255) NULL,
+    communities TEXT[] NULL,
+
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
 
 CREATE TABLE file_edit_request (
     request_id SERIAL PRIMARY KEY,
@@ -152,30 +160,37 @@ CREATE TABLE file_edit_request (
     firstname VARCHAR(100),
     lastname VARCHAR(100),
     consent BOOLEAN DEFAULT FALSE,
+    archive_consent BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT NOW(),
     row_id INT NULL,
-    is_edited BOOLEAN DEFAULT TRUE
+    is_edited BOOLEAN DEFAULT TRUE,
+    file_id INT NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    approved_by VARCHAR(255) REFERENCES users(id) ON DELETE SET NULL,
+    community TEXT NULL,
+    uploader_community TEXT NULL
 );
 
 
+
 CREATE TABLE file_edit_request_photos (
-    id SERIAL PRIMARY KEY,
-
+     id SERIAL PRIMARY KEY,
     request_id INT NOT NULL,
-
 
     photo_url TEXT NOT NULL,
     file_name TEXT NOT NULL,
     size_bytes BIGINT NOT NULL,
 
     is_gallery_photo BOOLEAN DEFAULT FALSE,
-
     is_approved BOOLEAN DEFAULT FALSE,
     approved_by VARCHAR(255),
     approved_at TIMESTAMP,
-    row_id INT,
 
-    created_at TIMESTAMP DEFAULT NOW()
+    row_id INT,
+    file_id INT NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    created_at TIMESTAMP DEFAULT NOW(),
+
+    document_type VARCHAR(20) NOT NULL DEFAULT 'photos',
+    document_category VARCHAR(50) NULL,  
 );
 
 
@@ -187,8 +202,8 @@ CREATE TABLE IF NOT EXISTS file_edit_request_details (
     file_id INT NOT NULL REFERENCES file(id) ON DELETE CASCADE,
     filename VARCHAR(255) NOT NULL,
 
-    row_id INT NULL,                 -- e.g., 15048 in your example
-    field_name VARCHAR(255) NOT NULL,    -- like "Parents Names"
+    row_id INT NULL,                
+    field_name VARCHAR(255) NOT NULL,
     old_value TEXT,
     new_value TEXT,
 

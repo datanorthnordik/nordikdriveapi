@@ -89,11 +89,11 @@ type AccessWithUser struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 
-func (s *AuthService) SendOTP(email string) (string, error) {
+func (s *AuthService) SendOTP(email string) (*Auth, string, error) {
 	// Check if user exists
 	var user Auth
 	if err := s.DB.Where("email = ?", email).First(&user).Error; err != nil {
-		return "", errors.New("user not found")
+		return nil, "", errors.New("user not found")
 	}
 
 	// Generate 6-digit OTP
@@ -105,7 +105,7 @@ func (s *AuthService) SendOTP(email string) (string, error) {
 		Code:  otp,
 	}
 	if err := s.DB.Create(&record).Error; err != nil {
-		return "", err
+		return nil, "", err
 	}
 
 	from := s.CFG.GmailUser
@@ -145,37 +145,42 @@ func (s *AuthService) SendOTP(email string) (string, error) {
 	err := smtp.SendMail(smtpHost+":"+smtpPort, auth, from, to, message)
 	if err != nil {
 		log.Printf("Error sending email to %s: %v\n", user.Email, err)
-		return "", errors.New("failed to send OTP email")
+		return nil, "", errors.New("failed to send OTP email")
 	}
 
-	return otp, nil
+	return &user, otp, nil
 }
 
 // Verify OTP and reset password
-func (s *AuthService) ResetPassword(email, code, newPassword string) error {
+func (s *AuthService) ResetPassword(email, code, newPassword string) (*Auth, error) {
 	// Get latest OTP for email
 	var otp OTP
 	if err := s.DB.Where("email = ? AND code = ?", email, code).
 		Order("created_at desc").First(&otp).Error; err != nil {
-		return errors.New("invalid OTP")
+		return nil, errors.New("invalid OTP")
+	}
+
+	var user Auth
+	if err := s.DB.Where("email = ?", email).First(&user).Error; err != nil {
+		return nil, errors.New("user not found")
 	}
 
 	// Check if OTP is older than 10 minutes
 	if time.Since(otp.CreatedAt) > 10*time.Minute {
-		return errors.New("OTP expired")
+		return nil, errors.New("OTP expired")
 	}
 
 	// Update user password
 	hashed, err := util.HashPassword(newPassword)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := s.DB.Model(&Auth{}).Where("email = ?", email).
 		Update("password", hashed).Error; err != nil {
-		return err
+		return nil, err
 	}
 
-	return nil
+	return &user, nil
 }
 
 // func (s *AuthService) GetAccessRequests(userID int) ([]AccessWithUser, error) {

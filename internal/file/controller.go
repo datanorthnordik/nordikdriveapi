@@ -2,6 +2,7 @@ package file
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"nordik-drive-api/internal/logs"
 	"strconv"
@@ -71,7 +72,28 @@ func (fc *FileController) UploadFiles(c *gin.Context) {
 
 	uid := uint(userID)
 
-	if err := fc.LogService.Log("INFO", "file", "UPLOAD_FILE", fmt.Sprintf("File uploaded : %s", strings.Join(input.FileNames, "")), &uid, nil); err != nil {
+	communitiesVal, exists := c.Get("communities")
+	if !exists {
+		communitiesVal = []string{}
+	}
+
+	communities, ok := communitiesVal.([]string)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid communities"})
+		return
+	}
+
+	log := logs.SystemLog{
+		Level:       "INFO",
+		Service:     "file",
+		UserID:      &uid,
+		Action:      "UPLOAD_FILE",
+		Message:     fmt.Sprintf("Files uploaded: %s", strings.Join(input.FileNames, ",")),
+		Communities: communities,
+		Filename:    &input.FileNames[0],
+	}
+
+	if err := fc.LogService.Log(log, nil); err != nil {
 		fmt.Printf("Failed to insert log: %v\n", err)
 	}
 
@@ -157,7 +179,28 @@ func (fc *FileController) GetFileData(c *gin.Context) {
 
 	uid := uint(userID)
 
-	if err := fc.LogService.Log("INFO", "file", "ACCESS_FILE", fmt.Sprintf("File accessed : %s", fileName), &uid, nil); err != nil {
+	communitiesVal, exists := c.Get("communities")
+	if !exists {
+		communitiesVal = []string{}
+	}
+
+	communities, ok := communitiesVal.([]string)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid communities"})
+		return
+	}
+
+	log := logs.SystemLog{
+		Level:       "INFO",
+		Service:     "file",
+		UserID:      &uid,
+		Action:      "ACCESS_FILE",
+		Message:     fmt.Sprintf("File accessed : %s", fileName),
+		Communities: communities,
+		Filename:    &fileName,
+	}
+
+	if err := fc.LogService.Log(log, nil); err != nil {
 		fmt.Printf("Failed to insert log: %v\n", err)
 	}
 
@@ -192,7 +235,28 @@ func (fc *FileController) DeleteFile(c *gin.Context) {
 
 	uid := uint(userID)
 
-	if err := fc.LogService.Log("WARN", "file", "DELETE_FILE", fmt.Sprintf("File deleted : %s", file.Filename), &uid, nil); err != nil {
+	communitiesVal, exists := c.Get("communities")
+	if !exists {
+		communitiesVal = []string{}
+	}
+
+	communities, ok := communitiesVal.([]string)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid communities"})
+		return
+	}
+
+	log := logs.SystemLog{
+		Level:       "WARN",
+		Service:     "file",
+		UserID:      &uid,
+		Action:      "DELETE_FILE",
+		Message:     fmt.Sprintf("File deleted : %s", file.Filename),
+		Communities: communities,
+		Filename:    &file.Filename,
+	}
+
+	if err := fc.LogService.Log(log, nil); err != nil {
 		fmt.Printf("Failed to insert log: %v\n", err)
 	}
 
@@ -229,7 +293,28 @@ func (fc *FileController) ResetFile(c *gin.Context) {
 
 	uid := uint(userID)
 
-	if err := fc.LogService.Log("INFO", "file", "RESTORE_FILE", fmt.Sprintf("File restored : %s", file.Filename), &uid, nil); err != nil {
+	communitiesVal, exists := c.Get("communities")
+	if !exists {
+		communitiesVal = []string{}
+	}
+
+	communities, ok := communitiesVal.([]string)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid communities"})
+		return
+	}
+
+	log := logs.SystemLog{
+		Level:       "INFO",
+		Service:     "file",
+		UserID:      &uid,
+		Action:      "RESTORE_FILE",
+		Message:     fmt.Sprintf("File restored : %s", file.Filename),
+		Communities: communities,
+		Filename:    &file.Filename,
+	}
+
+	if err := fc.LogService.Log(log, nil); err != nil {
 		fmt.Printf("Failed to insert log: %v\n", err)
 	}
 
@@ -264,7 +349,27 @@ func (fc *FileController) CreateAccess(c *gin.Context) {
 
 	uid := uint(userID)
 
-	if err := fc.LogService.Log("INFO", "file", "GRAND_FILE_ACCESS", "file access granted", &uid, nil); err != nil {
+	communitiesVal, exists := c.Get("communities")
+	if !exists {
+		communitiesVal = []string{}
+	}
+
+	communities, ok := communitiesVal.([]string)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid communities"})
+		return
+	}
+
+	log := logs.SystemLog{
+		Level:       "INFO",
+		Service:     "file",
+		UserID:      &uid,
+		Action:      "GRAND_FILE_ACCESS",
+		Message:     "file access granted",
+		Communities: communities,
+	}
+
+	if err := fc.LogService.Log(log, input); err != nil {
 		fmt.Printf("Failed to insert log: %v\n", err)
 	}
 
@@ -295,7 +400,27 @@ func (fc *FileController) DeleteAccess(c *gin.Context) {
 
 	uid := uint(userID)
 
-	if err := fc.LogService.Log("WARN", "file", "REVOKE_FILE_ACCESS", "file access revoked", &uid, nil); err != nil {
+	communitiesVal, exists := c.Get("communities")
+	if !exists {
+		communitiesVal = []string{}
+	}
+
+	communities, ok := communitiesVal.([]string)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid communities"})
+		return
+	}
+
+	log := logs.SystemLog{
+		Level:       "WARN",
+		Service:     "file",
+		UserID:      &uid,
+		Action:      "REVOKE_FILE_ACCESS",
+		Message:     "file access revoked",
+		Communities: communities,
+	}
+
+	if err := fc.LogService.Log(log, nil); err != nil {
 		fmt.Printf("Failed to insert log: %v\n", err)
 	}
 
@@ -407,7 +532,28 @@ func (fc *FileController) ReplaceFile(c *gin.Context) {
 
 	uid := uint(userID)
 
-	if err := fc.LogService.Log("INFO", "file", "REPLACE_FILE", fmt.Sprintf("File replaced: %s", file.Filename), &uid, nil); err != nil {
+	communitiesVal, exists := c.Get("communities")
+	if !exists {
+		communitiesVal = []string{}
+	}
+
+	communities, ok := communitiesVal.([]string)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid communities"})
+		return
+	}
+
+	log := logs.SystemLog{
+		Level:       "INFO",
+		Service:     "file",
+		UserID:      &uid,
+		Action:      "REPLACE_FILE",
+		Message:     fmt.Sprintf("File replaced: %s", file.Filename),
+		Communities: communities,
+		Filename:    &file.Filename,
+	}
+
+	if err := fc.LogService.Log(log, nil); err != nil {
 		fmt.Printf("Failed to insert log: %v\n", err)
 	}
 
@@ -439,7 +585,28 @@ func (fc *FileController) RevertFile(c *gin.Context) {
 
 	uid := uint(userID)
 
-	if err := fc.LogService.Log("INFO", "file", "REVERT_FILE", fmt.Sprintf("%s file reverted to %d version", input.Filename, input.Version), &uid, nil); err != nil {
+	communitiesVal, exists := c.Get("communities")
+	if !exists {
+		communitiesVal = []string{}
+	}
+
+	communities, ok := communitiesVal.([]string)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid communities"})
+		return
+	}
+
+	log := logs.SystemLog{
+		Level:       "INFO",
+		Service:     "file",
+		UserID:      &uid,
+		Action:      "REVERT_FILE",
+		Message:     fmt.Sprintf("%s file reverted to %d version", input.Filename, input.Version),
+		Communities: communities,
+		Filename:    &input.Filename,
+	}
+
+	if err := fc.LogService.Log(log, nil); err != nil {
 		fmt.Printf("Failed to insert log: %v\n", err)
 	}
 
@@ -484,6 +651,12 @@ func (fc *FileController) CreateEditRequest(c *gin.Context) {
 }
 
 func (fc *FileController) GetPendingEditRequests(c *gin.Context) {
+	_, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user ID not found"})
+		return
+	}
+
 	requests, err := fc.FileService.GetPendingEditRequests()
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -496,6 +669,18 @@ func (fc *FileController) GetPendingEditRequests(c *gin.Context) {
 }
 
 func (fc *FileController) ApproveEditRequest(c *gin.Context) {
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user ID not found"})
+		return
+	}
+
+	userID, ok := userIDVal.(float64)
+
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
 	var input struct {
 		RequestID uint                     `json:"request_id"`
 		Updates   []FileEditRequestDetails `json:"updates"`
@@ -506,7 +691,7 @@ func (fc *FileController) ApproveEditRequest(c *gin.Context) {
 		return
 	}
 
-	if err := fc.FileService.ApproveEditRequest(input.RequestID, input.Updates); err != nil {
+	if err := fc.FileService.ApproveEditRequest(input.RequestID, input.Updates, uint(userID)); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -559,6 +744,27 @@ func (fc *FileController) GetPhotosByRequest(c *gin.Context) {
 	})
 }
 
+func (fc *FileController) GetDocsByRequest(c *gin.Context) {
+	requestIDParam := c.Param("requestId")
+	requestIDInt, err := strconv.Atoi(requestIDParam)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request ID"})
+		return
+	}
+
+	requestID := uint(requestIDInt)
+
+	docs, err := fc.FileService.GetDocsByRequest(requestID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"docs": docs,
+	})
+}
+
 func (fc *FileController) GetPhotosByRow(c *gin.Context) {
 	rowIDParam := c.Param("rowId")
 	rowIDInt, err := strconv.Atoi(rowIDParam)
@@ -580,6 +786,27 @@ func (fc *FileController) GetPhotosByRow(c *gin.Context) {
 	})
 }
 
+func (fc *FileController) GetDocsByRow(c *gin.Context) {
+	rowIDParam := c.Param("rowId")
+	rowIDInt, err := strconv.Atoi(rowIDParam)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid row ID"})
+		return
+	}
+
+	rowID := uint(rowIDInt)
+
+	docs, err := fc.FileService.GetDocsByRow(rowID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"docs": docs,
+	})
+}
+
 func (fc *FileController) GetPhoto(c *gin.Context) {
 	photoIDParam := c.Param("photoId")
 	photoID, err := strconv.Atoi(photoIDParam)
@@ -596,4 +823,94 @@ func (fc *FileController) GetPhoto(c *gin.Context) {
 
 	// Return as image
 	c.Data(http.StatusOK, contentType, data)
+}
+
+func (fc *FileController) GetDoc(c *gin.Context) {
+	docIDParam := c.Param("docId")
+	docID, err := strconv.Atoi(docIDParam)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid doc ID"})
+		return
+	}
+
+	data, contentType, filename, err := fc.FileService.GetDocBytes(uint(docID))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Inline for PDF/images, attachment for others
+	disposition := "attachment"
+	if strings.HasPrefix(contentType, "image/") || contentType == "application/pdf" {
+		disposition = "inline"
+	}
+
+	// Important headers
+	c.Header("Content-Type", contentType)
+	c.Header("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, sanitizeFilename(filename)))
+	c.Header("X-Content-Type-Options", "nosniff")
+
+	c.Data(http.StatusOK, contentType, data)
+}
+
+func sanitizeFilename(name string) string {
+	if name == "" {
+		return "document"
+	}
+	// remove path separators and quotes
+	name = strings.ReplaceAll(name, "/", "_")
+	name = strings.ReplaceAll(name, "\\", "_")
+	name = strings.ReplaceAll(name, `"`, "")
+	return name
+}
+
+func (fc *FileController) DownloadMediaByID(c *gin.Context) {
+	idStr := c.Param("id")
+	id64, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil || id64 == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	id := uint(id64)
+
+	kind := strings.TrimSpace(c.Query("kind")) // optional: photo|doc|document
+	handle, filename, contentType, disposition, err := fc.FileService.OpenMediaHandle(c.Request.Context(), id, kind)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	defer handle.Close()
+
+	// If GCS content-type missing, sniff first bytes and stream
+	if contentType == "" {
+		buf := make([]byte, 512)
+		n, _ := io.ReadFull(handle.Reader, buf)
+		if n > 0 {
+			contentType = http.DetectContentType(buf[:n])
+		} else {
+			contentType = "application/octet-stream"
+		}
+
+		disposition = "attachment"
+		if strings.HasPrefix(contentType, "image/") || contentType == "application/pdf" {
+			disposition = "inline"
+		}
+
+		c.Header("Content-Type", contentType)
+		c.Header("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, sanitizeFilename(filename)))
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("Cache-Control", "no-store")
+
+		// write sniffed bytes first, then rest
+		_, _ = c.Writer.Write(buf[:n])
+		_, _ = io.Copy(c.Writer, handle.Reader)
+		return
+	}
+
+	c.Header("Content-Type", contentType)
+	c.Header("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, sanitizeFilename(filename)))
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Cache-Control", "no-store")
+
+	_, _ = io.Copy(c.Writer, handle.Reader)
 }

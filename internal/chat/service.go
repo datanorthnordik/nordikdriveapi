@@ -65,9 +65,32 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 
 	ctx := context.Background()
 
-	// Compose prompt
-	prompt := question + "\n\nFile name: " + filename +
-		"\n\nAnswer the question based on file data. Please don't take extra data from internet. Don't answer anything technical such as JSON response and details about the file (file name, columns etc...): " + string(fileDataJSON)
+	styleInstruction := `
+You are a helpful assistant answering a community data question for a non-technical user.
+
+Style requirements:
+- Answer like a human: natural, warm, and conversational.
+- Prefer short paragraphs over bullet points.
+- Do NOT use bullet points unless the user explicitly asks for a list.
+- Do NOT sound robotic or overly formal. Avoid phrases like "Based on the data provided..." or "According to the dataset..."
+- Do NOT mention JSON, database, columns, file name, file version, or any technical details.
+- If the answer is not present in the provided data, say so clearly and ask 1 short follow-up question if needed.
+
+Accuracy requirements:
+- Use ONLY the provided data below. Do not use the internet or outside knowledge.
+- If you are uncertain, be transparent rather than guessing.
+
+Answer format:
+- Start with a direct answer in 1–2 sentences.
+- Provide as much detail as possible based on the data.
+`
+
+	prompt := fmt.Sprintf(
+		"%s\n\nUser question:\n%s\n\nDATA (only source of truth):\n%s",
+		strings.TrimSpace(styleInstruction),
+		strings.TrimSpace(question),
+		string(fileDataJSON),
+	)
 
 	var response string
 
@@ -158,15 +181,23 @@ func matchesCommunities(rowData []byte, communities []string) bool {
 		return false
 	}
 
-	// Assuming the key is "First Nation/Home", adjust if different
 	key := "First Nation/Community"
-	if val, ok := rowMap[key]; ok {
-		for _, c := range communities {
-			if c == val {
-				return true
-			}
-		}
+	rawVal, ok := rowMap[key]
+	if !ok || rawVal == nil {
+		return false
 	}
 
+	valStr, ok := rawVal.(string)
+	if !ok {
+		return false
+	}
+
+	valStr = strings.TrimSpace(valStr)
+
+	for _, c := range communities {
+		if strings.TrimSpace(c) == valStr {
+			return true
+		}
+	}
 	return false
 }

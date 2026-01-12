@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net/http"
 	"nordik-drive-api/internal/auth"
 	"nordik-drive-api/internal/util"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -578,14 +580,16 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 
 	// Step 1: Insert main request
 	request := FileEditRequest{
-		UserID:    userID,
-		Status:    "pending",
-		CreatedAt: time.Now(),
-		FirstName: input.FirstName,
-		LastName:  input.LastName,
-		Consent:   input.Consent,
-		RowID:     input.RowID,    // 0 allowed
-		IsEdited:  input.IsEdited, // should come from payload
+		UserID:         userID,
+		Status:         "pending",
+		CreatedAt:      time.Now(),
+		FirstName:      input.FirstName,
+		LastName:       input.LastName,
+		Consent:        input.Consent,
+		ArchiveConsent: input.ArchiveConsent,
+		RowID:          input.RowID,
+		IsEdited:       input.IsEdited,
+		FileID:         input.FileID,
 	}
 
 	// Keep as-is; if you ever see bool issues, use Select("*") here.
@@ -651,15 +655,18 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 		}
 
 		photoRecord := FileEditRequestPhoto{
-			RequestID:      request.RequestID,
-			RowID:          rowId, // 0 for new request, as you want
-			PhotoURL:       url,
-			FileName:       fileName,
-			SizeBytes:      sizeBytes,
-			IsGalleryPhoto: false,
-			IsApproved:     false,
-			CreatedAt:      time.Now(),
-			SourceFile:     input.Filename,
+			RequestID:        request.RequestID,
+			RowID:            rowId, // 0 for new request, as you want
+			PhotoURL:         url,
+			FileName:         fileName,
+			SizeBytes:        sizeBytes,
+			IsGalleryPhoto:   false,
+			IsApproved:       false,
+			CreatedAt:        time.Now(),
+			SourceFile:       input.Filename,
+			FileID:           input.FileID,
+			DocumentType:     "photos",
+			DocumentCategory: "",
 		}
 
 		if err := fs.DB.Create(&photoRecord).Error; err != nil {
@@ -685,18 +692,75 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 		}
 
 		photoRecord := FileEditRequestPhoto{
-			RequestID:      request.RequestID,
-			RowID:          rowId, // 0 for new request
-			PhotoURL:       url,
-			FileName:       fileName,
-			SizeBytes:      sizeBytes,
-			IsGalleryPhoto: true,
-			IsApproved:     false,
-			CreatedAt:      time.Now(),
-			SourceFile:     input.Filename,
+			RequestID:        request.RequestID,
+			RowID:            rowId, // 0 for new request
+			PhotoURL:         url,
+			FileName:         fileName,
+			SizeBytes:        sizeBytes,
+			IsGalleryPhoto:   true,
+			IsApproved:       false,
+			CreatedAt:        time.Now(),
+			SourceFile:       input.Filename,
+			FileID:           input.FileID,
+			DocumentType:     "photos",
+			DocumentCategory: "",
 		}
 
 		if err := fs.DB.Create(&photoRecord).Error; err != nil {
+			return nil, err
+		}
+	}
+
+	for i, doc := range input.Documents {
+		// only accept document_type=document (ignore photos if any client sends)
+		docType := doc.DocumentType
+		if docType == "" {
+			docType = "document"
+		}
+		if docType != "document" {
+			continue
+		}
+
+		// name + path
+		safeCategory := doc.DocumentCategory
+		if safeCategory == "" {
+			safeCategory = "other_document"
+		}
+
+		fileName := fmt.Sprintf("%s_%s_%s_doc_%d_%s",
+			input.FirstName,
+			input.LastName,
+			timestamp,
+			i+1,
+			doc.Filename,
+		)
+
+		objectPath := fmt.Sprintf("%s/%s", basePrefix, fileName)
+
+		// ✅ You can reuse UploadPhotoToGCS if it supports any base64 mime.
+		// Better rename it to UploadBase64ToGCS.
+		url, sizeBytes, err := util.UploadPhotoToGCS(doc.DataBase64, bucket, objectPath)
+		if err != nil {
+			return nil, err
+		}
+
+		rec := FileEditRequestPhoto{
+			RequestID:      request.RequestID,
+			RowID:          rowId,
+			PhotoURL:       url,
+			FileName:       fileName,
+			SizeBytes:      sizeBytes,
+			IsGalleryPhoto: false,
+			IsApproved:     false,
+			CreatedAt:      time.Now(),
+			SourceFile:     input.Filename,
+			FileID:         input.FileID,
+
+			DocumentType:     "document",
+			DocumentCategory: safeCategory,
+		}
+
+		if err := fs.DB.Create(&rec).Error; err != nil {
 			return nil, err
 		}
 	}
@@ -717,10 +781,11 @@ func (fs *FileService) GetPendingEditRequests() ([]FileEditRequestWithUser, erro
 		ELastName  string `gorm:"column:elastname"`
 		IsEdited   bool   `gorm:"default:true"`
 		Consent    bool
+		FileID     uint `gorm:"column:file_id"`
 	}
 
 	err := fs.DB.Table("file_edit_request").
-		Select("file_edit_request.request_id, file_edit_request.row_id, file_edit_request.user_id, users.firstname, users.lastname, file_edit_request.status, file_edit_request.created_at, file_edit_request.firstname as efirstname, file_edit_request.lastname as elastname, file_edit_request.is_edited, file_edit_request.consent").
+		Select("file_edit_request.request_id, file_edit_request.row_id, file_edit_request.user_id, users.firstname, users.lastname, file_edit_request.status, file_edit_request.created_at, file_edit_request.firstname as efirstname, file_edit_request.lastname as elastname, file_edit_request.is_edited, file_edit_request.consent, file_edit_request.file_id").
 		Joins("JOIN users ON users.id = file_edit_request.user_id").
 		Where("file_edit_request.status = ?", "pending").
 		Order("file_edit_request.created_at DESC").
@@ -760,7 +825,7 @@ func (fs *FileService) GetPendingEditRequests() ([]FileEditRequestWithUser, erro
 	return final, nil
 }
 
-func (fs *FileService) ApproveEditRequest(requestID uint, updates []FileEditRequestDetails) error {
+func (fs *FileService) ApproveEditRequest(requestID uint, updates []FileEditRequestDetails, userId uint) error {
 	return fs.DB.Transaction(func(tx *gorm.DB) error {
 
 		// 0) Update changed details (new_value) coming from UI
@@ -782,9 +847,6 @@ func (fs *FileService) ApproveEditRequest(requestID uint, updates []FileEditRequ
 		var allDetails []FileEditRequestDetails
 		if err := tx.Where("request_id = ?", requestID).Find(&allDetails).Error; err != nil {
 			return err
-		}
-		if len(allDetails) == 0 {
-			return fmt.Errorf("no details found for request_id=%d", requestID)
 		}
 
 		// 3) If is_edited=false => create new FileData row FIRST, use its ID as rowID
@@ -901,10 +963,12 @@ func (fs *FileService) ApproveEditRequest(requestID uint, updates []FileEditRequ
 			}
 		}
 
-		// 5) Mark request as approved
 		if err := tx.Model(&FileEditRequest{}).
 			Where("request_id = ?", requestID).
-			Update("status", "approved").Error; err != nil {
+			Updates(map[string]interface{}{
+				"status":      "approved",
+				"approved_by": userId,
+			}).Error; err != nil {
 			return err
 		}
 
@@ -915,21 +979,39 @@ func (fs *FileService) ApproveEditRequest(requestID uint, updates []FileEditRequ
 func (fs *FileService) GetPhotosByRequest(requestID uint) ([]FileEditRequestPhoto, error) {
 	var photos []FileEditRequestPhoto
 
-	if err := fs.DB.Where("request_id = ?", requestID).Find(&photos).Error; err != nil {
+	if err := fs.DB.Where("request_id = ? AND document_type = ?", requestID, "photos").Find(&photos).Error; err != nil {
 		return nil, err
 	}
 
 	return photos, nil
 }
 
+func (fs *FileService) GetDocsByRequest(requestID uint) ([]FileEditRequestPhoto, error) {
+	var documents []FileEditRequestPhoto
+
+	if err := fs.DB.Where("request_id = ? AND document_type = ?", requestID, "document").Find(&documents).Error; err != nil {
+		return nil, err
+	}
+	return documents, nil
+}
+
 func (fs *FileService) GetPhotosByRow(requestID uint) ([]FileEditRequestPhoto, error) {
 	var photos []FileEditRequestPhoto
 
-	if err := fs.DB.Where("row_id = ? and is_approved = ?", requestID, true).Find(&photos).Error; err != nil {
+	if err := fs.DB.Where("row_id = ? and is_approved = ? and document_type = ?", requestID, true, "photos").Find(&photos).Error; err != nil {
 		return nil, err
 	}
 
 	return photos, nil
+}
+
+func (fs *FileService) GetDocsByRow(requestID uint) ([]FileEditRequestPhoto, error) {
+	var documents []FileEditRequestPhoto
+
+	if err := fs.DB.Where("row_id = ? and is_approved = ? and document_type = ?", requestID, true, "document").Find(&documents).Error; err != nil {
+		return nil, err
+	}
+	return documents, nil
 }
 
 func (fs *FileService) GetPhotoBytes(photoID uint) ([]byte, string, error) {
@@ -1009,4 +1091,247 @@ func (fs *FileService) ReviewPhotos(approved []uint, rejected []uint, reviewer s
 	}
 
 	return nil
+}
+
+func (fs *FileService) GetDocBytes(docID uint) ([]byte, string, string, error) {
+	var doc FileEditRequestPhoto
+
+	// 1) Fetch record (docs are stored in file_edit_request_photos)
+	if err := fs.DB.First(&doc, docID).Error; err != nil {
+		return nil, "", "", err
+	}
+
+	// Optional safety: ensure it's a "document"
+	// (remove if you want same endpoint to serve both)
+	if doc.DocumentType != "document" {
+		return nil, "", "", fmt.Errorf("requested item is not a document")
+	}
+
+	bucketName := os.Getenv("BUCKET_NAME")
+	if bucketName == "" {
+		return nil, "", "", fmt.Errorf("BUCKET_NAME env not set")
+	}
+
+	// 2) Extract object path from gs://bucket/OBJECT_PATH
+	prefix := "gs://" + bucketName + "/"
+	objectPath := strings.TrimPrefix(doc.PhotoURL, prefix)
+
+	ctx := context.Background()
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		return nil, "", "", err
+	}
+	defer client.Close()
+
+	// 3) Read file from GCS
+	rc, err := client.Bucket(bucketName).Object(objectPath).NewReader(ctx)
+	if err != nil {
+		return nil, "", "", err
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	contentType := rc.ContentType()
+	if contentType == "" {
+		// fallback (optional) if GCS contentType missing
+		contentType = http.DetectContentType(data)
+	}
+
+	// Prefer DB filename if present
+	filename := doc.FileName
+	if filename == "" {
+		filename = path.Base(objectPath)
+	}
+
+	return data, contentType, filename, nil
+}
+
+func (h *gcsReadHandle) Close() error {
+	if h.Reader != nil {
+		_ = h.Reader.Close()
+	}
+	if h.Client != nil {
+		_ = h.Client.Close()
+	}
+	return nil
+}
+
+// OpenMediaHandle opens a streaming reader for a FileEditRequestPhoto row by its ID.
+// kind is optional; if provided it enforces type ("photo" => DocumentType must be "photos",
+// "doc"/"document" => DocumentType must be "document")
+func (fs *FileService) OpenMediaHandle(ctx context.Context, id uint, kind string) (*gcsReadHandle, string, string, string, error) {
+	var rec FileEditRequestPhoto
+	if err := fs.DB.First(&rec, id).Error; err != nil {
+		return nil, "", "", "", err
+	}
+
+	// Optional guard on kind
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	if kind != "" {
+		if kind == "photo" && rec.DocumentType != "photos" {
+			return nil, "", "", "", fmt.Errorf("requested item is not a photo")
+		}
+		if (kind == "doc" || kind == "document") && rec.DocumentType != "document" {
+			return nil, "", "", "", fmt.Errorf("requested item is not a document")
+		}
+	}
+
+	// Parse gs://bucket/object
+	bucketFromURL, objectPath, err := parseGSURL(rec.PhotoURL)
+	if err != nil {
+		return nil, "", "", "", err
+	}
+
+	// If BUCKET_NAME is set, prefer it ONLY if URL bucket is empty (normally URL bucket exists)
+	bucketName := bucketFromURL
+	if bucketName == "" {
+		bucketName = os.Getenv("BUCKET_NAME")
+	}
+	if bucketName == "" {
+		return nil, "", "", "", fmt.Errorf("bucket name not found (gs url + BUCKET_NAME empty)")
+	}
+
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		return nil, "", "", "", err
+	}
+
+	reader, err := client.Bucket(bucketName).Object(objectPath).NewReader(ctx)
+	if err != nil {
+		_ = client.Close()
+		return nil, "", "", "", err
+	}
+
+	contentType := reader.ContentType()
+	if contentType == "" {
+		// controller will sniff if needed
+		contentType = ""
+	}
+
+	filename := strings.TrimSpace(rec.FileName)
+	if filename == "" {
+		filename = path.Base(objectPath)
+		if filename == "" {
+			filename = fmt.Sprintf("file_%d", rec.ID)
+		}
+	}
+
+	disposition := "attachment"
+	if strings.HasPrefix(contentType, "image/") || contentType == "application/pdf" {
+		disposition = "inline"
+	}
+
+	// If contentType is still empty, controller will sniff and recompute disposition
+
+	return &gcsReadHandle{
+		Client: client,
+		Reader: reader,
+	}, filename, contentType, disposition, nil
+}
+
+// ✅ Missing helper you asked for: readFromGCS
+// Use this when you want full bytes (not recommended for huge files).
+func (fs *FileService) readFromGCS(gsURL string, dbFilename string) ([]byte, string, string, error) {
+	bucket, objectPath, err := parseGSURL(gsURL)
+	if err != nil {
+		return nil, "", "", err
+	}
+	if bucket == "" {
+		bucket = os.Getenv("BUCKET_NAME")
+	}
+	if bucket == "" {
+		return nil, "", "", fmt.Errorf("bucket name not found (gs url + BUCKET_NAME empty)")
+	}
+
+	ctx := context.Background()
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		return nil, "", "", err
+	}
+	defer client.Close()
+
+	rc, err := client.Bucket(bucket).Object(objectPath).NewReader(ctx)
+	if err != nil {
+		return nil, "", "", err
+	}
+	defer rc.Close()
+
+	data, err := ioReadAll(rc)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	contentType := rc.ContentType()
+	if contentType == "" {
+		contentType = http.DetectContentType(data)
+	}
+
+	filename := strings.TrimSpace(dbFilename)
+	if filename == "" {
+		filename = path.Base(objectPath)
+		if filename == "" {
+			filename = "file"
+		}
+	}
+
+	return data, contentType, filename, nil
+}
+
+// parseGSURL parses gs://bucket/object
+func parseGSURL(gsURL string) (bucket string, objectPath string, err error) {
+	gsURL = strings.TrimSpace(gsURL)
+	if gsURL == "" {
+		return "", "", fmt.Errorf("empty gs url")
+	}
+	if !strings.HasPrefix(gsURL, "gs://") {
+		return "", "", fmt.Errorf("invalid gs url (must start with gs://): %s", gsURL)
+	}
+
+	rest := strings.TrimPrefix(gsURL, "gs://") // bucket/object
+	slash := strings.Index(rest, "/")
+	if slash < 0 || slash == len(rest)-1 {
+		return "", "", fmt.Errorf("invalid gs url format: %s", gsURL)
+	}
+
+	bucket = rest[:slash]
+	objectPath = rest[slash+1:]
+	if strings.TrimSpace(objectPath) == "" {
+		return "", "", fmt.Errorf("empty object path in gs url: %s", gsURL)
+	}
+	return bucket, objectPath, nil
+}
+
+// small wrapper so you don't need to import io everywhere in this file
+func ioReadAll(r *storage.Reader) ([]byte, error) {
+	// storage.Reader implements io.Reader
+	// keep it simple:
+	buf := new(strings.Builder)
+	tmp := make([]byte, 32*1024)
+	for {
+		n, err := r.Read(tmp)
+		if n > 0 {
+			buf.Write(tmp[:n])
+		}
+		if err != nil {
+			if err.Error() == "EOF" {
+				break
+			}
+			if err == context.Canceled {
+				return nil, err
+			}
+			if err == context.DeadlineExceeded {
+				return nil, err
+			}
+			// many readers return io.EOF, but storage may wrap; we’ll treat any error containing EOF as EOF
+			if strings.Contains(strings.ToLower(err.Error()), "eof") {
+				break
+			}
+			return nil, err
+		}
+	}
+	return []byte(buf.String()), nil
 }
