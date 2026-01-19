@@ -166,8 +166,8 @@ CREATE TABLE file_edit_request (
     is_edited BOOLEAN DEFAULT TRUE,
     file_id INT NOT NULL REFERENCES file(id) ON DELETE CASCADE,
     approved_by VARCHAR(255) REFERENCES users(id) ON DELETE SET NULL,
-    community TEXT NULL,
-    uploader_community TEXT NULL
+    community TEXT[] NOT NULL DEFAULT '{}'::text[],
+    uploader_community TEXT[] NOT NULL DEFAULT '{}'::text[]
 );
 
 
@@ -232,5 +232,13 @@ FROM public.file_data
 WHERE file_id = 40
   AND row_data ? 'First Nation/Community'
   AND row_data ->> 'First Nation/Community' IS NOT NULL;
+
+
+CREATE INDEX IF NOT EXISTS idx_file_edit_request_community_gin
+  ON file_edit_request USING GIN (community);
+
+CREATE INDEX IF NOT EXISTS idx_file_edit_request_uploader_community_gin
+  ON file_edit_request USING GIN (uploader_community);
+
 
 

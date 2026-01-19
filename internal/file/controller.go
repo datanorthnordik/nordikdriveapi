@@ -650,22 +650,42 @@ func (fc *FileController) CreateEditRequest(c *gin.Context) {
 	})
 }
 
-func (fc *FileController) GetPendingEditRequests(c *gin.Context) {
+func (fc *FileController) GetEditRequests(c *gin.Context) {
 	_, exists := c.Get("userID")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "user ID not found"})
 		return
 	}
 
-	requests, err := fc.FileService.GetPendingEditRequests()
+	// Query params:
+	// ?status=approved,rejected
+	// ?user_id=26
+	statusRaw := strings.TrimSpace(c.Query("status"))
+	userIDRaw := strings.TrimSpace(c.Query("user_id"))
+
+	var statusPtr *string
+	if statusRaw != "" {
+		statusPtr = &statusRaw
+	}
+
+	var userIDPtr *uint
+	if userIDRaw != "" {
+		parsed, err := strconv.ParseUint(userIDRaw, 10, 32)
+		if err != nil || parsed == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user_id"})
+			return
+		}
+		u := uint(parsed)
+		userIDPtr = &u
+	}
+
+	requests, err := fc.FileService.GetEditRequests(statusPtr, userIDPtr)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"requests": requests,
-	})
+	c.JSON(http.StatusOK, gin.H{"requests": requests})
 }
 
 func (fc *FileController) ApproveEditRequest(c *gin.Context) {

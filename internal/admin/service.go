@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
 	"gorm.io/gorm"
 )
@@ -147,8 +148,8 @@ func (as *AdminService) searchChanges(req AdminFileEditSearchRequest) (*AdminSea
 			COALESCE(r.firstname,'') AS firstname,
 			COALESCE(r.lastname,'') AS lastname,
 
-			COALESCE(r.community,'') AS community,
-			COALESCE(r.uploader_community,'') AS uploader_community,
+			COALESCE(r.community, '{}'::text[]) AS community,
+			COALESCE(r.uploader_community, '{}'::text[]) AS uploader_community,
 
 			COALESCE(u_req.firstname || ' ' || u_req.lastname, 'User ' || r.user_id::text) AS requested_by,
 			COALESCE(u_app.firstname || ' ' || u_app.lastname, '') AS approved_by,
@@ -253,9 +254,10 @@ func applyRequestFilters(q *gorm.DB, clauses []Clause, rAlias string) (*gorm.DB,
 			q = applyStringOp(q, rAlias+".lastname", c)
 
 		case "community":
-			q = applyStringOp(q, rAlias+".community", c)
+			q = applyTextArrayOp(q, rAlias+".community", c)
+
 		case "uploader_community":
-			q = applyStringOp(q, rAlias+".uploader_community", c)
+			q = applyTextArrayOp(q, rAlias+".uploader_community", c)
 
 		case "created_at":
 			var err error
@@ -303,6 +305,42 @@ func applyStringOp(q *gorm.DB, col string, c Clause) *gorm.DB {
 	case OpIN:
 		if len(c.Values) > 0 {
 			return q.Where(col+" IN ?", c.Values)
+		}
+	}
+	return q
+}
+
+// Postgres text[] contains / overlaps helpers
+// Robust Postgres text[] filter: works even if UI sends EQ with Values or IN with Value.
+// Also does case-insensitive + trims spaces (so "xyz" matches " XYZ ").
+func applyTextArrayOp(q *gorm.DB, col string, c Clause) *gorm.DB {
+	switch c.Op {
+	case OpEQ:
+		if c.Value != nil {
+			v := strings.TrimSpace(*c.Value)
+			if v != "" {
+				return q.Where(col+" @> ARRAY[?]::text[]", v)
+			}
+		}
+	case OpIN:
+		if len(c.Values) > 0 {
+			vals := make([]string, 0, len(c.Values))
+			for _, s := range c.Values {
+				s = strings.TrimSpace(s)
+				if s != "" {
+					vals = append(vals, s)
+				}
+			}
+			if len(vals) > 0 {
+				return q.Where(col+" && ?::text[]", pq.Array(vals))
+			}
+		}
+	case OpNEQ:
+		if c.Value != nil {
+			v := strings.TrimSpace(*c.Value)
+			if v != "" {
+				return q.Where("NOT ("+col+" @> ARRAY[?]::text[])", v)
+			}
 		}
 	}
 	return q

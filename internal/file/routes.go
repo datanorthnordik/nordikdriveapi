@@ -25,7 +25,7 @@ func RegisterRoutes(r *gin.Engine, fileService *FileService, logService *logs.Lo
 		userGroup.POST("/replace", fileController.ReplaceFile)
 		userGroup.POST("/revert", fileController.RevertFile)
 		userGroup.POST("/edit/request", fileController.CreateEditRequest)
-		userGroup.GET("/edit/request", fileController.GetPendingEditRequests)
+		userGroup.GET("/edit/request", fileController.GetEditRequests)
 		userGroup.GET("/edit/photos/:requestId", fileController.GetPhotosByRequest)
 		userGroup.GET("/edit/docs/:requestId", fileController.GetDocsByRequest)
 		userGroup.GET("/photos/:rowId", fileController.GetPhotosByRow)

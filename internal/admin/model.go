@@ -3,6 +3,7 @@ package admin
 import (
 	"time"
 
+	"github.com/lib/pq"
 	"gorm.io/datatypes"
 )
 
@@ -81,8 +82,8 @@ type AdminChangeRow struct {
 	Firstname string `json:"firstname"`
 	Lastname  string `json:"lastname"`
 
-	Community         string `json:"community"`
-	UploaderCommunity string `json:"uploader_community"`
+	Community         pq.StringArray `json:"community" gorm:"type:text[]"`
+	UploaderCommunity pq.StringArray `json:"uploader_community" gorm:"type:text[]"`
 
 	RequestedBy string `json:"requested_by"`
 	ApprovedBy  string `json:"approved_by"`

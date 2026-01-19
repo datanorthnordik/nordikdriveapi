@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+	"github.com/lib/pq"
 	"gorm.io/datatypes"
 )
 
@@ -75,18 +76,20 @@ type FileWithUser struct {
 }
 
 type FileEditRequest struct {
-	RequestID      uint      `gorm:"primaryKey;autoIncrement" json:"request_id"`
-	RowID          int       `gorm:"not null" json:"row_id"`
-	UserID         uint      `gorm:"not null" json:"user_id"`
-	Status         string    `gorm:"type:varchar(50);default:'pending'" json:"status"`
-	FirstName      string    `gorm:"type:varchar(100);column:firstname" json:"firstname"`
-	LastName       string    `gorm:"type:varchar(100);column:lastname" json:"lastname"`
-	Consent        bool      `gorm:"default:false" json:"consent"`
-	ArchiveConsent bool      `gorm:"column:archive_consent;default:false" json:"archive_consent"`
-	CreatedAt      time.Time `gorm:"autoCreateTime" json:"created_at"`
-	IsEdited       bool      `gorm:"default:false" json:"is_edited"`
-	FileID         uint      `gorm:"column:file_id;not null;" json:"file_id"`
-	ApprovedBy     *int      `gorm:"column:approved_by" json:"approved_by"`
+	RequestID         uint           `gorm:"primaryKey;autoIncrement" json:"request_id"`
+	RowID             int            `gorm:"not null" json:"row_id"`
+	UserID            uint           `gorm:"not null" json:"user_id"`
+	Status            string         `gorm:"type:varchar(50);default:'pending'" json:"status"`
+	FirstName         string         `gorm:"type:varchar(100);column:firstname" json:"firstname"`
+	LastName          string         `gorm:"type:varchar(100);column:lastname" json:"lastname"`
+	Consent           bool           `gorm:"default:false" json:"consent"`
+	ArchiveConsent    bool           `gorm:"column:archive_consent;default:false" json:"archive_consent"`
+	CreatedAt         time.Time      `gorm:"autoCreateTime" json:"created_at"`
+	IsEdited          bool           `gorm:"default:false" json:"is_edited"`
+	FileID            uint           `gorm:"column:file_id;not null;" json:"file_id"`
+	ApprovedBy        *int           `gorm:"column:approved_by" json:"approved_by"`
+	Community         pq.StringArray `gorm:"type:text[];column:community;default:'{}'" json:"community"`
+	UploaderCommunity pq.StringArray `gorm:"type:text[];column:uploader_community;default:'{}'" json:"uploader_community"`
 }
 type FileEditRequestDetails struct {
 	ID        uint      `gorm:"primaryKey;autoIncrement" json:"id"`
@@ -131,7 +134,9 @@ type EditRequestInput struct {
 
 	IsEdited bool `json:"is_edited"`
 
-	Documents []DocumentInput `json:"documents"`
+	Documents         []DocumentInput `json:"documents"`
+	Community         pq.StringArray  `gorm:"type:text[];column:community;default:'{}'" json:"community"`
+	UploaderCommunity pq.StringArray  `gorm:"type:text[];column:uploader_community;default:'{}'" json:"uploader_community"`
 }
 
 type DocumentInput struct {

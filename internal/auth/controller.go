@@ -240,6 +240,7 @@ func (ac *AuthController) Me(c *gin.Context) {
 			LastName:  user.LastName,
 			Email:     user.Email,
 			Role:      user.Role,
+			Community: user.Community,
 		},
 	})
 }

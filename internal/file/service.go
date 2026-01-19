@@ -580,16 +580,18 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 
 	// Step 1: Insert main request
 	request := FileEditRequest{
-		UserID:         userID,
-		Status:         "pending",
-		CreatedAt:      time.Now(),
-		FirstName:      input.FirstName,
-		LastName:       input.LastName,
-		Consent:        input.Consent,
-		ArchiveConsent: input.ArchiveConsent,
-		RowID:          input.RowID,
-		IsEdited:       input.IsEdited,
-		FileID:         input.FileID,
+		UserID:            userID,
+		Status:            "pending",
+		CreatedAt:         time.Now(),
+		FirstName:         input.FirstName,
+		LastName:          input.LastName,
+		Consent:           input.Consent,
+		ArchiveConsent:    input.ArchiveConsent,
+		RowID:             input.RowID,
+		IsEdited:          input.IsEdited,
+		FileID:            input.FileID,
+		Community:         input.Community,
+		UploaderCommunity: input.UploaderCommunity,
 	}
 
 	// Keep as-is; if you ever see bool issues, use Select("*") here.
@@ -768,7 +770,33 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 	return &request, nil
 }
 
-func (fs *FileService) GetPendingEditRequests() ([]FileEditRequestWithUser, error) {
+func parseStatuses(csv string) []string {
+	csv = strings.TrimSpace(csv)
+	if csv == "" {
+		return nil
+	}
+
+	parts := strings.Split(csv, ",")
+	out := make([]string, 0, len(parts))
+	seen := map[string]bool{}
+
+	for _, p := range parts {
+		s := strings.ToLower(strings.TrimSpace(p))
+		if s == "" {
+			continue
+		}
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (fs *FileService) GetEditRequests(statusCSV *string, userID *uint) ([]FileEditRequestWithUser, error) {
 	var baseRequests []struct {
 		RequestID  uint
 		RowID      int
@@ -784,20 +812,45 @@ func (fs *FileService) GetPendingEditRequests() ([]FileEditRequestWithUser, erro
 		FileID     uint `gorm:"column:file_id"`
 	}
 
-	err := fs.DB.Table("file_edit_request").
-		Select("file_edit_request.request_id, file_edit_request.row_id, file_edit_request.user_id, users.firstname, users.lastname, file_edit_request.status, file_edit_request.created_at, file_edit_request.firstname as efirstname, file_edit_request.lastname as elastname, file_edit_request.is_edited, file_edit_request.consent, file_edit_request.file_id").
+	q := fs.DB.Table("file_edit_request").
+		Select(`
+			file_edit_request.request_id,
+			file_edit_request.row_id,
+			file_edit_request.user_id,
+			users.firstname,
+			users.lastname,
+			file_edit_request.status,
+			file_edit_request.created_at,
+			file_edit_request.firstname as efirstname,
+			file_edit_request.lastname as elastname,
+			file_edit_request.is_edited,
+			file_edit_request.consent,
+			file_edit_request.file_id
+		`).
 		Joins("JOIN users ON users.id = file_edit_request.user_id").
-		Where("file_edit_request.status = ?", "pending").
-		Order("file_edit_request.created_at DESC").
-		Scan(&baseRequests).Error
+		Order("file_edit_request.created_at DESC")
 
-	if err != nil {
+	// ✅ Only if BOTH provided: filter by status IN (...) + user_id
+	if statusCSV != nil && strings.TrimSpace(*statusCSV) != "" && userID != nil && *userID > 0 {
+		statuses := parseStatuses(*statusCSV)
+		if len(statuses) > 0 {
+			q = q.Where("file_edit_request.user_id = ?", *userID).
+				Where("file_edit_request.status IN ?", statuses)
+		} else {
+			// If statusCSV was garbage like ",,,", just fall back to pending
+			q = q.Where("file_edit_request.status = ?", "pending")
+		}
+	} else {
+		// ✅ Default behavior: pending only (exactly like today)
+		q = q.Where("file_edit_request.status = ?", "pending")
+	}
+
+	if err := q.Scan(&baseRequests).Error; err != nil {
 		return nil, err
 	}
 
-	var final []FileEditRequestWithUser
+	final := make([]FileEditRequestWithUser, 0, len(baseRequests))
 
-	// Fetch details for each request
 	for _, req := range baseRequests {
 		var details []FileEditRequestDetails
 		if err := fs.DB.Where("request_id = ?", req.RequestID).
