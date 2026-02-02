@@ -1,15 +1,22 @@
 package chat
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 
 	f "nordik-drive-api/internal/file"
 
+	"golang.org/x/oauth2/google"
 	"google.golang.org/genai"
 	"gorm.io/gorm"
 )
@@ -18,6 +25,9 @@ type ChatService struct {
 	DB     *gorm.DB
 	APIKey string
 	Client *genai.Client
+
+	ProjectID string
+	Location  string
 }
 
 func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, filename string, communities []string) (string, error) {
@@ -200,4 +210,189 @@ func matchesCommunities(rowData []byte, communities []string) bool {
 		}
 	}
 	return false
+}
+
+func (cs *ChatService) TTS(text string) (*TTSAudio, error) {
+	ctx := context.Background()
+
+	project := strings.TrimSpace(cs.Client.ClientConfig().Project)
+	if project == "" {
+		return nil, fmt.Errorf("missing project id (set ChatService.ProjectID or GOOGLE_CLOUD_PROJECT)")
+	}
+
+	loc := strings.TrimSpace(cs.Client.ClientConfig().Location)
+	if loc == "" {
+		loc = "global"
+	}
+
+	host := "https://aiplatform.googleapis.com"
+	if strings.ToLower(loc) != "global" {
+		host = fmt.Sprintf("https://%s-aiplatform.googleapis.com", loc)
+	}
+
+	url := fmt.Sprintf(
+		"%s/v1beta1/projects/%s/locations/%s/publishers/google/models/%s:generateContent",
+		host, project, loc, ttsModel,
+	)
+
+	// IMPORTANT: ensure it reads ONLY the provided text, style is only delivery guidance
+	prompt := fmt.Sprintf(
+		"Style: %s.\nRead the following TEXT exactly as written. Do not add or remove words.\n\nTEXT:\n%s",
+		ttsStyleInstr, text,
+	)
+
+	reqBody := map[string]any{
+		"contents": []any{
+			map[string]any{
+				"role": "user",
+				"parts": []any{
+					map[string]any{"text": prompt},
+				},
+			},
+		},
+		"generationConfig": map[string]any{
+			"responseModalities": []string{"AUDIO"},
+			"speechConfig": map[string]any{
+				"voiceConfig": map[string]any{
+					"prebuiltVoiceConfig": map[string]any{
+						"voiceName": ttsVoiceName, // e.g. "Leda"
+					},
+				},
+			},
+		},
+	}
+
+	payload, _ := json.Marshal(reqBody)
+
+	httpClient, err := google.DefaultClient(ctx, "https://www.googleapis.com/auth/cloud-platform")
+	if err != nil {
+		return nil, fmt.Errorf("adc auth error: %w", err)
+	}
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("vertex tts request error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("vertex tts failed (%d): %s", resp.StatusCode, string(raw))
+	}
+
+	type inlineData struct {
+		MimeType string `json:"mimeType"`
+		Data     string `json:"data"`
+	}
+	type part struct {
+		InlineData *inlineData `json:"inlineData,omitempty"`
+		Text       string      `json:"text,omitempty"`
+	}
+	type content struct {
+		Parts []part `json:"parts"`
+	}
+	type candidate struct {
+		Content content `json:"content"`
+	}
+	type genResp struct {
+		Candidates []candidate `json:"candidates"`
+	}
+
+	var gr genResp
+	if err := json.Unmarshal(raw, &gr); err != nil {
+		return nil, fmt.Errorf("failed to parse vertex response: %w", err)
+	}
+	if len(gr.Candidates) == 0 || len(gr.Candidates[0].Content.Parts) == 0 {
+		return nil, fmt.Errorf("no audio returned from vertex")
+	}
+
+	for _, p := range gr.Candidates[0].Content.Parts {
+		if p.InlineData == nil || p.InlineData.Data == "" {
+			continue
+		}
+
+		pcm, err := decodeBase64Loose(p.InlineData.Data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode audio data: %w", err)
+		}
+
+		// Gemini TTS output is PCM (LINEAR16). Wrap into WAV for browser playback.
+		rate := parseRateFromMime(p.InlineData.MimeType)
+		if rate == 0 {
+			rate = ttsSampleRate
+		}
+
+		wavBytes := pcmToWav(pcm, rate, ttsChannels, ttsBitsPerSample)
+		return &TTSAudio{MimeType: "audio/wav", Data: wavBytes}, nil
+	}
+
+	return nil, fmt.Errorf("no inline audio returned from vertex")
+}
+
+var rateRe = regexp.MustCompile(`rate\s*=\s*(\d+)`)
+
+func parseRateFromMime(m string) int {
+	m = strings.ToLower(m)
+	if m == "" {
+		return 0
+	}
+	mm := rateRe.FindStringSubmatch(m)
+	if len(mm) == 2 {
+		if v, err := strconv.Atoi(mm[1]); err == nil && v > 0 {
+			return v
+		}
+	}
+	return 0
+}
+
+func decodeBase64Loose(s string) ([]byte, error) {
+	// Gemini sometimes uses padded base64; sometimes not. Handle both.
+	if b, err := base64.StdEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	return base64.RawStdEncoding.DecodeString(s)
+}
+
+func pcmToWav(pcm []byte, sampleRate, channels, bitsPerSample int) []byte {
+	if sampleRate <= 0 {
+		sampleRate = ttsSampleRate
+	}
+	if channels <= 0 {
+		channels = ttsChannels
+	}
+	if bitsPerSample <= 0 {
+		bitsPerSample = ttsBitsPerSample
+	}
+
+	byteRate := sampleRate * channels * (bitsPerSample / 8)
+	blockAlign := channels * (bitsPerSample / 8)
+	dataSize := len(pcm)
+	riffSize := 36 + dataSize
+
+	buf := new(bytes.Buffer)
+
+	// RIFF header
+	buf.WriteString("RIFF")
+	_ = binary.Write(buf, binary.LittleEndian, uint32(riffSize))
+	buf.WriteString("WAVE")
+
+	// fmt chunk
+	buf.WriteString("fmt ")
+	_ = binary.Write(buf, binary.LittleEndian, uint32(16)) // PCM fmt chunk size
+	_ = binary.Write(buf, binary.LittleEndian, uint16(1))  // AudioFormat = 1 (PCM)
+	_ = binary.Write(buf, binary.LittleEndian, uint16(channels))
+	_ = binary.Write(buf, binary.LittleEndian, uint32(sampleRate))
+	_ = binary.Write(buf, binary.LittleEndian, uint32(byteRate))
+	_ = binary.Write(buf, binary.LittleEndian, uint16(blockAlign))
+	_ = binary.Write(buf, binary.LittleEndian, uint16(bitsPerSample))
+
+	// data chunk
+	buf.WriteString("data")
+	_ = binary.Write(buf, binary.LittleEndian, uint32(dataSize))
+	buf.Write(pcm)
+
+	return buf.Bytes()
 }

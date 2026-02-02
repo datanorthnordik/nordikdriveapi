@@ -168,7 +168,7 @@ type adminSearchRow struct {
 }
 
 type AdminDownloadMediaRequest struct {
-	RequestID        *uint    `json:"request_id"`
+	RequestIDs       []uint   `json:"request_ids,omitempty"`
 	Clauses          []Clause `json:"clauses"`
 	DocumentType     string   `json:"document_type"`      // "all" | "photos" | "document"
 	CategorizeByUser bool     `json:"categorize_by_user"` // /User_X/

@@ -952,17 +952,15 @@ func safeSheetName(name string) string {
 
 func (as *AdminService) StreamMediaZip(ctx context.Context, out io.Writer, req AdminDownloadMediaRequest) error {
 	// 1) resolve requestIDs
-	var requestIDs []uint
-	if req.RequestID != nil && *req.RequestID > 0 {
-		requestIDs = []uint{*req.RequestID}
-	} else {
-		// reuse your existing clause logic:
-		// this calls SearchFileEditRequests paging and returns all request IDs
-		ids, err := as.collectAllRequestIDs(Mode("changes"), req.Clauses)
+	requestIDs := dedupeAndFilterRequestIDs(req.RequestIDs)
+
+	// If request_ids not present/empty, fallback to clauses
+	if len(requestIDs) == 0 {
+		ids, err := as.collectAllRequestIDs(ModeChanges, req.Clauses)
 		if err != nil {
 			return err
 		}
-		requestIDs = ids
+		requestIDs = dedupeAndFilterRequestIDs(ids)
 	}
 
 	if len(requestIDs) == 0 {
@@ -978,7 +976,7 @@ func (as *AdminService) StreamMediaZip(ctx context.Context, out io.Writer, req A
 		return fmt.Errorf("no media found for the selected filters")
 	}
 
-	// hard safety guard (optional)
+	// hard safety guard
 	if len(rows) > 5000 {
 		return fmt.Errorf("too many files to zip (%d). narrow your filters", len(rows))
 	}
@@ -1008,20 +1006,15 @@ func (as *AdminService) StreamMediaZip(ctx context.Context, out io.Writer, req A
 	zw := zip.NewWriter(out)
 	defer zw.Close()
 
-	// bucket fallback from env if URL bucket missing
 	envBucket := strings.TrimSpace(os.Getenv("BUCKET_NAME"))
 
 	created := 0
-	nowTag := time.Now().Format("20060102_150405")
 
 	for _, r := range rows {
-		// build zip path (folders)
 		entryPath := buildZipEntryPath(r, req.CategorizeByUser, req.CategorizeByType)
 
-		// make sure filename is safe & unique
 		baseName := sanitizeFilename(r.FileName)
 		if baseName == "" {
-			// fallback to object name
 			_, obj, _ := parseGSURLAdmin(r.PhotoURL)
 			baseName = sanitizeFilename(path.Base(obj))
 			if baseName == "" {
@@ -1029,9 +1022,7 @@ func (as *AdminService) StreamMediaZip(ctx context.Context, out io.Writer, req A
 			}
 		}
 
-		// add strong uniqueness to avoid collisions
 		finalName := fmt.Sprintf("req_%d_row_%d_%d_%s", r.RequestID, r.RowID, r.ID, baseName)
-
 		zipFullPath := entryPath + finalName
 
 		w, err := zw.Create(zipFullPath)
@@ -1039,7 +1030,6 @@ func (as *AdminService) StreamMediaZip(ctx context.Context, out io.Writer, req A
 			return err
 		}
 
-		// stream from gcs into zip entry
 		bucket, objectPath, err := parseGSURLAdmin(r.PhotoURL)
 		if err != nil {
 			return err
@@ -1064,7 +1054,6 @@ func (as *AdminService) StreamMediaZip(ctx context.Context, out io.Writer, req A
 		}
 
 		created++
-		_ = nowTag // keep if you want a manifest file later
 	}
 
 	if created == 0 {

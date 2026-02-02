@@ -3,6 +3,7 @@ package admin
 import (
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -116,16 +117,21 @@ func (ac *AdminController) DownloadMediaZip(c *gin.Context) {
 		return
 	}
 
-	// must have request_id OR clauses
-	if (req.RequestID == nil || *req.RequestID == 0) && len(req.Clauses) == 0 {
+	// request_ids is optional, so when it's missing => len == 0
+	if len(req.RequestIDs) == 0 && len(req.Clauses) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "apply filter to download documents"})
 		return
 	}
 
 	ts := time.Now().Format("20060102_150405")
 	zipName := fmt.Sprintf("media_%s.zip", ts)
-	if req.RequestID != nil && *req.RequestID > 0 {
-		zipName = fmt.Sprintf("request_%d_media_%s.zip", *req.RequestID, ts)
+
+	// naming based on request_ids if present
+	ids := dedupeAndFilterRequestIDs(req.RequestIDs)
+	if len(ids) == 1 {
+		zipName = fmt.Sprintf("request_%d_media_%s.zip", ids[0], ts)
+	} else if len(ids) > 1 {
+		zipName = fmt.Sprintf("requests_%d_media_%s.zip", len(ids), ts)
 	}
 
 	c.Header("Content-Type", "application/zip")
@@ -133,11 +139,27 @@ func (ac *AdminController) DownloadMediaZip(c *gin.Context) {
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.Header("Cache-Control", "no-store")
 
-	// Stream ZIP to client (no buffering)
 	if err := ac.AdminService.StreamMediaZip(c.Request.Context(), c.Writer, req); err != nil {
-		// if streaming already started, JSON won't be valid; best effort:
-		// still send an error if nothing written.
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+}
+
+func dedupeAndFilterRequestIDs(in []uint) []uint {
+	seen := make(map[uint]struct{}, len(in))
+	out := make([]uint, 0, len(in))
+
+	for _, id := range in {
+		if id == 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
