@@ -18,6 +18,8 @@ type AuthController struct {
 	LS          LogServicePort
 }
 
+var hash = util.HashPassword
+
 func (ac *AuthController) SignUp(c *gin.Context) {
 	var req struct {
 		FirstName string   `json:"firstname" binding:"required"`
@@ -32,7 +34,7 @@ func (ac *AuthController) SignUp(c *gin.Context) {
 		return
 	}
 
-	password, err := util.HashPassword(req.Password)
+	password, err := hash(req.Password)
 
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

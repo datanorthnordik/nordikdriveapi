@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -79,10 +80,34 @@ type assertErr string
 
 func (e assertErr) Error() string { return string(e) }
 
-func setupLoginRouter(ac *AuthController) *gin.Engine {
+func setupAuthRouter(ac *AuthController) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
+
+	r.Use(func(c *gin.Context) {
+		if v := c.GetHeader("X-UserID"); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				c.Set("userID", f)
+			} else {
+				c.Set("userID", v)
+			}
+		}
+		c.Next()
+	})
+
 	r.POST("/login", ac.Login)
+	r.POST("/signup", ac.SignUp)
+
+	r.POST("/logout", ac.Logout)
+	r.GET("/me", ac.Me)
+	r.POST("/refresh", ac.Refresh)
+
+	r.GET("/users", ac.GetUsers)
+	r.POST("/verify-password", ac.VerifyPassword)
+
+	r.POST("/send-otp", ac.SendOTP)
+	r.POST("/reset-password", ac.ResetPassword)
+
 	return r
 }
 
@@ -127,4 +152,35 @@ func cookieValue(resp *http.Response, name string) string {
 		}
 	}
 	return ""
+}
+
+func doReq(r http.Handler, method, path string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(method, path, nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	r.ServeHTTP(w, req)
+	return w
+}
+
+func postJSONWithHeader(r http.Handler, path string, body []byte, key, value string) *httptest.ResponseRecorder {
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if key != "" {
+		req.Header.Set(key, value)
+	}
+	r.ServeHTTP(w, req)
+	return w
+}
+
+func doReqWithHeader(r http.Handler, method, path, key, value string) *httptest.ResponseRecorder {
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(method, path, nil)
+	if key != "" {
+		req.Header.Set(key, value)
+	}
+	r.ServeHTTP(w, req)
+	return w
 }
