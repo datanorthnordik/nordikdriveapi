@@ -14,8 +14,8 @@ import (
 )
 
 type AuthController struct {
-	AuthService *AuthService
-	LS          *logs.LogService
+	AuthService AuthServicePort
+	LS          LogServicePort
 }
 
 func (ac *AuthController) SignUp(c *gin.Context) {
@@ -164,8 +164,10 @@ func (ac *AuthController) Login(c *gin.Context) {
 		Communities: user.Community,
 	}
 
-	if err := ac.LS.Log(log, req); err != nil {
-		fmt.Printf("Failed to insert log: %v\n", err)
+	if ac.LS != nil {
+		if err := ac.LS.Log(log, req); err != nil {
+			fmt.Printf("Failed to insert log: %v\n", err)
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
