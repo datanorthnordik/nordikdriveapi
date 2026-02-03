@@ -18,6 +18,8 @@ type AuthService struct {
 	CFG *config.Config
 }
 
+var sendMail = smtp.SendMail
+
 func (s *AuthService) CreateUser(user Auth) (*Auth, error) {
 	if user.Role == "" {
 		user.Role = "User"
@@ -34,13 +36,13 @@ func (s *AuthService) CreateUser(user Auth) (*Auth, error) {
 	return &user, nil
 }
 
-func (s *AuthService) CreateAccess(access Access) (*Access, error) {
-	if err := s.DB.Create(&access).Error; err != nil {
-		return nil, err
-	}
+// func (s *AuthService) CreateAccess(access Access) (*Access, error) {
+// 	if err := s.DB.Create(&access).Error; err != nil {
+// 		return nil, err
+// 	}
 
-	return &access, nil
-}
+// 	return &access, nil
+// }
 
 func (s *AuthService) GetUser(email string) (*Auth, error) {
 
@@ -61,14 +63,14 @@ func (s *AuthService) GetUserByID(id int) (*Auth, error) {
 	return &user, nil
 }
 
-func (s *AuthService) GetUserByPhone(phone string) (*Auth, error) {
-	var user Auth
-	result := s.DB.Where("phonenumber = ?", phone).First(&user)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-	return &user, nil
-}
+// func (s *AuthService) GetUserByPhone(phone string) (*Auth, error) {
+// 	var user Auth
+// 	result := s.DB.Where("phonenumber = ?", phone).First(&user)
+// 	if result.Error != nil {
+// 		return nil, result.Error
+// 	}
+// 	return &user, nil
+// }
 
 func (s *AuthService) GetAllUsers() ([]Auth, error) {
 	var users []Auth
@@ -142,7 +144,7 @@ func (s *AuthService) SendOTP(email string) (*Auth, string, error) {
 
 	// 4. Send the email.
 	// This function connects to the server, authenticates, and sends the message.
-	err := smtp.SendMail(smtpHost+":"+smtpPort, auth, from, to, message)
+	err := sendMail(smtpHost+":"+smtpPort, auth, from, to, message)
 	if err != nil {
 		log.Printf("Error sending email to %s: %v\n", user.Email, err)
 		return nil, "", errors.New("failed to send OTP email")
