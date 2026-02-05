@@ -25,7 +25,7 @@ type File struct {
 type FileVersion struct {
 	ID         uint      `gorm:"primaryKey;autoIncrement" jsoxn:"id"`
 	FileID     uint      `gorm:"not null;index" json:"file_id"`
-	Filename   string    `gorm:"size:255;unique;not null" json:"filename"`
+	Filename   string    `gorm:"size:255;not null" json:"filename"`
 	InsertedBy uint      `gorm:"not null;index" json:"inserted_by"`
 	CreatedAt  time.Time `gorm:"autoCreateTime" json:"created_at"`
 	Private    bool      `gorm:"default:false" json:"private"`

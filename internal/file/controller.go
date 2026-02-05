@@ -12,8 +12,8 @@ import (
 )
 
 type FileController struct {
-	FileService *FileService
-	LogService  *logs.LogService
+	FileService FileServicePort
+	LogService  LogServicePort
 }
 
 type FileUploadInput struct {
@@ -904,7 +904,7 @@ func (fc *FileController) DownloadMediaByID(c *gin.Context) {
 	// If GCS content-type missing, sniff first bytes and stream
 	if contentType == "" {
 		buf := make([]byte, 512)
-		n, _ := io.ReadFull(handle.Reader, buf)
+		n, _ := io.ReadFull(handle, buf)
 		if n > 0 {
 			contentType = http.DetectContentType(buf[:n])
 		} else {
@@ -921,9 +921,8 @@ func (fc *FileController) DownloadMediaByID(c *gin.Context) {
 		c.Header("X-Content-Type-Options", "nosniff")
 		c.Header("Cache-Control", "no-store")
 
-		// write sniffed bytes first, then rest
 		_, _ = c.Writer.Write(buf[:n])
-		_, _ = io.Copy(c.Writer, handle.Reader)
+		_, _ = io.Copy(c.Writer, handle)
 		return
 	}
 
@@ -932,5 +931,6 @@ func (fc *FileController) DownloadMediaByID(c *gin.Context) {
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.Header("Cache-Control", "no-store")
 
-	_, _ = io.Copy(c.Writer, handle.Reader)
+	_, _ = io.Copy(c.Writer, handle)
+
 }
