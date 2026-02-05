@@ -295,7 +295,7 @@ func TestAuthMiddleware_Communities_MissingOrWrongType_DefaultsEmpty(t *testing.
 	}
 }
 
-func TestAuthMiddleware_MalformedButJWTLikeString_401(t *testing.T) {
+func TestAuthMiddleware_MalformedButJwtLikeString_401(t *testing.T) {
 	setJWTSecretEnv(t, "test-secret")
 	r := newTestRouter()
 
