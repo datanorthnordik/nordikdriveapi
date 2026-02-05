@@ -1,13 +1,12 @@
 package file
 
 import (
-	"nordik-drive-api/internal/logs"
 	"nordik-drive-api/internal/middlewares"
 
 	"github.com/gin-gonic/gin"
 )
 
-func RegisterRoutes(r *gin.Engine, fileService *FileService, logService *logs.LogService) {
+func RegisterRoutes(r *gin.Engine, fileService FileServicePort, logService LogServicePort) {
 	fileController := &FileController{FileService: fileService, LogService: logService}
 
 	userGroup := r.Group("/api/file")

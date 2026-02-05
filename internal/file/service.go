@@ -29,6 +29,15 @@ type FileService struct {
 	DB *gorm.DB
 }
 
+var (
+	uploadToGCSHook   = util.UploadPhotoToGCS
+	moveGCSFolderHook = util.MoveGCSFolder
+
+	newGCSClientHook = func(ctx context.Context) (*storage.Client, error) {
+		return storage.NewClient(ctx)
+	}
+)
+
 func (fs *FileService) SaveFilesMultipart(uploadedFiles []*multipart.FileHeader, filenames FileUploadInput, userID uint) ([]File, error) {
 	var savedFiles []File
 	files := filenames.FileNames
@@ -651,7 +660,7 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 
 		objectPath := fmt.Sprintf("%s/%s", basePrefix, fileName)
 
-		url, sizeBytes, err := util.UploadPhotoToGCS(base64Img, bucket, objectPath)
+		url, sizeBytes, err := uploadToGCSHook(base64Img, bucket, objectPath)
 		if err != nil {
 			return nil, err
 		}
@@ -688,7 +697,7 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 
 		objectPath := fmt.Sprintf("%s/%s", basePrefix, fileName)
 
-		url, sizeBytes, err := util.UploadPhotoToGCS(base64Img, bucket, objectPath)
+		url, sizeBytes, err := uploadToGCSHook(base64Img, bucket, objectPath)
 		if err != nil {
 			return nil, err
 		}
@@ -741,7 +750,7 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 
 		// ✅ You can reuse UploadPhotoToGCS if it supports any base64 mime.
 		// Better rename it to UploadBase64ToGCS.
-		url, sizeBytes, err := util.UploadPhotoToGCS(doc.DataBase64, bucket, objectPath)
+		url, sizeBytes, err := uploadToGCSHook(doc.DataBase64, bucket, objectPath)
 		if err != nil {
 			return nil, err
 		}
@@ -954,7 +963,7 @@ func (fs *FileService) ApproveEditRequest(requestID uint, updates []FileEditRequ
 			srcPrefix := util.TempPrefix(req.RequestID, req.FirstName, req.LastName)
 			dstPrefix := util.RowPrefix(int(finalRowID))
 
-			mapping, err := util.MoveGCSFolder(bucket, srcPrefix, dstPrefix)
+			mapping, err := moveGCSFolderHook(bucket, srcPrefix, dstPrefix)
 			if err != nil {
 				return err
 			}
@@ -1082,7 +1091,7 @@ func (fs *FileService) GetPhotoBytes(photoID uint) ([]byte, string, error) {
 	objectPath := strings.TrimPrefix(photo.PhotoURL, prefix)
 
 	ctx := context.Background()
-	client, err := storage.NewClient(ctx)
+	client, err := newGCSClientHook(ctx)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1170,7 +1179,7 @@ func (fs *FileService) GetDocBytes(docID uint) ([]byte, string, string, error) {
 	objectPath := strings.TrimPrefix(doc.PhotoURL, prefix)
 
 	ctx := context.Background()
-	client, err := storage.NewClient(ctx)
+	client, err := newGCSClientHook(ctx)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -1216,7 +1225,7 @@ func (h *gcsReadHandle) Close() error {
 // OpenMediaHandle opens a streaming reader for a FileEditRequestPhoto row by its ID.
 // kind is optional; if provided it enforces type ("photo" => DocumentType must be "photos",
 // "doc"/"document" => DocumentType must be "document")
-func (fs *FileService) OpenMediaHandle(ctx context.Context, id uint, kind string) (*gcsReadHandle, string, string, string, error) {
+func (fs *FileService) OpenMediaHandle(ctx context.Context, id uint, kind string) (io.ReadCloser, string, string, string, error) {
 	var rec FileEditRequestPhoto
 	if err := fs.DB.First(&rec, id).Error; err != nil {
 		return nil, "", "", "", err
@@ -1248,7 +1257,7 @@ func (fs *FileService) OpenMediaHandle(ctx context.Context, id uint, kind string
 		return nil, "", "", "", fmt.Errorf("bucket name not found (gs url + BUCKET_NAME empty)")
 	}
 
-	client, err := storage.NewClient(ctx)
+	client, err := newGCSClientHook(ctx)
 	if err != nil {
 		return nil, "", "", "", err
 	}
@@ -1284,6 +1293,7 @@ func (fs *FileService) OpenMediaHandle(ctx context.Context, id uint, kind string
 		Client: client,
 		Reader: reader,
 	}, filename, contentType, disposition, nil
+
 }
 
 // ✅ Missing helper you asked for: readFromGCS
@@ -1301,7 +1311,7 @@ func (fs *FileService) readFromGCS(gsURL string, dbFilename string) ([]byte, str
 	}
 
 	ctx := context.Background()
-	client, err := storage.NewClient(ctx)
+	client, err := newGCSClientHook(ctx)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -1387,4 +1397,8 @@ func ioReadAll(r *storage.Reader) ([]byte, error) {
 		}
 	}
 	return []byte(buf.String()), nil
+}
+
+func (h *gcsReadHandle) Read(p []byte) (int, error) {
+	return h.Reader.Read(p)
 }
