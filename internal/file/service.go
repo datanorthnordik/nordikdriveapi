@@ -168,12 +168,13 @@ func parseExcelReader(file multipart.File) ([]string, [][]string, error) {
 	headers := rows[0]
 	var dataRows [][]string
 	colorToSource := map[string]string{
-		"#FFFF00": "FURTHER INVESTIGATION REQUIRED",
+		"#0070C0": "OFFICE OF THE REGISTRAR GENERAL",
+		"#00B0F0": "LIBRARY AND ARCHIVES CANADA",
+		"#B17ED8": "CIRNAC SOURCE",
 		"#FFC000": "NCTR SOURCE",
-		"#FF0000": "CORONER'S OFFICE SOURCE",
-		"#00B0F0": "BAND DOCUMENTS",
-		"#7030A0": "CIRNAC SOURCE",
-		"#00B050": "OFFICE OF THE REGISTRAR GENERAL",
+		"#FFFF00": "FURTHER INVESTIGATION REQUIRED",
+		"#FF9999": "CORONER'S OFFICE SOURCE",
+		"#00B050": "REPORT COMPLETE",
 	}
 
 	for rowIdx, _ := range rows[1:] {
