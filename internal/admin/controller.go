@@ -12,7 +12,7 @@ import (
 )
 
 type AdminController struct {
-	AdminService *AdminService
+	AdminService AdminServiceAPI
 }
 
 func (ac *AdminController) SearchFileEditRequests(c *gin.Context) {

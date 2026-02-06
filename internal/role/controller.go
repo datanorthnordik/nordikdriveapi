@@ -3,12 +3,19 @@ package role
 import (
 	"fmt"
 	"net/http"
+	"nordik-drive-api/internal/auth"
 
 	"github.com/gin-gonic/gin"
 )
 
+type RoleServiceAPI interface {
+	GetRoleByUser(userid int) ([]auth.UserRole, error)
+	GetRolesByUserId(userid int) ([]auth.UserRole, error)
+	GetAllRoles(uniqueRoles []string) ([]Role, error)
+}
+
 type RoleController struct {
-	RoleService *RoleService
+	RoleService RoleServiceAPI
 }
 
 func (rc *RoleController) GetAllRoles(c *gin.Context) {

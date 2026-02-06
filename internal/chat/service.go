@@ -10,6 +10,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -26,11 +27,44 @@ type ChatService struct {
 	APIKey string
 	Client *genai.Client
 
+	// Optional fallbacks (useful for tests or when ClientConfig is missing)
 	ProjectID string
 	Location  string
 }
 
+var (
+	// --- Hooks for unit tests (do NOT remove; makes tests stable and avoids real ADC/Vertex calls) ---
+
+	// Gemini hook (text + multimodal). Default calls real client.
+	genaiGenerateContentHook = func(client *genai.Client, ctx context.Context, model string, contents []*genai.Content) (*genai.GenerateContentResponse, error) {
+		return client.Models.GenerateContent(ctx, model, contents, nil)
+	}
+
+	// Multipart audio hooks (allows forcing open/read errors in tests)
+	openMultipartFileHook = func(fh *multipart.FileHeader) (multipart.File, error) {
+		return fh.Open()
+	}
+	readAllHook = func(r io.Reader) ([]byte, error) {
+		return io.ReadAll(r)
+	}
+
+	// Vertex TTS HTTP hooks
+	defaultHTTPClientHook = func(ctx context.Context) (*http.Client, error) {
+		return google.DefaultClient(ctx, "https://www.googleapis.com/auth/cloud-platform")
+	}
+	httpDoHook = func(c *http.Client, req *http.Request) (*http.Response, error) {
+		return c.Do(req)
+	}
+)
+
 func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, filename string, communities []string) (string, error) {
+	if cs.DB == nil {
+		return "", fmt.Errorf("db not initialized")
+	}
+	if cs.Client == nil {
+		return "", fmt.Errorf("genai client not initialized")
+	}
+
 	// Fetch latest file version
 	var file f.File
 	if err := cs.DB.Where("filename = ?", filename).Order("version DESC").First(&file).Error; err != nil {
@@ -46,7 +80,7 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 		}
 	}
 
-	// Fetch all file data for this file/version, then apply JSON-level filtering by key "First Nation/Home".
+	// Fetch all file data for this file/version, then apply JSON-level filtering by key "First Nation/Community".
 	var rawFileData []f.FileData
 	if err := cs.DB.Where("file_id = ? AND version = ?", file.ID, file.Version).Find(&rawFileData).Error; err != nil {
 		return "", fmt.Errorf("file data not found: %w", err)
@@ -116,14 +150,13 @@ Answer format:
 	var response string
 
 	if audioFile != nil {
-		// Read audio
-		fh, err := audioFile.Open()
+		fh, err := openMultipartFileHook(audioFile)
 		if err != nil {
 			return "", fmt.Errorf("failed to open audio file: %w", err)
 		}
 		defer fh.Close()
 
-		audioBytes, err := io.ReadAll(fh)
+		audioBytes, err := readAllHook(fh)
 		if err != nil {
 			return "", fmt.Errorf("failed to read audio file: %w", err)
 		}
@@ -133,8 +166,7 @@ Answer format:
 			audioMimeType = "audio/webm"
 		}
 
-		// Generate content (multimodal)
-		genResp, err := cs.Client.Models.GenerateContent(ctx, "gemini-2.5-flash", []*genai.Content{
+		genResp, err := genaiGenerateContentHook(cs.Client, ctx, "gemini-2.5-flash", []*genai.Content{
 			{
 				Role: "user",
 				Parts: []*genai.Part{
@@ -142,8 +174,7 @@ Answer format:
 					{InlineData: &genai.Blob{Data: audioBytes, MIMEType: audioMimeType}},
 				},
 			},
-		}, nil)
-
+		})
 		if err != nil {
 			return "", fmt.Errorf("generation error: %w", err)
 		}
@@ -158,19 +189,20 @@ Answer format:
 						}
 					}
 				}
+				if response != "" {
+					break
+				}
 			}
 		}
 	} else {
-		// Generate text-only content
-		genResp, err := cs.Client.Models.GenerateContent(ctx, "gemini-2.5-flash", []*genai.Content{
+		genResp, err := genaiGenerateContentHook(cs.Client, ctx, "gemini-2.5-flash", []*genai.Content{
 			{
 				Role: "user",
 				Parts: []*genai.Part{
 					{Text: prompt},
 				},
 			},
-		}, nil)
-
+		})
 		if err != nil {
 			return "", fmt.Errorf("generation error: %w", err)
 		}
@@ -184,6 +216,9 @@ Answer format:
 							break
 						}
 					}
+				}
+				if response != "" {
+					break
 				}
 			}
 		}
@@ -192,7 +227,6 @@ Answer format:
 	if response == "" {
 		return "", fmt.Errorf("no response from Gemini")
 	}
-
 	return response, nil
 }
 
@@ -214,7 +248,6 @@ func matchesCommunities(rowData []byte, communities []string) bool {
 	}
 
 	valStr = strings.TrimSpace(valStr)
-
 	for _, c := range communities {
 		if strings.TrimSpace(c) == valStr {
 			return true
@@ -226,12 +259,26 @@ func matchesCommunities(rowData []byte, communities []string) bool {
 func (cs *ChatService) TTS(text string) (*TTSAudio, error) {
 	ctx := context.Background()
 
-	project := strings.TrimSpace(cs.Client.ClientConfig().Project)
+	// --- Project + Location resolution (with fallbacks) ---
+	project := strings.TrimSpace(cs.ProjectID)
+	loc := strings.TrimSpace(cs.Location)
+
+	if cs.Client != nil {
+		cc := cs.Client.ClientConfig() // NOTE: returns a struct, not a pointer (don't compare to nil)
+		if project == "" {
+			project = strings.TrimSpace(cc.Project)
+		}
+		if loc == "" {
+			loc = strings.TrimSpace(cc.Location)
+		}
+	}
+	if project == "" {
+		project = strings.TrimSpace(os.Getenv("GOOGLE_CLOUD_PROJECT"))
+	}
+
 	if project == "" {
 		return nil, fmt.Errorf("missing project id (set ChatService.ProjectID or GOOGLE_CLOUD_PROJECT)")
 	}
-
-	loc := strings.TrimSpace(cs.Client.ClientConfig().Location)
 	if loc == "" {
 		loc = "global"
 	}
@@ -246,7 +293,6 @@ func (cs *ChatService) TTS(text string) (*TTSAudio, error) {
 		host, project, loc, ttsModel,
 	)
 
-	// IMPORTANT: ensure it reads ONLY the provided text, style is only delivery guidance
 	prompt := fmt.Sprintf(
 		"Style: %s.\nRead the following TEXT exactly as written. Do not add or remove words.\n\nTEXT:\n%s",
 		ttsStyleInstr, text,
@@ -266,7 +312,7 @@ func (cs *ChatService) TTS(text string) (*TTSAudio, error) {
 			"speechConfig": map[string]any{
 				"voiceConfig": map[string]any{
 					"prebuiltVoiceConfig": map[string]any{
-						"voiceName": ttsVoiceName, // e.g. "Leda"
+						"voiceName": ttsVoiceName,
 					},
 				},
 			},
@@ -275,7 +321,7 @@ func (cs *ChatService) TTS(text string) (*TTSAudio, error) {
 
 	payload, _ := json.Marshal(reqBody)
 
-	httpClient, err := google.DefaultClient(ctx, "https://www.googleapis.com/auth/cloud-platform")
+	httpClient, err := defaultHTTPClientHook(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("adc auth error: %w", err)
 	}
@@ -283,7 +329,7 @@ func (cs *ChatService) TTS(text string) (*TTSAudio, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := httpClient.Do(req)
+	resp, err := httpDoHook(httpClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("vertex tts request error: %w", err)
 	}
@@ -330,7 +376,6 @@ func (cs *ChatService) TTS(text string) (*TTSAudio, error) {
 			return nil, fmt.Errorf("failed to decode audio data: %w", err)
 		}
 
-		// Gemini TTS output is PCM (LINEAR16). Wrap into WAV for browser playback.
 		rate := parseRateFromMime(p.InlineData.MimeType)
 		if rate == 0 {
 			rate = ttsSampleRate
@@ -360,7 +405,6 @@ func parseRateFromMime(m string) int {
 }
 
 func decodeBase64Loose(s string) ([]byte, error) {
-	// Gemini sometimes uses padded base64; sometimes not. Handle both.
 	if b, err := base64.StdEncoding.DecodeString(s); err == nil {
 		return b, nil
 	}
@@ -384,23 +428,19 @@ func pcmToWav(pcm []byte, sampleRate, channels, bitsPerSample int) []byte {
 	riffSize := 36 + dataSize
 
 	buf := new(bytes.Buffer)
-
-	// RIFF header
 	buf.WriteString("RIFF")
 	_ = binary.Write(buf, binary.LittleEndian, uint32(riffSize))
 	buf.WriteString("WAVE")
 
-	// fmt chunk
 	buf.WriteString("fmt ")
-	_ = binary.Write(buf, binary.LittleEndian, uint32(16)) // PCM fmt chunk size
-	_ = binary.Write(buf, binary.LittleEndian, uint16(1))  // AudioFormat = 1 (PCM)
+	_ = binary.Write(buf, binary.LittleEndian, uint32(16))
+	_ = binary.Write(buf, binary.LittleEndian, uint16(1))
 	_ = binary.Write(buf, binary.LittleEndian, uint16(channels))
 	_ = binary.Write(buf, binary.LittleEndian, uint32(sampleRate))
 	_ = binary.Write(buf, binary.LittleEndian, uint32(byteRate))
 	_ = binary.Write(buf, binary.LittleEndian, uint16(blockAlign))
 	_ = binary.Write(buf, binary.LittleEndian, uint16(bitsPerSample))
 
-	// data chunk
 	buf.WriteString("data")
 	_ = binary.Write(buf, binary.LittleEndian, uint32(dataSize))
 	buf.Write(pcm)

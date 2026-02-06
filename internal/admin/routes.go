@@ -6,7 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func RegisterRoutes(r *gin.Engine, chatService *AdminService) {
+func RegisterRoutes(r *gin.Engine, chatService AdminServiceAPI) {
 	adminController := &AdminController{AdminService: chatService}
 
 	adminGroup := r.Group("/api/admin")
