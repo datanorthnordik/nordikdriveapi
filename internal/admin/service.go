@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"cloud.google.com/go/storage"
 	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
 	"gorm.io/gorm"
@@ -24,9 +23,15 @@ import (
 
 type AdminService struct {
 	DB *gorm.DB
+
+	// OPTIONAL: for tests to stub paging/search without DB
+	searchHook func(req AdminFileEditSearchRequest) (*AdminSearchResponse, error)
 }
 
 func (as *AdminService) SearchFileEditRequests(req AdminFileEditSearchRequest) (*AdminSearchResponse, error) {
+	if as.searchHook != nil {
+		return as.searchHook(req)
+	}
 	return as.searchChanges(req)
 }
 
@@ -996,7 +1001,8 @@ func (as *AdminService) StreamMediaZip(ctx context.Context, out io.Writer, req A
 	})
 
 	// 3) init GCS client once
-	client, err := storage.NewClient(ctx)
+	client, err := newGCSClientHook(ctx)
+
 	if err != nil {
 		return err
 	}
