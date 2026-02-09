@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -18,6 +19,7 @@ import (
 	f "nordik-drive-api/internal/file"
 
 	"golang.org/x/oauth2/google"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/genai"
 	"gorm.io/gorm"
 )
@@ -166,7 +168,7 @@ Answer format:
 			audioMimeType = "audio/webm"
 		}
 
-		genResp, err := genaiGenerateContentHook(cs.Client, ctx, "gemini-2.5-flash", []*genai.Content{
+		contents := []*genai.Content{
 			{
 				Role: "user",
 				Parts: []*genai.Part{
@@ -174,7 +176,13 @@ Answer format:
 					{InlineData: &genai.Blob{Data: audioBytes, MIMEType: audioMimeType}},
 				},
 			},
-		})
+		}
+
+		genResp, usedModel, err := cs.generateWith429Fallback(ctx, contents)
+		if err != nil {
+			return "", fmt.Errorf("generation error (%s): %w", usedModel, err)
+		}
+
 		if err != nil {
 			return "", fmt.Errorf("generation error: %w", err)
 		}
@@ -195,14 +203,20 @@ Answer format:
 			}
 		}
 	} else {
-		genResp, err := genaiGenerateContentHook(cs.Client, ctx, "gemini-2.5-flash", []*genai.Content{
+		contents := []*genai.Content{
 			{
 				Role: "user",
 				Parts: []*genai.Part{
 					{Text: prompt},
 				},
 			},
-		})
+		}
+
+		genResp, usedModel, err := cs.generateWith429Fallback(ctx, contents)
+		if err != nil {
+			return "", fmt.Errorf("generation error (%s): %w", usedModel, err)
+		}
+
 		if err != nil {
 			return "", fmt.Errorf("generation error: %w", err)
 		}
@@ -446,4 +460,56 @@ func pcmToWav(pcm []byte, sampleRate, channels, bitsPerSample int) []byte {
 	buf.Write(pcm)
 
 	return buf.Bytes()
+}
+
+func isRateLimit429(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Standard Google API error type
+	var gerr *googleapi.Error
+	if errors.As(err, &gerr) && gerr.Code == http.StatusTooManyRequests {
+		return true
+	}
+
+	// Fallback checks (covers wrapped errors / different error shapes)
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "429") ||
+		strings.Contains(msg, "too many requests") ||
+		strings.Contains(msg, "resource_exhausted") ||
+		strings.Contains(msg, "rate limit") {
+		return true
+	}
+
+	return false
+}
+
+func (cs *ChatService) generateWith429Fallback(
+	ctx context.Context,
+	contents []*genai.Content,
+) (*genai.GenerateContentResponse, string, error) {
+
+	primary := "gemini-2.5-flash"
+	fallback := "gemini-2.5-pro"
+
+	// 1) try flash
+	resp, err := genaiGenerateContentHook(cs.Client, ctx, primary, contents)
+	if err == nil {
+		return resp, primary, nil
+	}
+
+	// 2) only fallback on 429
+	if !isRateLimit429(err) {
+		return nil, primary, err
+	}
+
+	// 3) try pro
+	resp2, err2 := genaiGenerateContentHook(cs.Client, ctx, fallback, contents)
+	if err2 == nil {
+		return resp2, fallback, nil
+	}
+
+	// If fallback also fails, return fallback error (more recent/accurate)
+	return nil, fallback, err2
 }
