@@ -170,7 +170,7 @@ func parseExcelReader(file multipart.File) ([]string, [][]string, error) {
 	colorToSource := map[string]string{
 		"#0070C0": "OFFICE OF THE REGISTRAR GENERAL",
 		"#00B0F0": "LIBRARY AND ARCHIVES CANADA",
-		"#B17ED8": "CIRNAC SOURCE",
+		"#7030A0": "CIRNAC SOURCE",
 		"#FFC000": "NCTR SOURCE",
 		"#FFFF00": "FURTHER INVESTIGATION REQUIRED",
 		"#FF9999": "CORONER'S OFFICE SOURCE",
