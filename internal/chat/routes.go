@@ -14,6 +14,7 @@ func RegisterRoutes(r *gin.Engine, chatService *ChatService) {
 	{
 		userGroup.POST("", chatController.Chat)
 		userGroup.POST("/tts", chatController.TTS)
+		userGroup.GET("/describe/:id", chatController.Describe)
 	}
 
 }

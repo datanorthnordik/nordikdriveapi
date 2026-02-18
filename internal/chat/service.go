@@ -59,6 +59,61 @@ var (
 	}
 )
 
+func firstTextFromResp(genResp *genai.GenerateContentResponse) string {
+	if genResp == nil {
+		return ""
+	}
+	for _, candidate := range genResp.Candidates {
+		if candidate.Content == nil {
+			continue
+		}
+		for _, part := range candidate.Content.Parts {
+			if strings.TrimSpace(part.Text) != "" {
+				return part.Text
+			}
+		}
+	}
+	return ""
+}
+
+// generateFromPrompt is the single reusable Gemini/Vertex call path.
+// - prompt is always required
+// - audioBytes/audioMime are optional (Chat can pass them, Describe can pass nil/"")
+func (cs *ChatService) generateFromPrompt(
+	ctx context.Context,
+	prompt string,
+	audioBytes []byte,
+	audioMime string,
+) (answer string, usedModel string, err error) {
+	parts := []*genai.Part{{Text: prompt}}
+
+	if len(audioBytes) > 0 {
+		audioMime = strings.TrimSpace(audioMime)
+		if audioMime == "" || audioMime == "application/octet-stream" {
+			audioMime = "audio/webm"
+		}
+		parts = append(parts, &genai.Part{
+			InlineData: &genai.Blob{Data: audioBytes, MIMEType: audioMime},
+		})
+	}
+
+	contents := []*genai.Content{
+		{Role: "user", Parts: parts},
+	}
+
+	genResp, usedModel, err := cs.generateWith429Fallback(ctx, contents)
+	if err != nil {
+		return "", usedModel, err
+	}
+
+	out := strings.TrimSpace(firstTextFromResp(genResp))
+	if out == "" {
+		return "", usedModel, fmt.Errorf("no response from Gemini")
+	}
+
+	return out, usedModel, nil
+}
+
 func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, filename string, communities []string) (string, error) {
 	if cs.DB == nil {
 		return "", fmt.Errorf("db not initialized")
@@ -73,7 +128,7 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 		return "", fmt.Errorf("file not found")
 	}
 
-	// normalize/filter incoming communities (remove empty entries)
+	// Normalize/filter incoming communities (remove empty entries)
 	var filtered []string
 	for _, c := range communities {
 		c = strings.TrimSpace(c)
@@ -99,6 +154,7 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 		}
 	}
 
+	// Build JSON array of rows for the model
 	var allRows []json.RawMessage
 	for _, row := range fileData {
 		allRows = append(allRows, json.RawMessage(row.RowData))
@@ -108,8 +164,6 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal file data: %w", err)
 	}
-
-	ctx := context.Background()
 
 	styleInstruction := `
 You are a helpful assistant answering a community data question for a non-technical user.
@@ -149,8 +203,11 @@ Answer format:
 		string(fileDataJSON),
 	)
 
-	var response string
+	ctx := context.Background()
 
+	// Optional audio path (kept identical behavior, but now uses the reusable generator)
+	var audioBytes []byte
+	var audioMime string
 	if audioFile != nil {
 		fh, err := openMultipartFileHook(audioFile)
 		if err != nil {
@@ -158,90 +215,73 @@ Answer format:
 		}
 		defer fh.Close()
 
-		audioBytes, err := readAllHook(fh)
+		audioBytes, err = readAllHook(fh)
 		if err != nil {
 			return "", fmt.Errorf("failed to read audio file: %w", err)
 		}
 
-		audioMimeType := audioFile.Header.Get("Content-Type")
-		if audioMimeType == "application/octet-stream" {
-			audioMimeType = "audio/webm"
-		}
-
-		contents := []*genai.Content{
-			{
-				Role: "user",
-				Parts: []*genai.Part{
-					{Text: prompt},
-					{InlineData: &genai.Blob{Data: audioBytes, MIMEType: audioMimeType}},
-				},
-			},
-		}
-
-		genResp, usedModel, err := cs.generateWith429Fallback(ctx, contents)
-		if err != nil {
-			return "", fmt.Errorf("generation error (%s): %w", usedModel, err)
-		}
-
-		if err != nil {
-			return "", fmt.Errorf("generation error: %w", err)
-		}
-
-		if len(genResp.Candidates) > 0 {
-			for _, candidate := range genResp.Candidates {
-				if candidate.Content != nil {
-					for _, part := range candidate.Content.Parts {
-						if part.Text != "" {
-							response = part.Text
-							break
-						}
-					}
-				}
-				if response != "" {
-					break
-				}
-			}
-		}
-	} else {
-		contents := []*genai.Content{
-			{
-				Role: "user",
-				Parts: []*genai.Part{
-					{Text: prompt},
-				},
-			},
-		}
-
-		genResp, usedModel, err := cs.generateWith429Fallback(ctx, contents)
-		if err != nil {
-			return "", fmt.Errorf("generation error (%s): %w", usedModel, err)
-		}
-
-		if err != nil {
-			return "", fmt.Errorf("generation error: %w", err)
-		}
-
-		if len(genResp.Candidates) > 0 {
-			for _, candidate := range genResp.Candidates {
-				if candidate.Content != nil {
-					for _, part := range candidate.Content.Parts {
-						if part.Text != "" {
-							response = part.Text
-							break
-						}
-					}
-				}
-				if response != "" {
-					break
-				}
-			}
-		}
+		audioMime = audioFile.Header.Get("Content-Type")
 	}
 
-	if response == "" {
-		return "", fmt.Errorf("no response from Gemini")
+	answer, usedModel, err := cs.generateFromPrompt(ctx, prompt, audioBytes, audioMime)
+	if err != nil {
+		return "", fmt.Errorf("generation error (%s): %w", usedModel, err)
 	}
-	return response, nil
+
+	return answer, nil
+}
+
+func (cs *ChatService) DescribeRow(rowID int) (string, error) {
+	if cs.DB == nil {
+		return "", fmt.Errorf("db not initialized")
+	}
+	if cs.Client == nil {
+		return "", fmt.Errorf("genai client not initialized")
+	}
+
+	// f.FileData should match your table (id, file_id, row_data, version, etc.)
+	var row f.FileData
+	if err := cs.DB.First(&row, rowID).Error; err != nil {
+		return "", fmt.Errorf("row not found")
+	}
+
+	// Empathetic narrative instruction (no hallucinations)
+	describeInstruction := `
+You are writing a respectful, empathetic narration about ONE individual using ONLY the provided record.
+
+Style requirements:
+- Warm, human, and gentle tone.
+- 1–2 short paragraphs (no bullet points).
+- Do NOT mention JSON, database, tables, ids, or technical details.
+
+Accuracy requirements:
+- Use ONLY what appears in the record.
+- Do NOT guess or add details (age, family, story, emotions, location history) if not present.
+- If a detail is missing (date/cause/community/school), say it is not listed.
+
+Safety:
+- Avoid graphic details. If cause/factor is present, describe it briefly and sensitively.
+
+Output:
+- Start by stating the person’s name (if available).
+- Summarize key fields that exist (community/school/date/cause/notes), and clearly say when something isn’t listed.
+`
+
+	// row.RowData is your jsonb string/bytes. If it's []byte in your struct, cast accordingly.
+	rowJSON := strings.TrimSpace(string(row.RowData))
+
+	prompt := fmt.Sprintf(
+		"%s\n\nRECORD (only source of truth):\n%s",
+		strings.TrimSpace(describeInstruction),
+		rowJSON,
+	)
+
+	ctx := context.Background()
+	out, usedModel, err := cs.generateFromPrompt(ctx, prompt, nil, "")
+	if err != nil {
+		return "", fmt.Errorf("generation error (%s): %w", usedModel, err)
+	}
+	return out, nil
 }
 
 func matchesCommunities(rowData []byte, communities []string) bool {
