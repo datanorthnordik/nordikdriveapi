@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/genai"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -410,5 +411,170 @@ func TestChatService_TTS_Success_NonGlobalHost_AndWav(t *testing.T) {
 	}
 	if len(audio.Data) < 12 || string(audio.Data[:4]) != "RIFF" || string(audio.Data[8:12]) != "WAVE" {
 		t.Fatalf("bad wav header: %q", audio.Data[:12])
+	}
+}
+
+func TestChatService_DescribeRow_DBNotInitialized(t *testing.T) {
+	cs := &ChatService{DB: nil, Client: &genai.Client{}}
+	_, err := cs.DescribeRow(1)
+	if err == nil || !strings.Contains(err.Error(), "db not initialized") {
+		t.Fatalf("expected db not initialized, got %v", err)
+	}
+}
+
+func TestChatService_DescribeRow_ClientNotInitialized(t *testing.T) {
+	db, _, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	cs := &ChatService{DB: db, Client: nil}
+	_, err := cs.DescribeRow(1)
+	if err == nil || !strings.Contains(err.Error(), "genai client not initialized") {
+		t.Fatalf("expected client not initialized, got %v", err)
+	}
+}
+
+func TestChatService_DescribeRow_RowNotFound(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*id.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}))
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	_, err := cs.DescribeRow(123)
+	if err == nil || !strings.Contains(err.Error(), "row not found") {
+		t.Fatalf("expected row not found, got %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatService_DescribeRow_GenerationError(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*id.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
+			AddRow(1, 1, 1, `{"Name":"Jane"}`))
+
+	old := genaiGenerateContentHook
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content) (*genai.GenerateContentResponse, error) {
+		return nil, errors.New("gemini down")
+	}
+	t.Cleanup(func() { genaiGenerateContentHook = old })
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	_, err := cs.DescribeRow(1)
+	if err == nil || !strings.Contains(err.Error(), "generation error") {
+		t.Fatalf("expected generation error, got %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatService_DescribeRow_NoResponseFromGemini(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*id.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
+			AddRow(1, 1, 1, `{"Name":"Jane"}`))
+
+	old := genaiGenerateContentHook
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content) (*genai.GenerateContentResponse, error) {
+		var out genai.GenerateContentResponse
+		_ = json.Unmarshal([]byte(`{"candidates":[]}`), &out)
+		return &out, nil
+	}
+	t.Cleanup(func() { genaiGenerateContentHook = old })
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	_, err := cs.DescribeRow(1)
+	if err == nil || !strings.Contains(err.Error(), "no response from Gemini") {
+		t.Fatalf("expected no response error, got %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatService_DescribeRow_Success_PromptContainsRecord(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*id.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
+			AddRow(1, 1, 1, `{"Name":"John Doe","First Nation/Community":"B"}`))
+
+	old := genaiGenerateContentHook
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content) (*genai.GenerateContentResponse, error) {
+		if len(contents) == 0 || contents[0] == nil || len(contents[0].Parts) == 0 {
+			t.Fatalf("expected contents with prompt text, got: %#v", contents)
+		}
+		prompt := contents[0].Parts[0].Text
+		if !strings.Contains(prompt, `"Name":"John Doe"`) {
+			t.Fatalf("expected prompt to include row JSON, got prompt:\n%s", prompt)
+		}
+		var out genai.GenerateContentResponse
+		_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"DESC_OK"}]}}]}`), &out)
+		return &out, nil
+	}
+	t.Cleanup(func() { genaiGenerateContentHook = old })
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	ans, err := cs.DescribeRow(1)
+	if err != nil || ans != "DESC_OK" {
+		t.Fatalf("expected DESC_OK, got ans=%q err=%v", ans, err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatService_DescribeRow_429FallbackToPro(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*id.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
+			AddRow(1, 1, 1, `{"Name":"Fallback Person"}`))
+
+	old := genaiGenerateContentHook
+	calls := 0
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, model string, _ []*genai.Content) (*genai.GenerateContentResponse, error) {
+		calls++
+		if calls == 1 {
+			if model != "gemini-2.5-flash" {
+				t.Fatalf("expected first model flash, got %s", model)
+			}
+			return nil, &googleapi.Error{Code: 429, Message: "RESOURCE_EXHAUSTED"}
+		}
+		if calls == 2 {
+			if model != "gemini-2.5-pro" {
+				t.Fatalf("expected fallback model pro, got %s", model)
+			}
+			var out genai.GenerateContentResponse
+			_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"PRO_OK"}]}}]}`), &out)
+			return &out, nil
+		}
+		t.Fatalf("unexpected extra call %d", calls)
+		return nil, nil
+	}
+	t.Cleanup(func() { genaiGenerateContentHook = old })
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	ans, err := cs.DescribeRow(1)
+	if err != nil || ans != "PRO_OK" {
+		t.Fatalf("expected PRO_OK, got ans=%q err=%v", ans, err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
 	}
 }

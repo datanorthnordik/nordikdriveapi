@@ -3,6 +3,7 @@ package chat
 import (
 	"net/http"
 	"nordik-drive-api/internal/util"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -36,6 +37,30 @@ func (cc *ChatController) Chat(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"answer": answer})
+}
+
+func (cc *ChatController) Describe(c *gin.Context) {
+	idStr := strings.TrimSpace(c.Param("id"))
+	if idStr == "" {
+		idStr = strings.TrimSpace(c.Query("id"))
+	}
+
+	id, err := strconv.Atoi(idStr)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "valid id is required"})
+		return
+	}
+
+	answer, err := cc.ChatService.DescribeRow(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"id":     id,
+		"answer": answer,
+	})
 }
 
 func (cc *ChatController) TTS(c *gin.Context) {

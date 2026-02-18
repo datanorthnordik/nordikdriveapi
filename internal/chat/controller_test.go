@@ -162,3 +162,129 @@ func TestChatController_Chat_ServiceError500(t *testing.T) {
 		t.Fatalf("expected file not found, got body=%s", res.Body.String())
 	}
 }
+
+func TestChatController_Describe_MissingID_400(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cc := NewChatController(&ChatService{})
+	r := gin.New()
+
+	// route without :id, so Param("id")=="" and Query("id")=="" -> 400
+	r.GET("/chat/describe", cc.Describe)
+
+	req := httptest.NewRequest(http.MethodGet, "/chat/describe", nil)
+	res := httptest.NewRecorder()
+	r.ServeHTTP(res, req)
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "valid id is required") {
+		t.Fatalf("expected valid id error, got body=%s", res.Body.String())
+	}
+}
+
+func TestChatController_Describe_InvalidID_400(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cc := NewChatController(&ChatService{})
+	r := gin.New()
+	r.GET("/chat/describe", cc.Describe)
+
+	req := httptest.NewRequest(http.MethodGet, "/chat/describe?id=abc", nil)
+	res := httptest.NewRecorder()
+	r.ServeHTTP(res, req)
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "valid id is required") {
+		t.Fatalf("expected valid id error, got body=%s", res.Body.String())
+	}
+}
+
+func TestChatController_Describe_Success200_PathParam(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db, mock, cleanup := newMockDBChat(t)
+	defer cleanup()
+
+	// DB: file_data row lookup by id
+	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*id.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
+			AddRow(1, 1, 1, `{"Name":"John Doe","First Nation/Community":"B","Notes":"Test"}`))
+
+	// Stub Gemini
+	oldGen := genaiGenerateContentHook
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content) (*genai.GenerateContentResponse, error) {
+		if len(contents) == 0 || contents[0] == nil || len(contents[0].Parts) == 0 {
+			t.Fatalf("expected contents with prompt text, got: %#v", contents)
+		}
+		prompt := contents[0].Parts[0].Text
+		if !strings.Contains(prompt, "RECORD (only source of truth):") {
+			t.Fatalf("expected RECORD section, got prompt:\n%s", prompt)
+		}
+		if !strings.Contains(prompt, `"Name":"John Doe"`) {
+			t.Fatalf("expected prompt to include row JSON, got prompt:\n%s", prompt)
+		}
+
+		var out genai.GenerateContentResponse
+		_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"DESC_OK"}]}}]}`), &out)
+		return &out, nil
+	}
+	t.Cleanup(func() { genaiGenerateContentHook = oldGen })
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	cc := NewChatController(cs)
+
+	r := gin.New()
+	r.GET("/chat/describe/:id", cc.Describe)
+
+	req := httptest.NewRequest(http.MethodGet, "/chat/describe/1", nil)
+	res := httptest.NewRecorder()
+	r.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), `"id":1`) || !strings.Contains(res.Body.String(), `"answer":"DESC_OK"`) {
+		t.Fatalf("unexpected body: %s", res.Body.String())
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatController_Describe_ServiceError500_RowNotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db, mock, cleanup := newMockDBChat(t)
+	defer cleanup()
+
+	// no rows => service returns "row not found"
+	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*id.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}))
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	cc := NewChatController(cs)
+
+	r := gin.New()
+	r.GET("/chat/describe/:id", cc.Describe)
+
+	req := httptest.NewRequest(http.MethodGet, "/chat/describe/99", nil)
+	res := httptest.NewRecorder()
+	r.ServeHTTP(res, req)
+
+	if res.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d body=%s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "row not found") {
+		t.Fatalf("expected row not found, got body=%s", res.Body.String())
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
