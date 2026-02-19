@@ -1038,7 +1038,7 @@ func TestFileService_CreateEditRequest_AllBranches(t *testing.T) {
 
 	// main request insert error
 	_ = db.Migrator().DropTable(&FileEditRequest{})
-	_, err := svc.CreateEditRequest(EditRequestInput{FirstName: "A", LastName: "B"}, 1)
+	_, err := svc.CreateEditRequest(EditRequestInput{FirstName: "A", LastName: "B", FileID: 1, Filename: "f"}, 1)
 	if err == nil {
 		t.Fatalf("expected create request err")
 	}
@@ -1069,13 +1069,15 @@ func TestFileService_CreateEditRequest_AllBranches(t *testing.T) {
 		return "", 0, errors.New("upload fail")
 	}
 	_, err = svc.CreateEditRequest(EditRequestInput{
-		FirstName:   "A",
-		LastName:    "B",
-		FileID:      1,
-		Filename:    "f",
-		PhotosInApp: []string{"b64"},
-		IsEdited:    false,
-		RowID:       0,
+		FirstName: "A",
+		LastName:  "B",
+		FileID:    1,
+		Filename:  "f",
+		PhotosInApp: []PhotoInput{
+			{Filename: "a.jpg", MimeType: "image/jpeg", DataBase64: "b64", Comment: "c"},
+		},
+		IsEdited: false,
+		RowID:    0,
 	}, 1)
 	if err == nil {
 		t.Fatalf("expected upload err")
@@ -1089,13 +1091,15 @@ func TestFileService_CreateEditRequest_AllBranches(t *testing.T) {
 	}
 	_ = db.Migrator().DropTable(&FileEditRequestPhoto{})
 	_, err = svc.CreateEditRequest(EditRequestInput{
-		FirstName:   "A",
-		LastName:    "B",
-		FileID:      1,
-		Filename:    "f",
-		PhotosInApp: []string{"b64"},
-		IsEdited:    false,
-		RowID:       0,
+		FirstName: "A",
+		LastName:  "B",
+		FileID:    1,
+		Filename:  "f",
+		PhotosInApp: []PhotoInput{
+			{Filename: "a.jpg", MimeType: "image/jpeg", DataBase64: "b64"},
+		},
+		IsEdited: false,
+		RowID:    0,
 	}, 1)
 	if err == nil {
 		t.Fatalf("expected photo insert err")
@@ -1113,14 +1117,18 @@ func TestFileService_CreateEditRequest_AllBranches(t *testing.T) {
 		return "", 0, errors.New("gallery upload fail")
 	}
 	_, err = svc.CreateEditRequest(EditRequestInput{
-		FirstName:        "A",
-		LastName:         "B",
-		FileID:           1,
-		Filename:         "f",
-		PhotosInApp:      []string{"b64"},
-		PhotosForGallery: []string{"b642"},
-		IsEdited:         false,
-		RowID:            0,
+		FirstName: "A",
+		LastName:  "B",
+		FileID:    1,
+		Filename:  "f",
+		PhotosInApp: []PhotoInput{
+			{Filename: "a.jpg", MimeType: "image/jpeg", DataBase64: "b64"},
+		},
+		PhotosForGallery: []PhotoInput{
+			{Filename: "b.jpg", MimeType: "image/jpeg", DataBase64: "b642"},
+		},
+		IsEdited: false,
+		RowID:    0,
 	}, 1)
 	if err == nil {
 		t.Fatalf("expected gallery upload err")
@@ -1164,8 +1172,12 @@ func TestFileService_CreateEditRequest_AllBranches(t *testing.T) {
 		Changes: map[string][]EditChangeInput{
 			"c": {{RowID: 0, FieldName: "Name", OldValue: "", NewValue: "X"}},
 		},
-		PhotosInApp:      []string{"b64a"},
-		PhotosForGallery: []string{"b64g"},
+		PhotosInApp: []PhotoInput{
+			{Filename: "a.jpg", MimeType: "image/jpeg", DataBase64: "b64a", Comment: "hello"},
+		},
+		PhotosForGallery: []PhotoInput{
+			{Filename: "g.jpg", MimeType: "image/jpeg", DataBase64: "b64g", Comment: "gallery"},
+		},
 		Documents: []DocumentInput{
 			{DocumentType: "document", Filename: "id.pdf", DataBase64: "b64d", DocumentCategory: ""},
 		},
@@ -1191,7 +1203,9 @@ func TestFileService_CreateEditRequest_AllBranches(t *testing.T) {
 		FirstName: "A", LastName: "B",
 		FileID: 10, Filename: "master",
 		IsEdited: true, RowID: 123,
-		PhotosInApp: []string{"b64"},
+		PhotosInApp: []PhotoInput{
+			{Filename: "a.jpg", MimeType: "image/jpeg", DataBase64: "b64"},
+		},
 	}, 55)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -1199,6 +1213,53 @@ func TestFileService_CreateEditRequest_AllBranches(t *testing.T) {
 	wantRowPrefix := util.RowPrefix(123)
 	if len(uploadedPaths) == 0 || !strings.HasPrefix(uploadedPaths[0], wantRowPrefix+"/") {
 		t.Fatalf("expected rowprefix %q, got %#v", wantRowPrefix, uploadedPaths)
+	}
+}
+
+func TestFileService_CreateEditRequest_PhotoExtension_FromFilenameOrMime(t *testing.T) {
+	db := newTestDB(t)
+	svc := &FileService{DB: db}
+
+	prevUpload := uploadToGCSHook
+	t.Cleanup(func() { uploadToGCSHook = prevUpload })
+
+	var uploadedPaths []string
+	uploadToGCSHook = func(base64, bucket, objectPath string) (string, int64, error) {
+		uploadedPaths = append(uploadedPaths, objectPath)
+		return "gs://" + bucket + "/" + objectPath, 123, nil
+	}
+
+	req, err := svc.CreateEditRequest(EditRequestInput{
+		FirstName: "A", LastName: "B",
+		FileID: 1, Filename: "f",
+		IsEdited: false, RowID: 0,
+		PhotosInApp: []PhotoInput{
+			// extension from filename
+			{Filename: "x.png", MimeType: "image/png", DataBase64: "b64"},
+			// no extension -> should come from mime
+			{Filename: "noext", MimeType: "image/webp", DataBase64: "b64"},
+			// neither helpful -> default .jpg
+			{Filename: "unknown", MimeType: "application/octet-stream", DataBase64: "b64"},
+		},
+	}, 1)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if req == nil || req.RequestID == 0 {
+		t.Fatalf("expected request created")
+	}
+
+	if len(uploadedPaths) != 3 {
+		t.Fatalf("expected 3 uploads, got %d (%#v)", len(uploadedPaths), uploadedPaths)
+	}
+	if !strings.HasSuffix(uploadedPaths[0], ".png") {
+		t.Fatalf("expected .png suffix, got %q", uploadedPaths[0])
+	}
+	if !strings.HasSuffix(uploadedPaths[1], ".webp") {
+		t.Fatalf("expected .webp suffix, got %q", uploadedPaths[1])
+	}
+	if !strings.HasSuffix(uploadedPaths[2], ".jpg") {
+		t.Fatalf("expected default .jpg suffix, got %q", uploadedPaths[2])
 	}
 }
 
