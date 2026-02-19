@@ -126,8 +126,8 @@ type EditRequestInput struct {
 	LastName  string                       `json:"lastname"`
 	RowID     int                          `json:"row_id"`
 
-	PhotosInApp      []string `json:"photos_in_app"`
-	PhotosForGallery []string `json:"photos_for_gallery_review"`
+	PhotosInApp      []PhotoInput `json:"photos_in_app"`
+	PhotosForGallery []PhotoInput `json:"photos_for_gallery_review"`
 
 	Consent        bool `json:"consent"`
 	ArchiveConsent bool `json:"archive_consent"`
@@ -171,6 +171,15 @@ type FileEditRequestPhoto struct {
 	FileID           uint      `json:"file_id"`
 	DocumentType     string    `gorm:"type:varchar(20);default:'photos'" json:"document_type"`
 	DocumentCategory string    `gorm:"type:varchar(50)" json:"document_category"`
+	PhotoComment     string    `gorm:"type:text;column:photo_comment" json:"photo_comment"`
+}
+
+type PhotoInput struct {
+	Filename   string `json:"filename"`
+	MimeType   string `json:"mime_type"`
+	Size       int64  `json:"size"`
+	DataBase64 string `json:"data_base64"`
+	Comment    string `json:"comment"`
 }
 
 type gcsReadHandle struct {

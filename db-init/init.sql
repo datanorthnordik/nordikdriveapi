@@ -191,6 +191,7 @@ CREATE TABLE file_edit_request_photos (
 
     document_type VARCHAR(20) NOT NULL DEFAULT 'photos',
     document_category VARCHAR(50) NULL,  
+    photo_comment TEXT NULL
 );
 
 

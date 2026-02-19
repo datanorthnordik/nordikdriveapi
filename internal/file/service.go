@@ -650,25 +650,27 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 	}
 
 	// App photos
-	for i, base64Img := range input.PhotosInApp {
-
-		fileName := fmt.Sprintf("%s_%s_%s_%d.jpg",
+	// App photos
+	for i, p := range input.PhotosInApp {
+		ext := util.ExtFromFilenameOrMime(p.Filename, p.MimeType)
+		fileName := fmt.Sprintf("%s_%s_%s_%d%s",
 			input.FirstName,
 			input.LastName,
 			timestamp,
 			i+1,
+			ext,
 		)
 
 		objectPath := fmt.Sprintf("%s/%s", basePrefix, fileName)
 
-		url, sizeBytes, err := uploadToGCSHook(base64Img, bucket, objectPath)
+		url, sizeBytes, err := uploadToGCSHook(p.DataBase64, bucket, objectPath)
 		if err != nil {
 			return nil, err
 		}
 
 		photoRecord := FileEditRequestPhoto{
 			RequestID:        request.RequestID,
-			RowID:            rowId, // 0 for new request, as you want
+			RowID:            rowId,
 			PhotoURL:         url,
 			FileName:         fileName,
 			SizeBytes:        sizeBytes,
@@ -679,6 +681,7 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 			FileID:           input.FileID,
 			DocumentType:     "photos",
 			DocumentCategory: "",
+			PhotoComment:     util.ClampComment100(p.Comment), // NEW
 		}
 
 		if err := fs.DB.Create(&photoRecord).Error; err != nil {
@@ -687,25 +690,27 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 	}
 
 	// Gallery photos
-	for i, base64Img := range input.PhotosForGallery {
-
-		fileName := fmt.Sprintf("%s_%s_%s_gallery_%d.jpg",
+	// Gallery photos
+	for i, p := range input.PhotosForGallery {
+		ext := util.ExtFromFilenameOrMime(p.Filename, p.MimeType)
+		fileName := fmt.Sprintf("%s_%s_%s_gallery_%d%s",
 			input.FirstName,
 			input.LastName,
 			timestamp,
 			i+1,
+			ext,
 		)
 
 		objectPath := fmt.Sprintf("%s/%s", basePrefix, fileName)
 
-		url, sizeBytes, err := uploadToGCSHook(base64Img, bucket, objectPath)
+		url, sizeBytes, err := uploadToGCSHook(p.DataBase64, bucket, objectPath)
 		if err != nil {
 			return nil, err
 		}
 
 		photoRecord := FileEditRequestPhoto{
 			RequestID:        request.RequestID,
-			RowID:            rowId, // 0 for new request
+			RowID:            rowId,
 			PhotoURL:         url,
 			FileName:         fileName,
 			SizeBytes:        sizeBytes,
@@ -716,6 +721,7 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 			FileID:           input.FileID,
 			DocumentType:     "photos",
 			DocumentCategory: "",
+			PhotoComment:     util.ClampComment100(p.Comment), // NEW
 		}
 
 		if err := fs.DB.Create(&photoRecord).Error; err != nil {
