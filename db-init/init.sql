@@ -234,6 +234,22 @@ WHERE file_id = 40
   AND row_data ? 'First Nation/Community'
   AND row_data ->> 'First Nation/Community' IS NOT NULL;
 
+create table data_config (
+  id bigserial primary key,
+
+  file_id bigint not null unique,   
+  file_name text not null,          
+
+  version int not null default 1,
+  checksum text not null,
+  config jsonb not null,
+
+  is_active boolean not null default true,
+  updated_at timestamptz not null default now()
+);
+
+create index data_config_file_active on data_config (file_id, is_active);
+
 
 CREATE INDEX IF NOT EXISTS idx_file_edit_request_community_gin
   ON file_edit_request USING GIN (community);
