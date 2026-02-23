@@ -8,6 +8,7 @@ import (
 	"nordik-drive-api/internal/auth"
 	"nordik-drive-api/internal/chat"
 	"nordik-drive-api/internal/community"
+	"nordik-drive-api/internal/dataconfig"
 	"nordik-drive-api/internal/file"
 	"nordik-drive-api/internal/logs"
 	"nordik-drive-api/internal/role"
@@ -58,6 +59,9 @@ func main() {
 
 	communityService := &community.CommunityService{DB: db}
 	community.RegisterRoutes(r, communityService)
+
+	configService := &dataconfig.DataConfigService{DB: db}
+	dataconfig.RegisterRoutes(r, configService)
 
 	// Create client with ADC (production)
 	ctx := context.Background()
