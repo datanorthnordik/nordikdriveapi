@@ -4,7 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
+	"sync"
+	"time"
+
+	"nordik-drive-api/internal/util"
 
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -12,6 +17,142 @@ import (
 
 type FormSubmissionService struct {
 	DB *gorm.DB
+}
+
+var uploadBase64ToGCSHook = util.UploadPhotoToGCS
+
+func (s *FormSubmissionService) uploadFormFiles(req *SaveFormSubmissionRequest) ([]FormSubmissionUploadInput, []FormSubmissionUploadInput, error) {
+	folder := util.SanitizePart(req.FormKey)
+	switch folder {
+	case "boarding", "boarding_tab", "boarding_home":
+		folder = "boarding_home"
+	}
+
+	basePrefix := fmt.Sprintf("requests/%s/%d_%d", folder, req.FileID, req.RowID)
+	timestamp := time.Now().UTC().Format("20060102150405")
+	bucket := "nordik-drive-photos"
+
+	safeBase := func(name string) string {
+		name = strings.TrimSpace(name)
+		ext := path.Ext(name)
+		base := strings.TrimSpace(strings.TrimSuffix(name, ext))
+		base = util.SanitizePart(base)
+		if base == "" {
+			base = "file"
+		}
+		return base
+	}
+
+	type job struct {
+		kind string
+		idx  int
+		item FormSubmissionUploadInput
+	}
+	type result struct {
+		kind string
+		idx  int
+		item FormSubmissionUploadInput
+		err  error
+	}
+
+	docs := make([]FormSubmissionUploadInput, len(req.Documents))
+	photos := make([]FormSubmissionUploadInput, len(req.Photos))
+
+	jobs := make([]job, 0, len(req.Documents)+len(req.Photos))
+	for i, d := range req.Documents {
+		jobs = append(jobs, job{kind: "document", idx: i, item: d})
+	}
+	for i, p := range req.Photos {
+		jobs = append(jobs, job{kind: "photo", idx: i, item: p})
+	}
+
+	if len(jobs) == 0 {
+		return docs, photos, nil
+	}
+
+	sem := make(chan struct{}, 4) // 4 parallel uploads
+	outCh := make(chan result, len(jobs))
+	var wg sync.WaitGroup
+
+	for _, j := range jobs {
+		wg.Add(1)
+
+		go func(j job) {
+			defer wg.Done()
+
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			out := j.item
+
+			// Backward compatible: allow already-uploaded URLs
+			if strings.TrimSpace(out.DataBase64) == "" {
+				if strings.TrimSpace(out.FileURL) == "" {
+					outCh <- result{
+						err: fmt.Errorf("%s upload %d is missing both data_base64 and file_url", j.kind, j.idx+1),
+					}
+					return
+				}
+
+				outCh <- result{
+					kind: j.kind,
+					idx:  j.idx,
+					item: out,
+				}
+				return
+			}
+
+			ext := util.ExtFromFilenameOrMime(out.FileName, out.MimeType)
+
+			objectName := fmt.Sprintf(
+				"%s/%s_%s_%d_%s%s",
+				basePrefix,
+				j.kind,
+				timestamp,
+				j.idx+1,
+				safeBase(out.FileName),
+				ext,
+			)
+
+			url, sizeBytes, err := uploadBase64ToGCSHook(
+				out.DataBase64,
+				bucket,
+				objectName,
+			)
+			if err != nil {
+				outCh <- result{
+					err: fmt.Errorf("failed to upload %s %q: %w", j.kind, strings.TrimSpace(out.FileName), err),
+				}
+				return
+			}
+
+			out.FileURL = url
+			out.FileSizeBytes = sizeBytes
+
+			outCh <- result{
+				kind: j.kind,
+				idx:  j.idx,
+				item: out,
+			}
+		}(j)
+	}
+
+	wg.Wait()
+	close(outCh)
+
+	for r := range outCh {
+		if r.err != nil {
+			return nil, nil, r.err
+		}
+
+		if r.kind == "document" {
+			docs[r.idx] = r.item
+		} else {
+			photos[r.idx] = r.item
+		}
+	}
+
+	return docs, photos, nil
 }
 
 func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fileID *int64) (*GetFormSubmissionResponse, error) {
@@ -140,7 +281,43 @@ func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest) (*GetForm
 		return nil, errors.New("form_label is required")
 	}
 
-	err := s.DB.Transaction(func(tx *gorm.DB) error {
+	// Validate detail keys before upload
+	detailKeys := make(map[string]struct{}, len(req.Details))
+	for _, d := range req.Details {
+		key := strings.TrimSpace(d.DetailKey)
+		if key == "" {
+			return nil, errors.New("detail_key is required in details")
+		}
+		detailKeys[key] = struct{}{}
+	}
+
+	for _, d := range req.Documents {
+		key := strings.TrimSpace(d.DetailKey)
+		if key == "" {
+			return nil, errors.New("detail_key is required in documents")
+		}
+		if _, ok := detailKeys[key]; !ok {
+			return nil, fmt.Errorf("document detail_key not found in details: %s", key)
+		}
+	}
+
+	for _, p := range req.Photos {
+		key := strings.TrimSpace(p.DetailKey)
+		if key == "" {
+			return nil, errors.New("detail_key is required in photos")
+		}
+		if _, ok := detailKeys[key]; !ok {
+			return nil, fmt.Errorf("photo detail_key not found in details: %s", key)
+		}
+	}
+
+	// Upload first (outside DB transaction)
+	uploadedDocs, uploadedPhotos, err := s.uploadFormFiles(req)
+	if err != nil {
+		return nil, err
+	}
+
+	err = s.DB.Transaction(func(tx *gorm.DB) error {
 		var sub FormSubmission
 		findErr := tx.
 			Where("file_id = ? AND row_id = ? AND form_key = ?", req.FileID, req.RowID, req.FormKey).
@@ -185,9 +362,6 @@ func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest) (*GetForm
 
 		for _, d := range req.Details {
 			key := strings.TrimSpace(d.DetailKey)
-			if key == "" {
-				return errors.New("detail_key is required in details")
-			}
 
 			raw, err := json.Marshal(d.Value)
 			if err != nil {
@@ -215,10 +389,6 @@ func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest) (*GetForm
 
 		createUpload := func(uploadType string, in FormSubmissionUploadInput) error {
 			key := strings.TrimSpace(in.DetailKey)
-			if key == "" {
-				return errors.New("detail_key is required in uploads")
-			}
-
 			detailID, ok := detailIDByKey[key]
 			if !ok {
 				return fmt.Errorf("upload detail_key not found in details: %s", key)
@@ -231,7 +401,7 @@ func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest) (*GetForm
 				FileName:      strings.TrimSpace(in.FileName),
 				MimeType:      strings.TrimSpace(in.MimeType),
 				FileSizeBytes: in.FileSizeBytes,
-				FileURL:       strings.TrimSpace(in.FileURL),
+				FileURL:       strings.TrimSpace(in.FileURL), // gs://... from upload
 				FileCategory:  strings.TrimSpace(in.FileCategory),
 				FileComment:   strings.TrimSpace(in.FileComment),
 			}
@@ -239,13 +409,13 @@ func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest) (*GetForm
 			return tx.Create(&row).Error
 		}
 
-		for _, d := range req.Documents {
+		for _, d := range uploadedDocs {
 			if err := createUpload("document", d); err != nil {
 				return err
 			}
 		}
 
-		for _, p := range req.Photos {
+		for _, p := range uploadedPhotos {
 			if err := createUpload("photo", p); err != nil {
 				return err
 			}
