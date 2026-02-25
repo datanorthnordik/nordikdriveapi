@@ -6,7 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func RegisterRoutes(r *gin.Engine, dataconfigService *DataConfigService) {
+func RegisterRoutes(r *gin.Engine, dataconfigService DataConfigServiceAPI) {
 	communityController := &DataConfigController{DataConfigService: dataconfigService}
 
 	dataConfigGroup := r.Group("/api/config")
