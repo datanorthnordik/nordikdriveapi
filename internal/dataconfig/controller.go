@@ -11,7 +11,7 @@ import (
 )
 
 type DataConfigController struct {
-	DataConfigService *DataConfigService
+	DataConfigService DataConfigServiceAPI
 }
 
 // GET /data-config?file_name=...&last_modified=...
