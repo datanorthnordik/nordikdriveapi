@@ -250,6 +250,67 @@ create table data_config (
 
 create index data_config_file_active on data_config (file_id, is_active);
 
+CREATE TABLE form_submissions (
+    id              BIGSERIAL PRIMARY KEY,
+    file_id         BIGINT NOT NULL,
+    row_id          BIGINT NOT NULL,
+    file_name       TEXT NOT NULL DEFAULT '',
+    form_key        VARCHAR(150) NOT NULL,
+    form_label      TEXT NOT NULL,
+    consent_text    TEXT NOT NULL DEFAULT '',
+    consent_given   BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT uq_form_submissions_file_row_form
+        UNIQUE (row_id )
+);
+
+CREATE TABLE form_submission_details (
+    id                BIGSERIAL PRIMARY KEY,
+    submission_id     BIGINT NOT NULL
+                      REFERENCES form_submissions(id) ON DELETE CASCADE,
+    detail_key        VARCHAR(200) NOT NULL,
+    detail_label      TEXT NOT NULL,
+    field_type        VARCHAR(50) NOT NULL,
+    consent_required  BOOLEAN NOT NULL DEFAULT FALSE,
+    value_json        JSONB NULL,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT uq_form_submission_details_submission_key
+        UNIQUE (submission_id, detail_key)
+);
+
+CREATE TABLE form_submission_uploads (
+    id               BIGSERIAL PRIMARY KEY,
+    submission_id    BIGINT NOT NULL
+                     REFERENCES form_submissions(id) ON DELETE CASCADE,
+    detail_id        BIGINT NOT NULL
+                     REFERENCES form_submission_details(id) ON DELETE CASCADE,
+    upload_type      VARCHAR(20) NOT NULL CHECK (upload_type IN ('document', 'photo')),
+    file_name        TEXT NOT NULL,
+    mime_type        TEXT NOT NULL DEFAULT '',
+    file_size_bytes  BIGINT NOT NULL DEFAULT 0 CHECK (file_size_bytes >= 0),
+    file_url         TEXT NULL,
+    file_category    TEXT NOT NULL DEFAULT '',
+    file_comment     TEXT NOT NULL DEFAULT '',
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_form_submissions_lookup
+    ON form_submissions (row_id);
+
+CREATE INDEX idx_form_submission_details_submission
+    ON form_submission_details (submission_id);
+
+CREATE INDEX idx_form_submission_details_key
+    ON form_submission_details (detail_key);
+
+CREATE INDEX idx_form_submission_uploads_submission
+    ON form_submission_uploads (submission_id);
+
+
 
 CREATE INDEX IF NOT EXISTS idx_file_edit_request_community_gin
   ON file_edit_request USING GIN (community);
