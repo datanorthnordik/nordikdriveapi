@@ -60,15 +60,14 @@ type FormSubmissionDetailInput struct {
 }
 
 type FormSubmissionUploadInput struct {
-	ID            interface{} `json:"id,omitempty"`
-	DetailKey     string      `json:"detail_key"`
-	FileName      string      `json:"file_name"`
-	MimeType      string      `json:"mime_type"`
-	FileSizeBytes int64       `json:"file_size_bytes"`
-	FileURL       string      `json:"file_url"`
-	FileCategory  string      `json:"file_category"`
-	FileComment   string      `json:"file_comment"`
-	IsExisting    bool        `json:"is_existing"`
+	DetailKey     string `json:"detail_key"`
+	FileName      string `json:"file_name"`
+	MimeType      string `json:"mime_type"`
+	FileSizeBytes int64  `json:"file_size_bytes"`
+	FileURL       string `json:"file_url"`
+	FileCategory  string `json:"file_category"`
+	FileComment   string `json:"file_comment"`
+	DataBase64    string `json:"data_base64"`
 }
 
 type SaveFormSubmissionRequest struct {
