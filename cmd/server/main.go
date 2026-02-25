@@ -10,6 +10,7 @@ import (
 	"nordik-drive-api/internal/community"
 	"nordik-drive-api/internal/dataconfig"
 	"nordik-drive-api/internal/file"
+	"nordik-drive-api/internal/formsubmission"
 	"nordik-drive-api/internal/logs"
 	"nordik-drive-api/internal/role"
 	"os"
@@ -62,6 +63,9 @@ func main() {
 
 	configService := &dataconfig.DataConfigService{DB: db}
 	dataconfig.RegisterRoutes(r, configService)
+
+	formSubmissionService := &formsubmission.FormSubmissionService{DB: db}
+	formsubmission.RegisterRoutes(r, formSubmissionService)
 
 	// Create client with ADC (production)
 	ctx := context.Background()
