@@ -1,9 +1,12 @@
 package formsubmission
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"path"
 	"strings"
 	"sync"
@@ -11,6 +14,7 @@ import (
 
 	"nordik-drive-api/internal/util"
 
+	"cloud.google.com/go/storage"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
@@ -20,6 +24,33 @@ type FormSubmissionService struct {
 }
 
 var uploadBase64ToGCSHook = util.UploadPhotoToGCS
+var newFormSubmissionGCSClientHook = func(ctx context.Context) (*storage.Client, error) {
+	return storage.NewClient(ctx)
+}
+
+func parseFormUploadGSURL(gsURL string) (bucket string, objectPath string, err error) {
+	gsURL = strings.TrimSpace(gsURL)
+	if gsURL == "" {
+		return "", "", fmt.Errorf("empty gs url")
+	}
+	if !strings.HasPrefix(gsURL, "gs://") {
+		return "", "", fmt.Errorf("invalid gs url (must start with gs://): %s", gsURL)
+	}
+
+	rest := strings.TrimPrefix(gsURL, "gs://")
+	slash := strings.Index(rest, "/")
+	if slash < 0 || slash == len(rest)-1 {
+		return "", "", fmt.Errorf("invalid gs url format: %s", gsURL)
+	}
+
+	bucket = strings.TrimSpace(rest[:slash])
+	objectPath = strings.TrimSpace(rest[slash+1:])
+	if bucket == "" || objectPath == "" {
+		return "", "", fmt.Errorf("invalid gs url format: %s", gsURL)
+	}
+
+	return bucket, objectPath, nil
+}
 
 func (s *FormSubmissionService) uploadFormFiles(req *SaveFormSubmissionRequest) ([]FormSubmissionUploadInput, []FormSubmissionUploadInput, error) {
 	folder := util.SanitizePart(req.FormKey)
@@ -455,4 +486,52 @@ func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fil
 		Documents:   respDocs,
 		Photos:      respPhotos,
 	}, nil
+}
+
+func (s *FormSubmissionService) GetUploadBytes(id uint) ([]byte, string, string, error) {
+	var rec FormSubmissionUpload
+	if err := s.DB.First(&rec, id).Error; err != nil {
+		return nil, "", "", err
+	}
+
+	bucket, objectPath, err := parseFormUploadGSURL(rec.FileURL)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	ctx := context.Background()
+	client, err := newFormSubmissionGCSClientHook(ctx)
+	if err != nil {
+		return nil, "", "", err
+	}
+	defer client.Close()
+
+	rc, err := client.Bucket(bucket).Object(objectPath).NewReader(ctx)
+	if err != nil {
+		return nil, "", "", err
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	contentType := strings.TrimSpace(rc.ContentType())
+	if contentType == "" {
+		contentType = strings.TrimSpace(rec.MimeType)
+	}
+	if contentType == "" {
+		contentType = http.DetectContentType(data)
+	}
+
+	filename := strings.TrimSpace(rec.FileName)
+	if filename == "" {
+		filename = path.Base(objectPath)
+	}
+	if filename == "" {
+		filename = fmt.Sprintf("upload_%d", rec.ID)
+	}
+
+	return data, contentType, filename, nil
 }
