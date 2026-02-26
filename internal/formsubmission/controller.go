@@ -1,6 +1,7 @@
 package formsubmission
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -61,6 +62,29 @@ func (cc *FormSubmissionController) SaveFormSubmission(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, res)
+}
+
+func (cc *FormSubmissionController) GetUpload(c *gin.Context) {
+	idParam := strings.TrimSpace(c.Param("id"))
+	id, err := strconv.Atoi(idParam)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+
+	data, contentType, filename, err := cc.FormSubmissionService.GetUploadBytes(uint(id))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	disposition := "inline"
+	if !strings.HasPrefix(contentType, "image/") && contentType != "application/pdf" {
+		disposition = "attachment"
+	}
+
+	c.Header("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, filename))
+	c.Data(http.StatusOK, contentType, data)
 }
 
 func parseRequiredInt64Query(v string) (int64, error) {
