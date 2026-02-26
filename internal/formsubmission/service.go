@@ -155,6 +155,199 @@ func (s *FormSubmissionService) uploadFormFiles(req *SaveFormSubmissionRequest) 
 	return docs, photos, nil
 }
 
+func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest) (*GetFormSubmissionResponse, error) {
+	if req == nil {
+		return nil, errors.New("request is required")
+	}
+	if req.FileID <= 0 {
+		return nil, errors.New("file_id is required")
+	}
+	if req.RowID <= 0 {
+		return nil, errors.New("row_id is required")
+	}
+	if strings.TrimSpace(req.FormKey) == "" {
+		return nil, errors.New("form_key is required")
+	}
+	if strings.TrimSpace(req.FormLabel) == "" {
+		return nil, errors.New("form_label is required")
+	}
+
+	// Validate detail keys before upload
+	detailKeys := make(map[string]struct{}, len(req.Details))
+	for _, d := range req.Details {
+		key := strings.TrimSpace(d.DetailKey)
+		if key == "" {
+			return nil, errors.New("detail_key is required in details")
+		}
+		detailKeys[key] = struct{}{}
+	}
+
+	for _, d := range req.Documents {
+		key := strings.TrimSpace(d.DetailKey)
+		if key == "" {
+			return nil, errors.New("detail_key is required in documents")
+		}
+		if _, ok := detailKeys[key]; !ok {
+			return nil, fmt.Errorf("document detail_key not found in details: %s", key)
+		}
+	}
+
+	for _, p := range req.Photos {
+		key := strings.TrimSpace(p.DetailKey)
+		if key == "" {
+			return nil, errors.New("detail_key is required in photos")
+		}
+		if _, ok := detailKeys[key]; !ok {
+			return nil, fmt.Errorf("photo detail_key not found in details: %s", key)
+		}
+	}
+
+	// Upload first (outside DB transaction)
+	uploadedDocs, uploadedPhotos, err := s.uploadFormFiles(req)
+	if err != nil {
+		return nil, err
+	}
+
+	err = s.DB.Transaction(func(tx *gorm.DB) error {
+		var sub FormSubmission
+		findErr := tx.
+			Where("file_id = ? AND row_id = ? AND form_key = ?", req.FileID, req.RowID, req.FormKey).
+			First(&sub).Error
+
+		if findErr != nil && !errors.Is(findErr, gorm.ErrRecordNotFound) {
+			return findErr
+		}
+
+		if errors.Is(findErr, gorm.ErrRecordNotFound) {
+			sub = FormSubmission{
+				FileID:       req.FileID,
+				RowID:        req.RowID,
+				FileName:     strings.TrimSpace(req.FileName),
+				FormKey:      strings.TrimSpace(req.FormKey),
+				FormLabel:    strings.TrimSpace(req.FormLabel),
+				ConsentText:  req.ConsentText,
+				ConsentGiven: req.Consent,
+			}
+			if err := tx.Create(&sub).Error; err != nil {
+				return err
+			}
+		} else {
+			if err := tx.Model(&sub).Updates(map[string]interface{}{
+				"file_name":     strings.TrimSpace(req.FileName),
+				"form_label":    strings.TrimSpace(req.FormLabel),
+				"consent_text":  req.ConsentText,
+				"consent_given": req.Consent,
+			}).Error; err != nil {
+				return err
+			}
+		}
+
+		// Load existing details once so we can preserve IDs
+		var existingDetails []FormSubmissionDetail
+		if err := tx.Where("submission_id = ?", sub.ID).Find(&existingDetails).Error; err != nil {
+			return err
+		}
+
+		existingByKey := make(map[string]FormSubmissionDetail, len(existingDetails))
+		detailIDByKey := make(map[string]int64, len(existingDetails))
+
+		for _, ed := range existingDetails {
+			key := strings.TrimSpace(ed.DetailKey)
+			if key == "" {
+				continue
+			}
+			existingByKey[key] = ed
+			detailIDByKey[key] = ed.ID
+		}
+
+		// Upsert details by detail_key (preserve old IDs)
+		for _, d := range req.Details {
+			key := strings.TrimSpace(d.DetailKey)
+
+			raw, err := json.Marshal(d.Value)
+			if err != nil {
+				return fmt.Errorf("failed to marshal value for detail_key %s: %w", key, err)
+			}
+			if len(raw) == 0 {
+				raw = []byte("null")
+			}
+
+			if existing, ok := existingByKey[key]; ok {
+				if err := tx.Model(&FormSubmissionDetail{}).
+					Where("id = ?", existing.ID).
+					Updates(map[string]interface{}{
+						"detail_label":     strings.TrimSpace(d.DetailLabel),
+						"field_type":       strings.TrimSpace(d.FieldType),
+						"consent_required": d.ConsentRequired,
+						"value_json":       datatypes.JSON(raw),
+					}).Error; err != nil {
+					return err
+				}
+				detailIDByKey[key] = existing.ID
+				continue
+			}
+
+			row := FormSubmissionDetail{
+				SubmissionID:    sub.ID,
+				DetailKey:       key,
+				DetailLabel:     strings.TrimSpace(d.DetailLabel),
+				FieldType:       strings.TrimSpace(d.FieldType),
+				ConsentRequired: d.ConsentRequired,
+				ValueJSON:       datatypes.JSON(raw),
+			}
+
+			if err := tx.Create(&row).Error; err != nil {
+				return err
+			}
+
+			detailIDByKey[key] = row.ID
+		}
+
+		// Insert ONLY newly uploaded files. Do not delete old uploads.
+		createUpload := func(uploadType string, in FormSubmissionUploadInput) error {
+			key := strings.TrimSpace(in.DetailKey)
+			detailID, ok := detailIDByKey[key]
+			if !ok {
+				return fmt.Errorf("upload detail_key not found in details: %s", key)
+			}
+
+			row := FormSubmissionUpload{
+				SubmissionID:  sub.ID,
+				DetailID:      detailID,
+				UploadType:    uploadType,
+				FileName:      strings.TrimSpace(in.FileName),
+				MimeType:      strings.TrimSpace(in.MimeType),
+				FileSizeBytes: in.FileSizeBytes,
+				FileURL:       strings.TrimSpace(in.FileURL),
+				FileCategory:  strings.TrimSpace(in.FileCategory),
+				FileComment:   strings.TrimSpace(in.FileComment),
+			}
+
+			return tx.Create(&row).Error
+		}
+
+		for _, d := range uploadedDocs {
+			if err := createUpload("document", d); err != nil {
+				return err
+			}
+		}
+
+		for _, p := range uploadedPhotos {
+			if err := createUpload("photo", p); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	fileID := req.FileID
+	return s.GetByRowAndForm(req.RowID, req.FormKey, &fileID)
+}
+
 func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fileID *int64) (*GetFormSubmissionResponse, error) {
 	key := strings.TrimSpace(formKey)
 	if rowID <= 0 {
@@ -262,171 +455,4 @@ func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fil
 		Documents:   respDocs,
 		Photos:      respPhotos,
 	}, nil
-}
-
-func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest) (*GetFormSubmissionResponse, error) {
-	if req == nil {
-		return nil, errors.New("request is required")
-	}
-	if req.FileID <= 0 {
-		return nil, errors.New("file_id is required")
-	}
-	if req.RowID <= 0 {
-		return nil, errors.New("row_id is required")
-	}
-	if strings.TrimSpace(req.FormKey) == "" {
-		return nil, errors.New("form_key is required")
-	}
-	if strings.TrimSpace(req.FormLabel) == "" {
-		return nil, errors.New("form_label is required")
-	}
-
-	// Validate detail keys before upload
-	detailKeys := make(map[string]struct{}, len(req.Details))
-	for _, d := range req.Details {
-		key := strings.TrimSpace(d.DetailKey)
-		if key == "" {
-			return nil, errors.New("detail_key is required in details")
-		}
-		detailKeys[key] = struct{}{}
-	}
-
-	for _, d := range req.Documents {
-		key := strings.TrimSpace(d.DetailKey)
-		if key == "" {
-			return nil, errors.New("detail_key is required in documents")
-		}
-		if _, ok := detailKeys[key]; !ok {
-			return nil, fmt.Errorf("document detail_key not found in details: %s", key)
-		}
-	}
-
-	for _, p := range req.Photos {
-		key := strings.TrimSpace(p.DetailKey)
-		if key == "" {
-			return nil, errors.New("detail_key is required in photos")
-		}
-		if _, ok := detailKeys[key]; !ok {
-			return nil, fmt.Errorf("photo detail_key not found in details: %s", key)
-		}
-	}
-
-	// Upload first (outside DB transaction)
-	uploadedDocs, uploadedPhotos, err := s.uploadFormFiles(req)
-	if err != nil {
-		return nil, err
-	}
-
-	err = s.DB.Transaction(func(tx *gorm.DB) error {
-		var sub FormSubmission
-		findErr := tx.
-			Where("file_id = ? AND row_id = ? AND form_key = ?", req.FileID, req.RowID, req.FormKey).
-			First(&sub).Error
-
-		if findErr != nil && !errors.Is(findErr, gorm.ErrRecordNotFound) {
-			return findErr
-		}
-
-		if errors.Is(findErr, gorm.ErrRecordNotFound) {
-			sub = FormSubmission{
-				FileID:       req.FileID,
-				RowID:        req.RowID,
-				FileName:     strings.TrimSpace(req.FileName),
-				FormKey:      strings.TrimSpace(req.FormKey),
-				FormLabel:    strings.TrimSpace(req.FormLabel),
-				ConsentText:  req.ConsentText,
-				ConsentGiven: req.Consent,
-			}
-			if err := tx.Create(&sub).Error; err != nil {
-				return err
-			}
-		} else {
-			if err := tx.Model(&sub).Updates(map[string]interface{}{
-				"file_name":     strings.TrimSpace(req.FileName),
-				"form_label":    strings.TrimSpace(req.FormLabel),
-				"consent_text":  req.ConsentText,
-				"consent_given": req.Consent,
-			}).Error; err != nil {
-				return err
-			}
-
-			if err := tx.Where("submission_id = ?", sub.ID).Delete(&FormSubmissionUpload{}).Error; err != nil {
-				return err
-			}
-			if err := tx.Where("submission_id = ?", sub.ID).Delete(&FormSubmissionDetail{}).Error; err != nil {
-				return err
-			}
-		}
-
-		detailIDByKey := make(map[string]int64, len(req.Details))
-
-		for _, d := range req.Details {
-			key := strings.TrimSpace(d.DetailKey)
-
-			raw, err := json.Marshal(d.Value)
-			if err != nil {
-				return fmt.Errorf("failed to marshal value for detail_key %s: %w", key, err)
-			}
-			if len(raw) == 0 {
-				raw = []byte("null")
-			}
-
-			row := FormSubmissionDetail{
-				SubmissionID:    sub.ID,
-				DetailKey:       key,
-				DetailLabel:     strings.TrimSpace(d.DetailLabel),
-				FieldType:       strings.TrimSpace(d.FieldType),
-				ConsentRequired: d.ConsentRequired,
-				ValueJSON:       datatypes.JSON(raw),
-			}
-
-			if err := tx.Create(&row).Error; err != nil {
-				return err
-			}
-
-			detailIDByKey[key] = row.ID
-		}
-
-		createUpload := func(uploadType string, in FormSubmissionUploadInput) error {
-			key := strings.TrimSpace(in.DetailKey)
-			detailID, ok := detailIDByKey[key]
-			if !ok {
-				return fmt.Errorf("upload detail_key not found in details: %s", key)
-			}
-
-			row := FormSubmissionUpload{
-				SubmissionID:  sub.ID,
-				DetailID:      detailID,
-				UploadType:    uploadType,
-				FileName:      strings.TrimSpace(in.FileName),
-				MimeType:      strings.TrimSpace(in.MimeType),
-				FileSizeBytes: in.FileSizeBytes,
-				FileURL:       strings.TrimSpace(in.FileURL), // gs://... from upload
-				FileCategory:  strings.TrimSpace(in.FileCategory),
-				FileComment:   strings.TrimSpace(in.FileComment),
-			}
-
-			return tx.Create(&row).Error
-		}
-
-		for _, d := range uploadedDocs {
-			if err := createUpload("document", d); err != nil {
-				return err
-			}
-		}
-
-		for _, p := range uploadedPhotos {
-			if err := createUpload("photo", p); err != nil {
-				return err
-			}
-		}
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	fileID := req.FileID
-	return s.GetByRowAndForm(req.RowID, req.FormKey, &fileID)
 }
