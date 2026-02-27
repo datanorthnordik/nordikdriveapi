@@ -130,7 +130,7 @@ func TestLookupService_GetDaySchoolsByProvince_ReturnsFilteredRows(t *testing.T)
 	seed := []DaySchool{
 		{
 			ProvinceID:           p1.ID,
-			SchoolName:           "Zeta School",
+			Name:                 "Zeta School",
 			NameVariants:         strPtr("Zeta\nSchool"),
 			OpeningDate:          strPtr("1901"),
 			ClosingDate:          strPtr("1950"),
@@ -139,7 +139,7 @@ func TestLookupService_GetDaySchoolsByProvince_ReturnsFilteredRows(t *testing.T)
 		},
 		{
 			ProvinceID:           p1.ID,
-			SchoolName:           "Alpha School",
+			Name:                 "Alpha School",
 			NameVariants:         strPtr("Alpha"),
 			OpeningDate:          strPtr("1890"),
 			ClosingDate:          strPtr("1940"),
@@ -148,7 +148,7 @@ func TestLookupService_GetDaySchoolsByProvince_ReturnsFilteredRows(t *testing.T)
 		},
 		{
 			ProvinceID:           p2.ID,
-			SchoolName:           "Other Province School",
+			Name:                 "Other Province School",
 			NameVariants:         strPtr("Other"),
 			OpeningDate:          strPtr("1910"),
 			ClosingDate:          strPtr("1960"),
@@ -171,11 +171,11 @@ func TestLookupService_GetDaySchoolsByProvince_ReturnsFilteredRows(t *testing.T)
 		t.Fatalf("expected 2, got %d: %#v", len(got), got)
 	}
 
-	if got[0].SchoolName != "Alpha School" {
-		t.Fatalf("expected first Alpha School, got %q", got[0].SchoolName)
+	if got[0].Name != "Alpha School" {
+		t.Fatalf("expected first Alpha School, got %q", got[0].Name)
 	}
-	if got[1].SchoolName != "Zeta School" {
-		t.Fatalf("expected second Zeta School, got %q", got[1].SchoolName)
+	if got[1].Name != "Zeta School" {
+		t.Fatalf("expected second Zeta School, got %q", got[1].Name)
 	}
 
 	if got[1].NameVariants == nil || *got[1].NameVariants != "Zeta\nSchool" {

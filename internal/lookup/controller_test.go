@@ -105,8 +105,8 @@ func TestLookupController_GetAllProvinces_ServiceError(t *testing.T) {
 func TestLookupController_GetDaySchoolsByProvince_Success(t *testing.T) {
 	mockSvc := &mockLookupService{
 		daySchools: []DaySchool{
-			{ID: 10, ProvinceID: 1, SchoolName: "School A"},
-			{ID: 11, ProvinceID: 1, SchoolName: "School B"},
+			{ID: 10, ProvinceID: 1, Name: "School A"},
+			{ID: 11, ProvinceID: 1, Name: "School B"},
 		},
 	}
 
