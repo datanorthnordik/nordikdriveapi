@@ -19,10 +19,7 @@ func (lc *LookupController) GetAllProvinces(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message":   "Provinces fetched successfully",
-		"provinces": provinces,
-	})
+	c.JSON(http.StatusOK, provinces)
 }
 
 func (lc *LookupController) GetDaySchoolsByProvince(c *gin.Context) {
@@ -39,8 +36,5 @@ func (lc *LookupController) GetDaySchoolsByProvince(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message":     "Day schools fetched successfully",
-		"day_schools": daySchools,
-	})
+	c.JSON(http.StatusOK, daySchools)
 }
