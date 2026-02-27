@@ -60,20 +60,20 @@ func TestLookupController_GetAllProvinces_Success(t *testing.T) {
 		t.Fatalf("expected status 200, got %d", w.Code)
 	}
 
-	var resp struct {
-		Message   string     `json:"message"`
-		Provinces []Province `json:"provinces"`
-	}
+	var resp []Province
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to unmarshal response: %v", err)
 	}
 
-	if resp.Message != "Provinces fetched successfully" {
-		t.Fatalf("unexpected message: %s", resp.Message)
+	if len(resp) != 2 {
+		t.Fatalf("expected 2 provinces, got %d", len(resp))
 	}
 
-	if len(resp.Provinces) != 2 {
-		t.Fatalf("expected 2 provinces, got %d", len(resp.Provinces))
+	if resp[0].Name != "Ontario" {
+		t.Fatalf("expected first province Ontario, got %q", resp[0].Name)
+	}
+	if resp[1].Name != "Alberta" {
+		t.Fatalf("expected second province Alberta, got %q", resp[1].Name)
 	}
 }
 
@@ -120,20 +120,20 @@ func TestLookupController_GetDaySchoolsByProvince_Success(t *testing.T) {
 		t.Fatalf("expected status 200, got %d", w.Code)
 	}
 
-	var resp struct {
-		Message    string      `json:"message"`
-		DaySchools []DaySchool `json:"day_schools"`
-	}
+	var resp []DaySchool
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to unmarshal response: %v", err)
 	}
 
-	if resp.Message != "Day schools fetched successfully" {
-		t.Fatalf("unexpected message: %s", resp.Message)
+	if len(resp) != 2 {
+		t.Fatalf("expected 2 day schools, got %d", len(resp))
 	}
 
-	if len(resp.DaySchools) != 2 {
-		t.Fatalf("expected 2 day schools, got %d", len(resp.DaySchools))
+	if resp[0].Name != "School A" {
+		t.Fatalf("expected first school School A, got %q", resp[0].Name)
+	}
+	if resp[1].Name != "School B" {
+		t.Fatalf("expected second school School B, got %q", resp[1].Name)
 	}
 
 	if mockSvc.receivedProvID != 1 {
