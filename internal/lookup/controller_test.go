@@ -11,11 +11,14 @@ import (
 )
 
 type mockLookupService struct {
-	provinces      []Province
-	daySchools     []DaySchool
-	provincesErr   error
-	daySchoolsErr  error
-	receivedProvID int
+	provinces                    []Province
+	daySchools                   []DaySchool
+	indianHospitals              []IndianHospital
+	provincesErr                 error
+	daySchoolsErr                error
+	indianHospitalsErr           error
+	receivedProvID               int
+	receivedIndianHospitalProvID int
 }
 
 func (m *mockLookupService) GetAllProvinces() ([]Province, error) {
@@ -25,6 +28,11 @@ func (m *mockLookupService) GetAllProvinces() ([]Province, error) {
 func (m *mockLookupService) GetDaySchoolsByProvince(provinceID int) ([]DaySchool, error) {
 	m.receivedProvID = provinceID
 	return m.daySchools, m.daySchoolsErr
+}
+
+func (m *mockLookupService) GetIndianHospitalsByProvince(provinceID int) ([]IndianHospital, error) {
+	m.receivedIndianHospitalProvID = provinceID
+	return m.indianHospitals, m.indianHospitalsErr
 }
 
 func setupLookupRouter(svc LookupServiceAPI) *gin.Engine {
@@ -37,6 +45,7 @@ func setupLookupRouter(svc LookupServiceAPI) *gin.Engine {
 	{
 		group.GET("/province", controller.GetAllProvinces)
 		group.GET("/dayschool/:province", controller.GetDaySchoolsByProvince)
+		group.GET("/indian-hospital/:province", controller.GetIndianHospitalsByProvince)
 	}
 
 	return r
@@ -202,5 +211,108 @@ func TestLookupController_GetDaySchoolsByProvince_ServiceError(t *testing.T) {
 
 	if mockSvc.receivedProvID != 2 {
 		t.Fatalf("expected province id 2, got %d", mockSvc.receivedProvID)
+	}
+}
+
+func TestLookupController_GetIndianHospitalsByProvince_Success(t *testing.T) {
+	mockSvc := &mockLookupService{
+		indianHospitals: []IndianHospital{
+			{ID: 20, ProvinceID: 1, Name: "Hospital A", EligibleDates: "January 1, 1936 - December 31, 1981"},
+			{ID: 21, ProvinceID: 1, Name: "Hospital B", EligibleDates: "January 1, 1940 - June 30, 1960"},
+		},
+	}
+
+	r := setupLookupRouter(mockSvc)
+
+	req := httptest.NewRequest(http.MethodGet, "/lookup/indian-hospital/1", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp []IndianHospital
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if len(resp) != 2 {
+		t.Fatalf("expected 2 hospitals, got %d", len(resp))
+	}
+
+	if resp[0].Name != "Hospital A" {
+		t.Fatalf("expected first hospital Hospital A, got %q", resp[0].Name)
+	}
+	if resp[1].Name != "Hospital B" {
+		t.Fatalf("expected second hospital Hospital B, got %q", resp[1].Name)
+	}
+
+	if mockSvc.receivedIndianHospitalProvID != 1 {
+		t.Fatalf("expected province id 1, got %d", mockSvc.receivedIndianHospitalProvID)
+	}
+}
+
+func TestLookupController_GetIndianHospitalsByProvince_InvalidProvince(t *testing.T) {
+	mockSvc := &mockLookupService{}
+	r := setupLookupRouter(mockSvc)
+
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{name: "non numeric", url: "/lookup/indian-hospital/abc"},
+		{name: "zero", url: "/lookup/indian-hospital/0"},
+		{name: "negative", url: "/lookup/indian-hospital/-1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.url, nil)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected status 400, got %d", w.Code)
+			}
+
+			var resp map[string]string
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to unmarshal response: %v", err)
+			}
+
+			if resp["error"] != "valid province id is required" {
+				t.Fatalf("unexpected error: %q", resp["error"])
+			}
+		})
+	}
+}
+
+func TestLookupController_GetIndianHospitalsByProvince_ServiceError(t *testing.T) {
+	mockSvc := &mockLookupService{
+		indianHospitalsErr: errors.New("hospital query failed"),
+	}
+
+	r := setupLookupRouter(mockSvc)
+
+	req := httptest.NewRequest(http.MethodGet, "/lookup/indian-hospital/2", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", w.Code)
+	}
+
+	var resp map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp["error"] != "hospital query failed" {
+		t.Fatalf("expected error 'hospital query failed', got %q", resp["error"])
+	}
+
+	if mockSvc.receivedIndianHospitalProvID != 2 {
+		t.Fatalf("expected province id 2, got %d", mockSvc.receivedIndianHospitalProvID)
 	}
 }

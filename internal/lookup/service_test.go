@@ -24,7 +24,7 @@ func newTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("open sqlite: %v", err)
 	}
 
-	if err := db.AutoMigrate(&Province{}, &DaySchool{}); err != nil {
+	if err := db.AutoMigrate(&Province{}, &DaySchool{}, &IndianHospital{}); err != nil {
 		t.Fatalf("automigrate: %v", err)
 	}
 
@@ -194,6 +194,103 @@ func TestLookupService_GetDaySchoolsByProvince_DBBroken_ReturnsError(t *testing.
 	_ = sqlDB.Close()
 
 	_, err = svc.GetDaySchoolsByProvince(1)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+}
+
+func TestLookupService_GetIndianHospitalsByProvince_Empty(t *testing.T) {
+	db := newTestDB(t)
+	svc := &LookupService{DB: db}
+
+	got, err := svc.GetIndianHospitalsByProvince(1)
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if got == nil {
+		t.Fatalf("expected empty slice, got nil")
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected 0, got %d: %#v", len(got), got)
+	}
+}
+
+func TestLookupService_GetIndianHospitalsByProvince_ReturnsFilteredRows(t *testing.T) {
+	db := newTestDB(t)
+	svc := &LookupService{DB: db}
+
+	p1 := Province{Name: "Ontario"}
+	p2 := Province{Name: "Alberta"}
+
+	if err := db.Create(&p1).Error; err != nil {
+		t.Fatalf("seed province1: %v", err)
+	}
+	if err := db.Create(&p2).Error; err != nil {
+		t.Fatalf("seed province2: %v", err)
+	}
+
+	seed := []IndianHospital{
+		{
+			ProvinceID:    p1.ID,
+			Name:          "Zulu Indian Hospital",
+			NameVariants:  strPtr("Zulu\nHospital"),
+			EligibleDates: "January 1, 1950 - December 31, 1960",
+		},
+		{
+			ProvinceID:    p1.ID,
+			Name:          "Alpha Indian Hospital",
+			NameVariants:  strPtr("Alpha Hospital"),
+			EligibleDates: "January 1, 1940 - March 31, 1950; January 1, 1959 - March 31, 1962",
+		},
+		{
+			ProvinceID:    p2.ID,
+			Name:          "Other Province Hospital",
+			NameVariants:  strPtr("Other Hospital"),
+			EligibleDates: "January 1, 1936 - December 31, 1981",
+		},
+	}
+
+	for i := range seed {
+		if err := db.Create(&seed[i]).Error; err != nil {
+			t.Fatalf("seed indian hospital: %v", err)
+		}
+	}
+
+	got, err := svc.GetIndianHospitalsByProvince(p1.ID)
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2, got %d: %#v", len(got), got)
+	}
+
+	if got[0].Name != "Alpha Indian Hospital" {
+		t.Fatalf("expected first Alpha Indian Hospital, got %q", got[0].Name)
+	}
+	if got[1].Name != "Zulu Indian Hospital" {
+		t.Fatalf("expected second Zulu Indian Hospital, got %q", got[1].Name)
+	}
+
+	if got[1].NameVariants == nil || *got[1].NameVariants != "Zulu\nHospital" {
+		t.Fatalf("expected multiline name_variants to be preserved, got %#v", got[1].NameVariants)
+	}
+
+	if got[0].EligibleDates != "January 1, 1940 - March 31, 1950; January 1, 1959 - March 31, 1962" {
+		t.Fatalf("expected eligible dates to be preserved, got %q", got[0].EligibleDates)
+	}
+}
+
+func TestLookupService_GetIndianHospitalsByProvince_DBBroken_ReturnsError(t *testing.T) {
+	db := newTestDB(t)
+	svc := &LookupService{DB: db}
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("db.DB(): %v", err)
+	}
+	_ = sqlDB.Close()
+
+	_, err = svc.GetIndianHospitalsByProvince(1)
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}

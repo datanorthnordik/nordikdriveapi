@@ -38,3 +38,20 @@ func (lc *LookupController) GetDaySchoolsByProvince(c *gin.Context) {
 
 	c.JSON(http.StatusOK, daySchools)
 }
+
+func (lc *LookupController) GetIndianHospitalsByProvince(c *gin.Context) {
+	provinceIDStr := strings.TrimSpace(c.Param("province"))
+	provinceID, err := strconv.Atoi(provinceIDStr)
+	if err != nil || provinceID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "valid province id is required"})
+		return
+	}
+
+	hospitals, err := lc.Service.GetIndianHospitalsByProvince(provinceID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, hospitals)
+}
