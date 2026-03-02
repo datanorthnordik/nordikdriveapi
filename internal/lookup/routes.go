@@ -11,5 +11,6 @@ func RegisterRoutes(r *gin.Engine, lookupService LookupServiceAPI) {
 	{
 		userGroup.GET("/province", lookupController.GetAllProvinces)
 		userGroup.GET("/dayschool/:province", lookupController.GetDaySchoolsByProvince)
+		userGroup.GET("/hospital/:province", lookupController.GetIndianHospitalsByProvince)
 	}
 }

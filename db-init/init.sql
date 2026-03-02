@@ -263,7 +263,7 @@ CREATE TABLE form_submissions (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
     CONSTRAINT uq_form_submissions_file_row_form
-        UNIQUE (row_id )
+        UNIQUE (row_id, file_id, form_key )
 );
 
 CREATE TABLE form_submission_details (

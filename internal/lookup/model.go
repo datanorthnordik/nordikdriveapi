@@ -31,3 +31,17 @@ type DaySchool struct {
 func (DaySchool) TableName() string {
 	return "day_schools"
 }
+
+type IndianHospital struct {
+	ID            int       `gorm:"primaryKey;autoIncrement" json:"id"`
+	ProvinceID    int       `gorm:"not null;column:province_id" json:"province_id"`
+	Name          string    `gorm:"type:text;not null;column:hospital_name" json:"name"`
+	NameVariants  *string   `gorm:"type:text;column:name_variants" json:"name_variants"`
+	EligibleDates string    `gorm:"type:text;not null;column:eligible_dates" json:"eligible_dates"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+func (IndianHospital) TableName() string {
+	return "indian_hospitals"
+}

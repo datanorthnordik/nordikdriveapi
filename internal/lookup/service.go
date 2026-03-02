@@ -7,6 +7,7 @@ import (
 type LookupServiceAPI interface {
 	GetAllProvinces() ([]Province, error)
 	GetDaySchoolsByProvince(provinceID int) ([]DaySchool, error)
+	GetIndianHospitalsByProvince(provinceID int) ([]IndianHospital, error)
 }
 
 type LookupService struct {
@@ -37,4 +38,19 @@ func (ls *LookupService) GetDaySchoolsByProvince(provinceID int) ([]DaySchool, e
 		return nil, result.Error
 	}
 	return daySchools, nil
+}
+
+func (ls *LookupService) GetIndianHospitalsByProvince(provinceID int) ([]IndianHospital, error) {
+	var hospitals []IndianHospital
+
+	result := ls.DB.
+		Where("province_id = ?", provinceID).
+		Order("hospital_name ASC").
+		Find(&hospitals)
+
+	if result.Error != nil {
+		return nil, result.Error
+	}
+
+	return hospitals, nil
 }
