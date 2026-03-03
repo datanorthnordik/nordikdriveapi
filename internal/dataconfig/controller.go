@@ -45,7 +45,6 @@ func (cc *DataConfigController) GetConfig(c *gin.Context) {
 
 	cfg := res.Config
 
-	// Useful headers for future (optional)
 	c.Header("Last-Modified", cfg.UpdatedAt.UTC().Format(time.RFC3339Nano))
 	if cfg.Checksum != "" {
 		c.Header("ETag", cfg.Checksum)
@@ -70,13 +69,13 @@ func (cc *DataConfigController) GetConfig(c *gin.Context) {
 		"version":      cfg.Version,
 		"checksum":     cfg.Checksum,
 		"updated_at":   cfg.UpdatedAt,
-		"config":       cfg.Config, // jsonb returned as JSON
+		"config":       cfg.Config,
 	})
 }
 
 func parseOptionalTime(v string) (*time.Time, error) {
 	v = strings.TrimSpace(v)
-	if v == "" {
+	if v == "" || strings.EqualFold(v, "undefined") || strings.EqualFold(v, "null") {
 		return nil, nil
 	}
 
