@@ -30,8 +30,9 @@ func (s *DataConfigService) GetByFileNameIfModified(fileName string, clientLastM
 	err := s.DB.
 		Where("is_active = ?", true).
 		Where("lower(file_name) = lower(?)", name).
-		Order("updated_at desc").
-		First(&cfg).Error
+		Order("updated_at DESC").
+		Order("id DESC").
+		Take(&cfg).Error
 
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -40,10 +41,13 @@ func (s *DataConfigService) GetByFileNameIfModified(fileName string, clientLastM
 		return nil, err
 	}
 
-	// If client has a cached timestamp, only send config when DB is newer
+	// Keep exact comparison. Frontend is sending RFC3339Nano already.
 	if clientLastModified != nil {
+		dbTime := cfg.UpdatedAt.UTC()
+		clientTime := clientLastModified.UTC()
+
 		// not modified when DB updated_at <= client timestamp
-		if !cfg.UpdatedAt.After(*clientLastModified) {
+		if !dbTime.After(clientTime) {
 			return &GetConfigResult{NotModified: true, Config: &cfg}, nil
 		}
 	}
