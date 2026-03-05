@@ -487,6 +487,8 @@ func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fil
 		Details:     respDetails,
 		Documents:   respDocs,
 		Photos:      respPhotos,
+		FirstName:   sub.FirstName,
+		LastName:    sub.LastName,
 	}, nil
 }
 

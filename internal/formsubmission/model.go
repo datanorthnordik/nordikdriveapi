@@ -118,4 +118,6 @@ type GetFormSubmissionResponse struct {
 	Details     []FormSubmissionDetailResponse `json:"details"`
 	Documents   []FormSubmissionUploadResponse `json:"documents"`
 	Photos      []FormSubmissionUploadResponse `json:"photos"`
+	FirstName   string                         `json:"firstname" gorm:"type:varchar(100);column:firstname;not null;default:''"`
+	LastName    string                         `json:"lastname" gorm:"type:varchar(100);column:lastname;not null;default:''"`
 }
