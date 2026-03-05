@@ -258,6 +258,8 @@ func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest) (*GetForm
 				FormLabel:    strings.TrimSpace(req.FormLabel),
 				ConsentText:  req.ConsentText,
 				ConsentGiven: req.Consent,
+				FirstName:    req.FirstName,
+				LastName:     req.LastName,
 			}
 			if err := tx.Create(&sub).Error; err != nil {
 				return err
