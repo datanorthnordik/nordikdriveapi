@@ -261,6 +261,8 @@ CREATE TABLE form_submissions (
     consent_given   BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    firstname        VARCHAR(100) NOT NULL DEFAULT '',
+    lastname         VARCHAR(100) NOT NULL DEFAULT '',
 
     CONSTRAINT uq_form_submissions_file_row_form
         UNIQUE (row_id, file_id, form_key )

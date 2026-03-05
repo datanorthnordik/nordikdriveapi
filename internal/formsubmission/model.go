@@ -17,6 +17,8 @@ type FormSubmission struct {
 	ConsentGiven bool      `json:"consent_given" gorm:"not null;default:false"`
 	CreatedAt    time.Time `json:"created_at" gorm:"not null;autoCreateTime"`
 	UpdatedAt    time.Time `json:"updated_at" gorm:"not null;autoUpdateTime"`
+	FirstName    string    `json:"firstname" gorm:"type:varchar(100);column:firstname;not null;default:''"`
+	LastName     string    `json:"lastname" gorm:"type:varchar(100);column:lastname;not null;default:''"`
 }
 
 func (FormSubmission) TableName() string { return "form_submissions" }
@@ -81,6 +83,8 @@ type SaveFormSubmissionRequest struct {
 	Details     []FormSubmissionDetailInput `json:"details"`
 	Documents   []FormSubmissionUploadInput `json:"documents"`
 	Photos      []FormSubmissionUploadInput `json:"photos"`
+	FirstName   string                      `json:"firstname" gorm:"type:varchar(100);column:firstname;not null;default:''"`
+	LastName    string                      `json:"lastname" gorm:"type:varchar(100);column:lastname;not null;default:''"`
 }
 
 type FormSubmissionDetailResponse struct {
@@ -114,4 +118,6 @@ type GetFormSubmissionResponse struct {
 	Details     []FormSubmissionDetailResponse `json:"details"`
 	Documents   []FormSubmissionUploadResponse `json:"documents"`
 	Photos      []FormSubmissionUploadResponse `json:"photos"`
+	FirstName   string                         `json:"firstname" gorm:"type:varchar(100);column:firstname;not null;default:''"`
+	LastName    string                         `json:"lastname" gorm:"type:varchar(100);column:lastname;not null;default:''"`
 }
