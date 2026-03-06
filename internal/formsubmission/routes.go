@@ -11,11 +11,12 @@ func RegisterRoutes(r *gin.Engine, formSubmissionService *FormSubmissionService)
 		FormSubmissionService: formSubmissionService,
 	}
 
-	formSubmissionGroup := r.Group("/api/form/answers")
+	formSubmissionGroup := r.Group("/api/form")
 	formSubmissionGroup.Use(middlewares.AuthMiddleware())
 	{
-		formSubmissionGroup.GET("", formSubmissionController.GetFormSubmission)
-		formSubmissionGroup.POST("", formSubmissionController.SaveFormSubmission)
-		formSubmissionGroup.GET("/upload/:id", formSubmissionController.GetUpload)
+		formSubmissionGroup.GET("/answers", formSubmissionController.GetFormSubmission)
+		formSubmissionGroup.POST("/answers", formSubmissionController.SaveFormSubmission)
+		formSubmissionGroup.GET("/answers/upload/:id", formSubmissionController.GetUpload)
+		formSubmissionGroup.POST("/search", formSubmissionController.SearchFormSubmissions)
 	}
 }

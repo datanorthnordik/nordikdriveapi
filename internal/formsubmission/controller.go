@@ -49,13 +49,27 @@ func (cc *FormSubmissionController) GetFormSubmission(c *gin.Context) {
 
 // POST /api/form/answers
 func (cc *FormSubmissionController) SaveFormSubmission(c *gin.Context) {
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user ID not found"})
+		return
+	}
+
+	userID, ok := userIDVal.(float64)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+
+	uid := int(userID)
+
 	var req SaveFormSubmissionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	res, err := cc.FormSubmissionService.Upsert(&req)
+	res, err := cc.FormSubmissionService.Upsert(&req, uid)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -65,6 +79,17 @@ func (cc *FormSubmissionController) SaveFormSubmission(c *gin.Context) {
 }
 
 func (cc *FormSubmissionController) GetUpload(c *gin.Context) {
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user ID not found"})
+		return
+	}
+
+	_, ok := userIDVal.(float64)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
 	idParam := strings.TrimSpace(c.Param("id"))
 	id, err := strconv.Atoi(idParam)
 	if err != nil || id <= 0 {
@@ -85,6 +110,64 @@ func (cc *FormSubmissionController) GetUpload(c *gin.Context) {
 
 	c.Header("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, filename))
 	c.Data(http.StatusOK, contentType, data)
+}
+
+func (cc *FormSubmissionController) SearchFormSubmissions(c *gin.Context) {
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user ID not found"})
+		return
+	}
+
+	_, ok := userIDVal.(float64)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+
+	var req SearchFormSubmissionsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// defaults
+	page := req.Page
+	if page < 1 {
+		page = 1
+	}
+	pageSize := req.PageSize
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+
+	// normalize optional strings
+	trimOpt := func(p **string) {
+		if p == nil || *p == nil {
+			return
+		}
+		v := strings.TrimSpace(**p)
+		if v == "" {
+			*p = nil
+			return
+		}
+		*p = &v
+	}
+
+	trimOpt(&req.FormKey)
+	trimOpt(&req.FirstName)
+	trimOpt(&req.LastName)
+
+	res, err := cc.FormSubmissionService.SearchSubmissions(c.Request.Context(), req, page, pageSize)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, res)
 }
 
 func parseRequiredInt64Query(v string) (int64, error) {

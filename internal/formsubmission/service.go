@@ -52,6 +52,13 @@ func parseFormUploadGSURL(gsURL string) (bucket string, objectPath string, err e
 	return bucket, objectPath, nil
 }
 
+func userEmail(u *FormSubmissionUserRef) string {
+	if u == nil {
+		return ""
+	}
+	return u.Email
+}
+
 func (s *FormSubmissionService) uploadFormFiles(req *SaveFormSubmissionRequest) ([]FormSubmissionUploadInput, []FormSubmissionUploadInput, error) {
 	folder := util.SanitizePart(req.FormKey)
 	switch folder {
@@ -186,7 +193,7 @@ func (s *FormSubmissionService) uploadFormFiles(req *SaveFormSubmissionRequest) 
 	return docs, photos, nil
 }
 
-func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest) (*GetFormSubmissionResponse, error) {
+func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest, userId int) (*GetFormSubmissionResponse, error) {
 	if req == nil {
 		return nil, errors.New("request is required")
 	}
@@ -260,6 +267,7 @@ func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest) (*GetForm
 				ConsentGiven: req.Consent,
 				FirstName:    req.FirstName,
 				LastName:     req.LastName,
+				CreatedByID:  &userId,
 			}
 			if err := tx.Create(&sub).Error; err != nil {
 				return err
@@ -270,6 +278,7 @@ func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest) (*GetForm
 				"form_label":    strings.TrimSpace(req.FormLabel),
 				"consent_text":  req.ConsentText,
 				"consent_given": req.Consent,
+				"edited_by":     userId,
 			}).Error; err != nil {
 				return err
 			}
@@ -390,7 +399,16 @@ func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fil
 		return nil, errors.New("form_key is required")
 	}
 
-	q := s.DB.Where("row_id = ? AND form_key = ?", rowID, key)
+	preloadUser := func(db *gorm.DB) *gorm.DB {
+		return db.Select("id", "email")
+	}
+
+	q := s.DB.
+		Preload("CreatedByUser", preloadUser).
+		Preload("EditedByUser", preloadUser).
+		Preload("ReviewedByUser", preloadUser).
+		Where("row_id = ? AND form_key = ?", rowID, key)
+
 	if fileID != nil && *fileID > 0 {
 		q = q.Where("file_id = ?", *fileID)
 	}
@@ -489,6 +507,10 @@ func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fil
 		Photos:      respPhotos,
 		FirstName:   sub.FirstName,
 		LastName:    sub.LastName,
+		CreatedBy:   userEmail(sub.CreatedByUser),
+		EditedBy:    userEmail(sub.EditedByUser),
+		ReviewedBy:  userEmail(sub.ReviewedByUser),
+		Status:      sub.Status,
 	}, nil
 }
 
@@ -538,4 +560,101 @@ func (s *FormSubmissionService) GetUploadBytes(id uint) ([]byte, string, string,
 	}
 
 	return data, contentType, filename, nil
+}
+
+func (s *FormSubmissionService) SearchSubmissions(
+	ctx context.Context,
+	req SearchFormSubmissionsRequest,
+	page int,
+	pageSize int,
+) (*PaginatedFormSubmissionsResponse, error) {
+	q := s.DB.WithContext(ctx).Model(&FormSubmission{})
+
+	if req.FileID != nil && *req.FileID > 0 {
+		q = q.Where("file_id = ?", *req.FileID)
+	}
+
+	if req.FormKey != nil {
+		key := strings.TrimSpace(*req.FormKey)
+		if key != "" {
+			q = q.Where("form_key = ?", key)
+		}
+	}
+
+	if req.FirstName != nil {
+		v := strings.TrimSpace(*req.FirstName)
+		if v != "" {
+			q = q.Where("firstname ILIKE ?", "%"+v+"%")
+		}
+	}
+
+	if req.LastName != nil {
+		v := strings.TrimSpace(*req.LastName)
+		if v != "" {
+			q = q.Where("lastname ILIKE ?", "%"+v+"%")
+		}
+	}
+
+	if req.ConsentGiven != nil {
+		q = q.Where("consent_given = ?", *req.ConsentGiven)
+	}
+
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, err
+	}
+
+	offset := (page - 1) * pageSize
+
+	preloadUser := func(db *gorm.DB) *gorm.DB {
+		return db.Select("id", "email")
+	}
+
+	var items []FormSubmission
+	if err := q.
+		Preload("CreatedByUser", preloadUser).
+		Preload("EditedByUser", preloadUser).
+		Preload("ReviewedByUser", preloadUser).
+		Order("updated_at desc").
+		Order("id desc").
+		Limit(pageSize).
+		Offset(offset).
+		Find(&items).Error; err != nil {
+		return nil, err
+	}
+
+	respItems := make([]FormSubmissionListItemResponse, 0, len(items))
+	for _, item := range items {
+		respItems = append(respItems, FormSubmissionListItemResponse{
+			ID:           item.ID,
+			FileID:       item.FileID,
+			RowID:        item.RowID,
+			FileName:     item.FileName,
+			FormKey:      item.FormKey,
+			FormLabel:    item.FormLabel,
+			ConsentText:  item.ConsentText,
+			ConsentGiven: item.ConsentGiven,
+			CreatedAt:    item.CreatedAt,
+			UpdatedAt:    item.UpdatedAt,
+			FirstName:    item.FirstName,
+			LastName:     item.LastName,
+			CreatedBy:    userEmail(item.CreatedByUser),
+			EditedBy:     userEmail(item.EditedByUser),
+			ReviewedBy:   userEmail(item.ReviewedByUser),
+			Status:       item.Status,
+		})
+	}
+
+	totalPages := 0
+	if total > 0 {
+		totalPages = int((total + int64(pageSize) - 1) / int64(pageSize))
+	}
+
+	return &PaginatedFormSubmissionsResponse{
+		Page:       page,
+		PageSize:   pageSize,
+		TotalItems: total,
+		TotalPages: totalPages,
+		Items:      respItems,
+	}, nil
 }
