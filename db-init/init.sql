@@ -313,6 +313,20 @@ CREATE TABLE form_submission_uploads (
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE form_file_mappings (
+    id         BIGSERIAL PRIMARY KEY,
+    file_name  TEXT NOT NULL DEFAULT '',
+    file_id    BIGINT NOT NULL,
+    form_key   VARCHAR(150) NOT NULL,
+    form_name  TEXT NOT NULL,
+
+    CONSTRAINT uq_form_file_mappings_file_form
+        UNIQUE (file_id, form_key),
+
+    CONSTRAINT fk_form_file_mappings_file
+        FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+);
+
 CREATE INDEX idx_form_submissions_lookup
     ON form_submissions (row_id);
 

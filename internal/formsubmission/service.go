@@ -595,6 +595,10 @@ func (s *FormSubmissionService) SearchSubmissions(
 		}
 	}
 
+	if req.CreatedBy != nil && *req.CreatedBy > 0 {
+		q = q.Where("created_by = ?", *req.CreatedBy)
+	}
+
 	if req.ConsentGiven != nil {
 		q = q.Where("consent_given = ?", *req.ConsentGiven)
 	}
@@ -657,4 +661,31 @@ func (s *FormSubmissionService) SearchSubmissions(
 		TotalPages: totalPages,
 		Items:      respItems,
 	}, nil
+}
+
+func (s *FormSubmissionService) GetFormsByFileID(fileID int64) ([]FormFileMappingResponse, error) {
+	if fileID <= 0 {
+		return nil, errors.New("file_id is required")
+	}
+
+	var rows []FormFileMapping
+	if err := s.DB.
+		Where("file_id = ?", fileID).
+		Order("id asc").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	resp := make([]FormFileMappingResponse, 0, len(rows))
+	for _, row := range rows {
+		resp = append(resp, FormFileMappingResponse{
+			ID:       row.ID,
+			FileName: row.FileName,
+			FileID:   row.FileID,
+			FormKey:  row.FormKey,
+			FormName: row.FormName,
+		})
+	}
+
+	return resp, nil
 }

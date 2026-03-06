@@ -148,6 +148,7 @@ type SearchFormSubmissionsRequest struct {
 	FirstName    *string `json:"firstname"`
 	LastName     *string `json:"lastname"`
 	ConsentGiven *bool   `json:"consent_given"`
+	CreatedBy    *int    `json:"created_by"`
 
 	Page     int `json:"page"`
 	PageSize int `json:"page_size"`
@@ -178,4 +179,22 @@ type PaginatedFormSubmissionsResponse struct {
 	TotalItems int64                            `json:"total_items"`
 	TotalPages int                              `json:"total_pages"`
 	Items      []FormSubmissionListItemResponse `json:"items"`
+}
+
+type FormFileMapping struct {
+	ID       int64  `json:"id" gorm:"primaryKey;autoIncrement"`
+	FileName string `json:"file_name" gorm:"type:text;not null;default:''"`
+	FileID   int64  `json:"file_id" gorm:"not null;index;uniqueIndex:uq_form_file_mappings_file_form"`
+	FormKey  string `json:"form_key" gorm:"type:varchar(150);not null;uniqueIndex:uq_form_file_mappings_file_form"`
+	FormName string `json:"form_name" gorm:"type:text;not null"`
+}
+
+func (FormFileMapping) TableName() string { return "form_file_mappings" }
+
+type FormFileMappingResponse struct {
+	ID       int64  `json:"id"`
+	FileName string `json:"file_name"`
+	FileID   int64  `json:"file_id"`
+	FormKey  string `json:"form_key"`
+	FormName string `json:"form_name"`
 }

@@ -173,3 +173,19 @@ func (cc *FormSubmissionController) SearchFormSubmissions(c *gin.Context) {
 func parseRequiredInt64Query(v string) (int64, error) {
 	return strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 }
+
+func (cc *FormSubmissionController) GetFormsByFileID(c *gin.Context) {
+	fileID, err := parseRequiredInt64Query(c.Query("file_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "valid file_id is required"})
+		return
+	}
+
+	res, err := cc.FormSubmissionService.GetFormsByFileID(fileID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, res)
+}
