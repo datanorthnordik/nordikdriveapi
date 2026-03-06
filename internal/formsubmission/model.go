@@ -6,6 +6,13 @@ import (
 	"gorm.io/datatypes"
 )
 
+type FormSubmissionUserRef struct {
+	ID    int    `gorm:"column:id;primaryKey"`
+	Email string `gorm:"column:email"`
+}
+
+func (FormSubmissionUserRef) TableName() string { return "users" }
+
 type FormSubmission struct {
 	ID           int64     `json:"id" gorm:"primaryKey;autoIncrement"`
 	FileID       int64     `json:"file_id" gorm:"not null;uniqueIndex:uq_form_submissions_file_row_form"`
@@ -19,6 +26,15 @@ type FormSubmission struct {
 	UpdatedAt    time.Time `json:"updated_at" gorm:"not null;autoUpdateTime"`
 	FirstName    string    `json:"firstname" gorm:"type:varchar(100);column:firstname;not null;default:''"`
 	LastName     string    `json:"lastname" gorm:"type:varchar(100);column:lastname;not null;default:''"`
+
+	CreatedByID  *int   `json:"-" gorm:"column:created_by"`
+	EditedByID   *int   `json:"-" gorm:"column:edited_by"`
+	ReviewedByID *int   `json:"-" gorm:"column:reviewed_by"`
+	Status       string `json:"status" gorm:"column:status;not null;default:'pending'"`
+
+	CreatedByUser  *FormSubmissionUserRef `json:"-" gorm:"foreignKey:CreatedByID;references:ID"`
+	EditedByUser   *FormSubmissionUserRef `json:"-" gorm:"foreignKey:EditedByID;references:ID"`
+	ReviewedByUser *FormSubmissionUserRef `json:"-" gorm:"foreignKey:ReviewedByID;references:ID"`
 }
 
 func (FormSubmission) TableName() string { return "form_submissions" }
@@ -83,8 +99,8 @@ type SaveFormSubmissionRequest struct {
 	Details     []FormSubmissionDetailInput `json:"details"`
 	Documents   []FormSubmissionUploadInput `json:"documents"`
 	Photos      []FormSubmissionUploadInput `json:"photos"`
-	FirstName   string                      `json:"firstname" gorm:"type:varchar(100);column:firstname;not null;default:''"`
-	LastName    string                      `json:"lastname" gorm:"type:varchar(100);column:lastname;not null;default:''"`
+	FirstName   string                      `json:"firstname"`
+	LastName    string                      `json:"lastname"`
 }
 
 type FormSubmissionDetailResponse struct {
@@ -118,6 +134,48 @@ type GetFormSubmissionResponse struct {
 	Details     []FormSubmissionDetailResponse `json:"details"`
 	Documents   []FormSubmissionUploadResponse `json:"documents"`
 	Photos      []FormSubmissionUploadResponse `json:"photos"`
-	FirstName   string                         `json:"firstname" gorm:"type:varchar(100);column:firstname;not null;default:''"`
-	LastName    string                         `json:"lastname" gorm:"type:varchar(100);column:lastname;not null;default:''"`
+	FirstName   string                         `json:"firstname"`
+	LastName    string                         `json:"lastname"`
+	CreatedBy   string                         `json:"created_by"`
+	EditedBy    string                         `json:"edited_by"`
+	ReviewedBy  string                         `json:"reviewed_by"`
+	Status      string                         `json:"status"`
+}
+
+type SearchFormSubmissionsRequest struct {
+	FileID       *int64  `json:"file_id"`
+	FormKey      *string `json:"form_key"`
+	FirstName    *string `json:"firstname"`
+	LastName     *string `json:"lastname"`
+	ConsentGiven *bool   `json:"consent_given"`
+
+	Page     int `json:"page"`
+	PageSize int `json:"page_size"`
+}
+
+type FormSubmissionListItemResponse struct {
+	ID           int64     `json:"id"`
+	FileID       int64     `json:"file_id"`
+	RowID        int64     `json:"row_id"`
+	FileName     string    `json:"file_name"`
+	FormKey      string    `json:"form_key"`
+	FormLabel    string    `json:"form_label"`
+	ConsentText  string    `json:"consent_text"`
+	ConsentGiven bool      `json:"consent_given"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	FirstName    string    `json:"firstname"`
+	LastName     string    `json:"lastname"`
+	CreatedBy    string    `json:"created_by"`
+	EditedBy     string    `json:"edited_by"`
+	ReviewedBy   string    `json:"reviewed_by"`
+	Status       string    `json:"status"`
+}
+
+type PaginatedFormSubmissionsResponse struct {
+	Page       int                              `json:"page"`
+	PageSize   int                              `json:"page_size"`
+	TotalItems int64                            `json:"total_items"`
+	TotalPages int                              `json:"total_pages"`
+	Items      []FormSubmissionListItemResponse `json:"items"`
 }

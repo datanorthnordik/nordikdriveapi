@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 
+
 CREATE TABLE otps (
     id BIGINT PRIMARY KEY,
     email VARCHAR(255) NOT NULL,
@@ -250,6 +251,13 @@ create table data_config (
 
 create index data_config_file_active on data_config (file_id, is_active);
 
+CREATE TYPE review_status AS ENUM (
+    'pending',
+    'approved',
+    'rejected',
+    'needs_more_information'
+);
+
 CREATE TABLE form_submissions (
     id              BIGSERIAL PRIMARY KEY,
     file_id         BIGINT NOT NULL,
@@ -261,11 +269,16 @@ CREATE TABLE form_submissions (
     consent_given   BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    firstname        VARCHAR(100) NOT NULL DEFAULT '',
-    lastname         VARCHAR(100) NOT NULL DEFAULT '',
+    firstname       VARCHAR(100) NOT NULL DEFAULT '',
+    lastname        VARCHAR(100) NOT NULL DEFAULT '',
+
+    created_by      INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+    edited_by       INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+    reviewed_by     INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+    status          review_status NOT NULL DEFAULT 'pending',
 
     CONSTRAINT uq_form_submissions_file_row_form
-        UNIQUE (row_id, file_id, form_key )
+        UNIQUE (row_id, file_id, form_key)
 );
 
 CREATE TABLE form_submission_details (
