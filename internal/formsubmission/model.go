@@ -148,6 +148,7 @@ type SearchFormSubmissionsRequest struct {
 	FirstName    *string `json:"firstname"`
 	LastName     *string `json:"lastname"`
 	ConsentGiven *bool   `json:"consent_given"`
+	CreatedBy    *int    `json:"created_by"`
 
 	Page     int `json:"page"`
 	PageSize int `json:"page_size"`

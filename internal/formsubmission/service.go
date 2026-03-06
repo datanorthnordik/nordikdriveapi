@@ -595,6 +595,10 @@ func (s *FormSubmissionService) SearchSubmissions(
 		}
 	}
 
+	if req.CreatedBy != nil && *req.CreatedBy > 0 {
+		q = q.Where("created_by = ?", *req.CreatedBy)
+	}
+
 	if req.ConsentGiven != nil {
 		q = q.Where("consent_given = ?", *req.ConsentGiven)
 	}
