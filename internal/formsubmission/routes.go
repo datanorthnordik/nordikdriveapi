@@ -14,6 +14,7 @@ func RegisterRoutes(r *gin.Engine, formSubmissionService *FormSubmissionService)
 	formSubmissionGroup := r.Group("/api/form")
 	formSubmissionGroup.Use(middlewares.AuthMiddleware())
 	{
+		formSubmissionGroup.GET("", formSubmissionController.GetFormsByFileID)
 		formSubmissionGroup.GET("/answers", formSubmissionController.GetFormSubmission)
 		formSubmissionGroup.POST("/answers", formSubmissionController.SaveFormSubmission)
 		formSubmissionGroup.GET("/answers/upload/:id", formSubmissionController.GetUpload)
