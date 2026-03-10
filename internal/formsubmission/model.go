@@ -31,14 +31,6 @@ type ReviewUploadItemRequest struct {
 	RejectionReason string `json:"rejection_reason"`
 }
 
-type ReviewFormSubmissionRequest struct {
-	SubmissionID  int64                     `json:"submission_id" binding:"required"`
-	Status        string                    `json:"status" binding:"required"` // approved / rejected / need_more_information
-	ReviewComment string                    `json:"review_comment"`
-	Photos        []ReviewUploadItemRequest `json:"photos"`
-	Documents     []ReviewUploadItemRequest `json:"documents"`
-}
-
 type FormSubmission struct {
 	ID           int64     `json:"id" gorm:"primaryKey;autoIncrement"`
 	FileID       int64     `json:"file_id" gorm:"not null;uniqueIndex:uq_form_submissions_file_row_form"`
@@ -261,4 +253,23 @@ type FormFileMappingResponse struct {
 	FileID   int64  `json:"file_id"`
 	FormKey  string `json:"form_key"`
 	FormName string `json:"form_name"`
+}
+
+type ReviewFormSubmissionRequest struct {
+	SubmissionID     int64                  `json:"submission_id"`
+	SubmissionReview *SubmissionReviewInput `json:"submission_review"`
+	UploadReviews    []UploadReviewInput    `json:"upload_reviews"`
+}
+
+type SubmissionReviewInput struct {
+	Status          string `json:"status"`
+	ReviewerComment string `json:"reviewer_comment"`
+	RejectionReason string `json:"rejection_reason"`
+}
+
+type UploadReviewInput struct {
+	UploadID        int64  `json:"upload_id"`
+	Status          string `json:"status"`
+	ReviewerComment string `json:"reviewer_comment"`
+	RejectionReason string `json:"rejection_reason"`
 }
