@@ -1,6 +1,7 @@
 package formsubmission
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -185,6 +186,45 @@ func (cc *FormSubmissionController) GetFormsByFileID(c *gin.Context) {
 	res, err := cc.FormSubmissionService.GetFormsByFileID(fileID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, res)
+}
+
+func (cc *FormSubmissionController) ReviewFormSubmission(c *gin.Context) {
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user ID not found"})
+		return
+	}
+
+	userID, ok := userIDVal.(float64)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+
+	uid := int(userID)
+
+	var req ReviewFormSubmissionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	res, err := cc.FormSubmissionService.ReviewSubmission(&req, uid)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidReviewRequest):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		case errors.Is(err, ErrFormSubmissionNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		case errors.Is(err, ErrUploadNotFoundForSubmission):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
 		return
 	}
 

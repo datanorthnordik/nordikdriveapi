@@ -17,6 +17,7 @@ func RegisterRoutes(r *gin.Engine, formSubmissionService *FormSubmissionService)
 		formSubmissionGroup.GET("", formSubmissionController.GetFormsByFileID)
 		formSubmissionGroup.GET("/answers", formSubmissionController.GetFormSubmission)
 		formSubmissionGroup.POST("/answers", formSubmissionController.SaveFormSubmission)
+		formSubmissionGroup.POST("/answers/review", formSubmissionController.ReviewFormSubmission)
 		formSubmissionGroup.GET("/answers/upload/:id", formSubmissionController.GetUpload)
 		formSubmissionGroup.POST("/search", formSubmissionController.SearchFormSubmissions)
 	}

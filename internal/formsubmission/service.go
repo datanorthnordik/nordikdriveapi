@@ -28,6 +28,73 @@ var newFormSubmissionGCSClientHook = func(ctx context.Context) (*storage.Client,
 	return storage.NewClient(ctx)
 }
 
+var (
+	ErrInvalidReviewRequest        = errors.New("invalid review request")
+	ErrFormSubmissionNotFound      = errors.New("form submission not found")
+	ErrUploadNotFoundForSubmission = errors.New("one or more uploads do not belong to the submission")
+)
+
+var triggerFormSubmissionReviewEmailHook = func(submissionID int64) error {
+	return errors.New("review email trigger not implemented")
+}
+
+var validReviewStatuses = map[string]struct{}{
+	"pending":                {},
+	"approved":               {},
+	"rejected":               {},
+	"needs_more_information": {},
+}
+
+func normalizeReviewStatus(v string) string {
+	return strings.TrimSpace(strings.ToLower(v))
+}
+
+func isValidReviewStatus(v string) bool {
+	_, ok := validReviewStatuses[normalizeReviewStatus(v)]
+	return ok
+}
+
+func buildReviewUpdateMap(status string, reviewerComment string, rejectionReason string, reviewerID int, reviewedAt time.Time) map[string]interface{} {
+	status = normalizeReviewStatus(status)
+
+	if status == "pending" {
+		return map[string]interface{}{
+			"status":           status,
+			"reviewer_comment": "",
+			"rejection_reason": "",
+			"reviewed_by":      nil,
+			"reviewed_at":      nil,
+		}
+	}
+
+	return map[string]interface{}{
+		"status":           status,
+		"reviewer_comment": strings.TrimSpace(reviewerComment),
+		"rejection_reason": strings.TrimSpace(rejectionReason),
+		"reviewed_by":      reviewerID,
+		"reviewed_at":      reviewedAt,
+	}
+}
+
+func (s *FormSubmissionService) triggerReviewEmailAsync(submissionID int64) {
+	go func() {
+		defer func() {
+			if recover() != nil {
+				// keep review_email_trigger_success = false
+			}
+		}()
+
+		if err := triggerFormSubmissionReviewEmailHook(submissionID); err != nil {
+			// placeholder not implemented yet, keep false for cron
+			return
+		}
+
+		_ = s.DB.Model(&FormSubmission{}).
+			Where("id = ?", submissionID).
+			Update("review_email_trigger_success", true).Error
+	}()
+}
+
 func parseFormUploadGSURL(gsURL string) (bucket string, objectPath string, err error) {
 	gsURL = strings.TrimSpace(gsURL)
 	if gsURL == "" {
@@ -722,4 +789,126 @@ func (s *FormSubmissionService) GetFormsByFileID(fileID int64) ([]FormFileMappin
 	}
 
 	return resp, nil
+}
+
+func (s *FormSubmissionService) ReviewSubmission(req *ReviewFormSubmissionRequest, reviewerID int) (*GetFormSubmissionResponse, error) {
+	if req == nil {
+		return nil, fmt.Errorf("%w: request is required", ErrInvalidReviewRequest)
+	}
+	if req.SubmissionID <= 0 {
+		return nil, fmt.Errorf("%w: submission_id is required", ErrInvalidReviewRequest)
+	}
+	if req.SubmissionReview == nil && len(req.UploadReviews) == 0 {
+		return nil, fmt.Errorf("%w: either submission_review or upload_reviews is required", ErrInvalidReviewRequest)
+	}
+
+	if req.SubmissionReview != nil {
+		req.SubmissionReview.Status = normalizeReviewStatus(req.SubmissionReview.Status)
+		if !isValidReviewStatus(req.SubmissionReview.Status) {
+			return nil, fmt.Errorf("%w: invalid submission_review.status", ErrInvalidReviewRequest)
+		}
+	}
+
+	seenUploadIDs := make(map[int64]struct{}, len(req.UploadReviews))
+	for i := range req.UploadReviews {
+		req.UploadReviews[i].Status = normalizeReviewStatus(req.UploadReviews[i].Status)
+
+		if req.UploadReviews[i].UploadID <= 0 {
+			return nil, fmt.Errorf("%w: upload_id is required", ErrInvalidReviewRequest)
+		}
+		if !isValidReviewStatus(req.UploadReviews[i].Status) {
+			return nil, fmt.Errorf("%w: invalid upload_reviews.status for upload_id %d", ErrInvalidReviewRequest, req.UploadReviews[i].UploadID)
+		}
+		if _, exists := seenUploadIDs[req.UploadReviews[i].UploadID]; exists {
+			return nil, fmt.Errorf("%w: duplicate upload_id %d", ErrInvalidReviewRequest, req.UploadReviews[i].UploadID)
+		}
+		seenUploadIDs[req.UploadReviews[i].UploadID] = struct{}{}
+	}
+
+	var sub FormSubmission
+	now := time.Now().UTC()
+	shouldTriggerEmail := false
+
+	err := s.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("id = ?", req.SubmissionID).First(&sub).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrFormSubmissionNotFound
+			}
+			return err
+		}
+
+		if req.SubmissionReview != nil {
+			submissionUpdates := buildReviewUpdateMap(
+				req.SubmissionReview.Status,
+				req.SubmissionReview.ReviewerComment,
+				req.SubmissionReview.RejectionReason,
+				reviewerID,
+				now,
+			)
+
+			if err := tx.Model(&FormSubmission{}).
+				Where("id = ?", sub.ID).
+				Updates(submissionUpdates).Error; err != nil {
+				return err
+			}
+
+			shouldTriggerEmail = true
+		}
+
+		if len(req.UploadReviews) > 0 {
+			uploadIDs := make([]int64, 0, len(req.UploadReviews))
+			for _, item := range req.UploadReviews {
+				uploadIDs = append(uploadIDs, item.UploadID)
+			}
+
+			var uploads []FormSubmissionUpload
+			if err := tx.
+				Where("submission_id = ? AND id IN ?", sub.ID, uploadIDs).
+				Find(&uploads).Error; err != nil {
+				return err
+			}
+
+			if len(uploads) != len(uploadIDs) {
+				return ErrUploadNotFoundForSubmission
+			}
+
+			for _, item := range req.UploadReviews {
+				uploadUpdates := buildReviewUpdateMap(
+					item.Status,
+					item.ReviewerComment,
+					item.RejectionReason,
+					reviewerID,
+					now,
+				)
+
+				if err := tx.Model(&FormSubmissionUpload{}).
+					Where("id = ? AND submission_id = ?", item.UploadID, sub.ID).
+					Updates(uploadUpdates).Error; err != nil {
+					return err
+				}
+			}
+
+			shouldTriggerEmail = true
+		}
+
+		if shouldTriggerEmail {
+			if err := tx.Model(&FormSubmission{}).
+				Where("id = ?", sub.ID).
+				Update("review_email_trigger_success", false).Error; err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if shouldTriggerEmail {
+		s.triggerReviewEmailAsync(sub.ID)
+	}
+
+	fileID := sub.FileID
+	return s.GetByRowAndForm(sub.RowID, sub.FormKey, &fileID)
 }
