@@ -230,3 +230,69 @@ func (cc *FormSubmissionController) ReviewFormSubmission(c *gin.Context) {
 
 	c.JSON(http.StatusOK, res)
 }
+
+func (cc *FormSubmissionController) SearchMyFormSubmissions(c *gin.Context) {
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user ID not found"})
+		return
+	}
+
+	userIDFloat, ok := userIDVal.(float64)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+
+	userID := int(userIDFloat)
+
+	var req SearchFormSubmissionsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	page := req.Page
+	if page < 1 {
+		page = 1
+	}
+
+	pageSize := req.PageSize
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+
+	trimOpt := func(p **string) {
+		if p == nil || *p == nil {
+			return
+		}
+		v := strings.TrimSpace(**p)
+		if v == "" {
+			*p = nil
+			return
+		}
+		*p = &v
+	}
+
+	trimOpt(&req.FormKey)
+	trimOpt(&req.FirstName)
+	trimOpt(&req.LastName)
+	trimOpt(&req.Status)
+
+	res, err := cc.FormSubmissionService.SearchMySubmissions(
+		c.Request.Context(),
+		userID,
+		req,
+		page,
+		pageSize,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, res)
+}
