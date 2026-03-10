@@ -160,6 +160,7 @@ func (cc *FormSubmissionController) SearchFormSubmissions(c *gin.Context) {
 	trimOpt(&req.FormKey)
 	trimOpt(&req.FirstName)
 	trimOpt(&req.LastName)
+	trimOpt(&req.Status)
 
 	res, err := cc.FormSubmissionService.SearchSubmissions(c.Request.Context(), req, page, pageSize)
 	if err != nil {

@@ -278,6 +278,8 @@ func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest, userId in
 				"form_label":    strings.TrimSpace(req.FormLabel),
 				"consent_text":  req.ConsentText,
 				"consent_given": req.Consent,
+				"firstname":     strings.TrimSpace(req.FirstName),
+				"lastname":      strings.TrimSpace(req.LastName),
 				"edited_by":     userId,
 			}).Error; err != nil {
 				return err
@@ -354,15 +356,18 @@ func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest, userId in
 			}
 
 			row := FormSubmissionUpload{
-				SubmissionID:  sub.ID,
-				DetailID:      detailID,
-				UploadType:    uploadType,
-				FileName:      strings.TrimSpace(in.FileName),
-				MimeType:      strings.TrimSpace(in.MimeType),
-				FileSizeBytes: in.FileSizeBytes,
-				FileURL:       strings.TrimSpace(in.FileURL),
-				FileCategory:  strings.TrimSpace(in.FileCategory),
-				FileComment:   strings.TrimSpace(in.FileComment),
+				SubmissionID:    sub.ID,
+				DetailID:        detailID,
+				UploadType:      uploadType,
+				FileName:        strings.TrimSpace(in.FileName),
+				MimeType:        strings.TrimSpace(in.MimeType),
+				FileSizeBytes:   in.FileSizeBytes,
+				FileURL:         strings.TrimSpace(in.FileURL),
+				FileCategory:    strings.TrimSpace(in.FileCategory),
+				FileComment:     strings.TrimSpace(in.FileComment),
+				Status:          "pending",
+				ReviewerComment: "",
+				RejectionReason: "",
 			}
 
 			return tx.Create(&row).Error
@@ -418,12 +423,16 @@ func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fil
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			resp := &GetFormSubmissionResponse{
-				Found:     false,
-				RowID:     rowID,
-				FormKey:   key,
-				Details:   []FormSubmissionDetailResponse{},
-				Documents: []FormSubmissionUploadResponse{},
-				Photos:    []FormSubmissionUploadResponse{},
+				Found:                     false,
+				RowID:                     rowID,
+				FormKey:                   key,
+				Details:                   []FormSubmissionDetailResponse{},
+				Documents:                 []FormSubmissionUploadResponse{},
+				Photos:                    []FormSubmissionUploadResponse{},
+				Status:                    "pending",
+				ReviewerComment:           "",
+				RejectionReason:           "",
+				ReviewEmailTriggerSuccess: false,
 			}
 			if fileID != nil {
 				resp.FileID = *fileID
@@ -443,6 +452,7 @@ func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fil
 
 	var uploads []FormSubmissionUpload
 	if err := s.DB.
+		Preload("ReviewedByUser", preloadUser).
 		Where("submission_id = ?", sub.ID).
 		Order("id asc").
 		Find(&uploads).Error; err != nil {
@@ -476,14 +486,19 @@ func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fil
 
 	for _, u := range uploads {
 		item := FormSubmissionUploadResponse{
-			ID:            u.ID,
-			DetailKey:     detailKeyByID[u.DetailID],
-			FileName:      u.FileName,
-			MimeType:      u.MimeType,
-			FileSizeBytes: u.FileSizeBytes,
-			FileURL:       u.FileURL,
-			FileCategory:  u.FileCategory,
-			FileComment:   u.FileComment,
+			ID:              u.ID,
+			DetailKey:       detailKeyByID[u.DetailID],
+			FileName:        u.FileName,
+			MimeType:        u.MimeType,
+			FileSizeBytes:   u.FileSizeBytes,
+			FileURL:         u.FileURL,
+			FileCategory:    u.FileCategory,
+			FileComment:     u.FileComment,
+			Status:          u.Status,
+			ReviewerComment: u.ReviewerComment,
+			RejectionReason: u.RejectionReason,
+			ReviewedBy:      userEmail(u.ReviewedByUser),
+			ReviewedAt:      u.ReviewedAt,
 		}
 
 		if strings.EqualFold(u.UploadType, "document") {
@@ -510,7 +525,13 @@ func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fil
 		CreatedBy:   userEmail(sub.CreatedByUser),
 		EditedBy:    userEmail(sub.EditedByUser),
 		ReviewedBy:  userEmail(sub.ReviewedByUser),
-		Status:      sub.Status,
+
+		Status:          sub.Status,
+		ReviewerComment: sub.ReviewerComment,
+		RejectionReason: sub.RejectionReason,
+		ReviewedAt:      sub.ReviewedAt,
+
+		ReviewEmailTriggerSuccess: sub.ReviewEmailTriggerSuccess,
 	}, nil
 }
 
@@ -603,6 +624,13 @@ func (s *FormSubmissionService) SearchSubmissions(
 		q = q.Where("consent_given = ?", *req.ConsentGiven)
 	}
 
+	if req.Status != nil {
+		v := strings.TrimSpace(*req.Status)
+		if v != "" {
+			q = q.Where("status = ?", v)
+		}
+	}
+
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
 		return nil, err
@@ -645,7 +673,13 @@ func (s *FormSubmissionService) SearchSubmissions(
 			CreatedBy:    userEmail(item.CreatedByUser),
 			EditedBy:     userEmail(item.EditedByUser),
 			ReviewedBy:   userEmail(item.ReviewedByUser),
-			Status:       item.Status,
+
+			Status:          item.Status,
+			ReviewerComment: item.ReviewerComment,
+			RejectionReason: item.RejectionReason,
+			ReviewedAt:      item.ReviewedAt,
+
+			ReviewEmailTriggerSuccess: item.ReviewEmailTriggerSuccess,
 		})
 	}
 

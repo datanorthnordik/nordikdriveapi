@@ -13,6 +13,32 @@ type FormSubmissionUserRef struct {
 
 func (FormSubmissionUserRef) TableName() string { return "users" }
 
+const (
+	ReviewStatusPending             = "pending"
+	ReviewStatusApproved            = "approved"
+	ReviewStatusRejected            = "rejected"
+	ReviewStatusNeedMoreInformation = "need_more_information"
+
+	UploadReviewStatusPending  = "pending"
+	UploadReviewStatusApproved = "approved"
+	UploadReviewStatusRejected = "rejected"
+)
+
+type ReviewUploadItemRequest struct {
+	UploadID        int64  `json:"upload_id" binding:"required"`
+	Status          string `json:"status" binding:"required"` // approved / rejected
+	ReviewerComment string `json:"reviewer_comment"`
+	RejectionReason string `json:"rejection_reason"`
+}
+
+type ReviewFormSubmissionRequest struct {
+	SubmissionID  int64                     `json:"submission_id" binding:"required"`
+	Status        string                    `json:"status" binding:"required"` // approved / rejected / need_more_information
+	ReviewComment string                    `json:"review_comment"`
+	Photos        []ReviewUploadItemRequest `json:"photos"`
+	Documents     []ReviewUploadItemRequest `json:"documents"`
+}
+
 type FormSubmission struct {
 	ID           int64     `json:"id" gorm:"primaryKey;autoIncrement"`
 	FileID       int64     `json:"file_id" gorm:"not null;uniqueIndex:uq_form_submissions_file_row_form"`
@@ -22,19 +48,29 @@ type FormSubmission struct {
 	FormLabel    string    `json:"form_label" gorm:"type:text;not null"`
 	ConsentText  string    `json:"consent_text" gorm:"type:text;not null;default:''"`
 	ConsentGiven bool      `json:"consent_given" gorm:"not null;default:false"`
-	CreatedAt    time.Time `json:"created_at" gorm:"not null;autoCreateTime"`
-	UpdatedAt    time.Time `json:"updated_at" gorm:"not null;autoUpdateTime"`
-	FirstName    string    `json:"firstname" gorm:"type:varchar(100);column:firstname;not null;default:''"`
-	LastName     string    `json:"lastname" gorm:"type:varchar(100);column:lastname;not null;default:''"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 
-	CreatedByID  *int   `json:"-" gorm:"column:created_by"`
-	EditedByID   *int   `json:"-" gorm:"column:edited_by"`
-	ReviewedByID *int   `json:"-" gorm:"column:reviewed_by"`
-	Status       string `json:"status" gorm:"column:status;not null;default:'pending'"`
+	FirstName string `json:"first_name" gorm:"column:firstname;type:varchar(100);not null;default:''"`
+	LastName  string `json:"last_name" gorm:"column:lastname;type:varchar(100);not null;default:''"`
+
+	CreatedByID  *int `json:"-" gorm:"column:created_by"`
+	EditedByID   *int `json:"-" gorm:"column:edited_by"`
+	ReviewedByID *int `json:"-" gorm:"column:reviewed_by"`
+
+	Status          string     `json:"status" gorm:"column:status;type:review_status;not null;default:'pending'"`
+	ReviewerComment string     `json:"reviewer_comment" gorm:"column:reviewer_comment;type:text;not null;default:''"`
+	RejectionReason string     `json:"rejection_reason" gorm:"column:rejection_reason;type:text;not null;default:''"`
+	ReviewedAt      *time.Time `json:"reviewed_at" gorm:"column:reviewed_at"`
+
+	ReviewEmailTriggerSuccess bool `json:"review_email_trigger_success" gorm:"column:review_email_trigger_success;not null;default:false"`
 
 	CreatedByUser  *FormSubmissionUserRef `json:"-" gorm:"foreignKey:CreatedByID;references:ID"`
 	EditedByUser   *FormSubmissionUserRef `json:"-" gorm:"foreignKey:EditedByID;references:ID"`
 	ReviewedByUser *FormSubmissionUserRef `json:"-" gorm:"foreignKey:ReviewedByID;references:ID"`
+
+	Details []FormSubmissionDetail `json:"-" gorm:"foreignKey:SubmissionID;references:ID"`
+	Uploads []FormSubmissionUpload `json:"-" gorm:"foreignKey:SubmissionID;references:ID"`
 }
 
 func (FormSubmission) TableName() string { return "form_submissions" }
@@ -65,6 +101,14 @@ type FormSubmissionUpload struct {
 	FileCategory  string    `json:"file_category" gorm:"type:text;not null;default:''"`
 	FileComment   string    `json:"file_comment" gorm:"type:text;not null;default:''"`
 	CreatedAt     time.Time `json:"created_at" gorm:"not null;autoCreateTime"`
+
+	Status          string     `json:"status" gorm:"column:status;type:upload_review_status;not null;default:'pending'"`
+	ReviewerComment string     `json:"reviewer_comment" gorm:"column:reviewer_comment;type:text;not null;default:''"`
+	RejectionReason string     `json:"rejection_reason" gorm:"column:rejection_reason;type:text;not null;default:''"`
+	ReviewedByID    *int       `json:"-" gorm:"column:reviewed_by"`
+	ReviewedAt      *time.Time `json:"reviewed_at" gorm:"column:reviewed_at"`
+
+	ReviewedByUser *FormSubmissionUserRef `json:"-" gorm:"foreignKey:ReviewedByID;references:ID"`
 }
 
 func (FormSubmissionUpload) TableName() string { return "form_submission_uploads" }
@@ -120,6 +164,12 @@ type FormSubmissionUploadResponse struct {
 	FileURL       string `json:"file_url"`
 	FileCategory  string `json:"file_category"`
 	FileComment   string `json:"file_comment"`
+
+	Status          string     `json:"status"`
+	ReviewerComment string     `json:"reviewer_comment"`
+	RejectionReason string     `json:"rejection_reason"`
+	ReviewedBy      string     `json:"reviewed_by"`
+	ReviewedAt      *time.Time `json:"reviewed_at"`
 }
 
 type GetFormSubmissionResponse struct {
@@ -134,24 +184,31 @@ type GetFormSubmissionResponse struct {
 	Details     []FormSubmissionDetailResponse `json:"details"`
 	Documents   []FormSubmissionUploadResponse `json:"documents"`
 	Photos      []FormSubmissionUploadResponse `json:"photos"`
-	FirstName   string                         `json:"firstname"`
-	LastName    string                         `json:"lastname"`
-	CreatedBy   string                         `json:"created_by"`
-	EditedBy    string                         `json:"edited_by"`
-	ReviewedBy  string                         `json:"reviewed_by"`
-	Status      string                         `json:"status"`
+	FirstName   string                         `json:"first_name"`
+	LastName    string                         `json:"last_name"`
+
+	CreatedBy  string `json:"created_by"`
+	EditedBy   string `json:"edited_by"`
+	ReviewedBy string `json:"reviewed_by"`
+
+	Status          string     `json:"status"`
+	ReviewerComment string     `json:"reviewer_comment"`
+	RejectionReason string     `json:"rejection_reason"`
+	ReviewedAt      *time.Time `json:"reviewed_at"`
+
+	ReviewEmailTriggerSuccess bool `json:"review_email_trigger_success"`
 }
 
 type SearchFormSubmissionsRequest struct {
+	Page         int     `json:"page"`
+	PageSize     int     `json:"page_size"`
 	FileID       *int64  `json:"file_id"`
 	FormKey      *string `json:"form_key"`
-	FirstName    *string `json:"firstname"`
-	LastName     *string `json:"lastname"`
-	ConsentGiven *bool   `json:"consent_given"`
+	FirstName    *string `json:"first_name"`
+	LastName     *string `json:"last_name"`
 	CreatedBy    *int    `json:"created_by"`
-
-	Page     int `json:"page"`
-	PageSize int `json:"page_size"`
+	ConsentGiven *bool   `json:"consent_given"`
+	Status       *string `json:"status"`
 }
 
 type FormSubmissionListItemResponse struct {
@@ -165,12 +222,19 @@ type FormSubmissionListItemResponse struct {
 	ConsentGiven bool      `json:"consent_given"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
-	FirstName    string    `json:"firstname"`
-	LastName     string    `json:"lastname"`
-	CreatedBy    string    `json:"created_by"`
-	EditedBy     string    `json:"edited_by"`
-	ReviewedBy   string    `json:"reviewed_by"`
-	Status       string    `json:"status"`
+	FirstName    string    `json:"first_name"`
+	LastName     string    `json:"last_name"`
+
+	CreatedBy  string `json:"created_by"`
+	EditedBy   string `json:"edited_by"`
+	ReviewedBy string `json:"reviewed_by"`
+
+	Status          string     `json:"status"`
+	ReviewerComment string     `json:"reviewer_comment"`
+	RejectionReason string     `json:"rejection_reason"`
+	ReviewedAt      *time.Time `json:"reviewed_at"`
+
+	ReviewEmailTriggerSuccess bool `json:"review_email_trigger_success"`
 }
 
 type PaginatedFormSubmissionsResponse struct {
