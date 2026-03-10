@@ -912,3 +912,120 @@ func (s *FormSubmissionService) ReviewSubmission(req *ReviewFormSubmissionReques
 	fileID := sub.FileID
 	return s.GetByRowAndForm(sub.RowID, sub.FormKey, &fileID)
 }
+
+func (s *FormSubmissionService) SearchMySubmissions(
+	ctx context.Context,
+	userID int,
+	req SearchFormSubmissionsRequest,
+	page int,
+	pageSize int,
+) (*PaginatedFormSubmissionsResponse, error) {
+	if userID <= 0 {
+		return nil, errors.New("valid user_id is required")
+	}
+
+	q := s.DB.WithContext(ctx).
+		Model(&FormSubmission{}).
+		Where("(created_by = ? OR edited_by = ?)", userID, userID)
+
+	if req.FileID != nil && *req.FileID > 0 {
+		q = q.Where("file_id = ?", *req.FileID)
+	}
+
+	if req.FormKey != nil {
+		key := strings.TrimSpace(*req.FormKey)
+		if key != "" {
+			q = q.Where("form_key = ?", key)
+		}
+	}
+
+	if req.FirstName != nil {
+		v := strings.TrimSpace(*req.FirstName)
+		if v != "" {
+			q = q.Where("firstname ILIKE ?", "%"+v+"%")
+		}
+	}
+
+	if req.LastName != nil {
+		v := strings.TrimSpace(*req.LastName)
+		if v != "" {
+			q = q.Where("lastname ILIKE ?", "%"+v+"%")
+		}
+	}
+
+	if req.ConsentGiven != nil {
+		q = q.Where("consent_given = ?", *req.ConsentGiven)
+	}
+
+	if req.Status != nil {
+		v := strings.TrimSpace(*req.Status)
+		if v != "" {
+			q = q.Where("status = ?", v)
+		}
+	}
+
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, err
+	}
+
+	offset := (page - 1) * pageSize
+
+	preloadUser := func(db *gorm.DB) *gorm.DB {
+		return db.Select("id", "email")
+	}
+
+	var items []FormSubmission
+	if err := q.
+		Preload("CreatedByUser", preloadUser).
+		Preload("EditedByUser", preloadUser).
+		Preload("ReviewedByUser", preloadUser).
+		Order("updated_at desc").
+		Order("id desc").
+		Limit(pageSize).
+		Offset(offset).
+		Find(&items).Error; err != nil {
+		return nil, err
+	}
+
+	respItems := make([]FormSubmissionListItemResponse, 0, len(items))
+	for _, item := range items {
+		respItems = append(respItems, FormSubmissionListItemResponse{
+			ID:           item.ID,
+			FileID:       item.FileID,
+			RowID:        item.RowID,
+			FileName:     item.FileName,
+			FormKey:      item.FormKey,
+			FormLabel:    item.FormLabel,
+			ConsentText:  item.ConsentText,
+			ConsentGiven: item.ConsentGiven,
+			CreatedAt:    item.CreatedAt,
+			UpdatedAt:    item.UpdatedAt,
+			FirstName:    item.FirstName,
+			LastName:     item.LastName,
+			CreatedBy:    userEmail(item.CreatedByUser),
+			EditedBy:     userEmail(item.EditedByUser),
+			ReviewedBy:   userEmail(item.ReviewedByUser),
+
+			Status:          item.Status,
+			ReviewerComment: item.ReviewerComment,
+			RejectionReason: item.RejectionReason,
+			ReviewedAt:      item.ReviewedAt,
+
+			ReviewEmailTriggerSuccess: item.ReviewEmailTriggerSuccess,
+		})
+	}
+
+	totalPages := 0
+	if total > 0 {
+		totalPages = int((total + int64(pageSize) - 1) / int64(pageSize))
+	}
+
+	return &PaginatedFormSubmissionsResponse{
+		Page:       page,
+		PageSize:   pageSize,
+		TotalItems: total,
+		TotalPages: totalPages,
+		Items:      respItems,
+	}, nil
+}
