@@ -434,7 +434,6 @@ func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest, userId in
 				FileComment:     strings.TrimSpace(in.FileComment),
 				Status:          "pending",
 				ReviewerComment: "",
-				RejectionReason: "",
 			}
 
 			return tx.Create(&row).Error
@@ -491,6 +490,7 @@ func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fil
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			resp := &GetFormSubmissionResponse{
 				Found:                     false,
+				ID:                        0,
 				RowID:                     rowID,
 				FormKey:                   key,
 				Details:                   []FormSubmissionDetailResponse{},
@@ -563,7 +563,6 @@ func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fil
 			FileComment:     u.FileComment,
 			Status:          u.Status,
 			ReviewerComment: u.ReviewerComment,
-			RejectionReason: u.RejectionReason,
 			ReviewedBy:      userEmail(u.ReviewedByUser),
 			ReviewedAt:      u.ReviewedAt,
 		}
@@ -576,6 +575,7 @@ func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fil
 	}
 
 	return &GetFormSubmissionResponse{
+		ID:          sub.ID,
 		Found:       true,
 		FileID:      sub.FileID,
 		RowID:       sub.RowID,
@@ -595,7 +595,6 @@ func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fil
 
 		Status:          sub.Status,
 		ReviewerComment: sub.ReviewerComment,
-		RejectionReason: sub.RejectionReason,
 		ReviewedAt:      sub.ReviewedAt,
 
 		ReviewEmailTriggerSuccess: sub.ReviewEmailTriggerSuccess,
@@ -743,7 +742,6 @@ func (s *FormSubmissionService) SearchSubmissions(
 
 			Status:          item.Status,
 			ReviewerComment: item.ReviewerComment,
-			RejectionReason: item.RejectionReason,
 			ReviewedAt:      item.ReviewedAt,
 
 			ReviewEmailTriggerSuccess: item.ReviewEmailTriggerSuccess,
@@ -1009,7 +1007,6 @@ func (s *FormSubmissionService) SearchMySubmissions(
 
 			Status:          item.Status,
 			ReviewerComment: item.ReviewerComment,
-			RejectionReason: item.RejectionReason,
 			ReviewedAt:      item.ReviewedAt,
 
 			ReviewEmailTriggerSuccess: item.ReviewEmailTriggerSuccess,

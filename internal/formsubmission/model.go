@@ -52,7 +52,6 @@ type FormSubmission struct {
 
 	Status          string     `json:"status" gorm:"column:status;type:review_status;not null;default:'pending'"`
 	ReviewerComment string     `json:"reviewer_comment" gorm:"column:reviewer_comment;type:text;not null;default:''"`
-	RejectionReason string     `json:"rejection_reason" gorm:"column:rejection_reason;type:text;not null;default:''"`
 	ReviewedAt      *time.Time `json:"reviewed_at" gorm:"column:reviewed_at"`
 
 	ReviewEmailTriggerSuccess bool `json:"review_email_trigger_success" gorm:"column:review_email_trigger_success;not null;default:false"`
@@ -96,7 +95,6 @@ type FormSubmissionUpload struct {
 
 	Status          string     `json:"status" gorm:"column:status;type:upload_review_status;not null;default:'pending'"`
 	ReviewerComment string     `json:"reviewer_comment" gorm:"column:reviewer_comment;type:text;not null;default:''"`
-	RejectionReason string     `json:"rejection_reason" gorm:"column:rejection_reason;type:text;not null;default:''"`
 	ReviewedByID    *int       `json:"-" gorm:"column:reviewed_by"`
 	ReviewedAt      *time.Time `json:"reviewed_at" gorm:"column:reviewed_at"`
 
@@ -165,6 +163,7 @@ type FormSubmissionUploadResponse struct {
 }
 
 type GetFormSubmissionResponse struct {
+	ID          int64                          `json:"id"`
 	Found       bool                           `json:"found"`
 	FileID      int64                          `json:"file_id"`
 	RowID       int64                          `json:"row_id"`
