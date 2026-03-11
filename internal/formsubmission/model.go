@@ -176,8 +176,8 @@ type GetFormSubmissionResponse struct {
 	Details     []FormSubmissionDetailResponse `json:"details"`
 	Documents   []FormSubmissionUploadResponse `json:"documents"`
 	Photos      []FormSubmissionUploadResponse `json:"photos"`
-	FirstName   string                         `json:"first_name"`
-	LastName    string                         `json:"last_name"`
+	FirstName   string                         `json:"first_name" gorm:"column:firstname;null"`
+	LastName    string                         `json:"last_name" gorm:"column:lastname;null"`
 
 	CreatedBy  string `json:"created_by"`
 	EditedBy   string `json:"edited_by"`
@@ -214,8 +214,8 @@ type FormSubmissionListItemResponse struct {
 	ConsentGiven bool      `json:"consent_given"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
-	FirstName    string    `json:"first_name"`
-	LastName     string    `json:"last_name"`
+	FirstName    string    `json:"first_name" gorm:"column:firstname;null"`
+	LastName     string    `json:"last_name" gorm:"column:lastname;null"`
 
 	CreatedBy  string `json:"created_by"`
 	EditedBy   string `json:"edited_by"`
