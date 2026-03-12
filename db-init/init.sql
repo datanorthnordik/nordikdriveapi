@@ -259,26 +259,30 @@ CREATE TYPE review_status AS ENUM (
 );
 
 CREATE TABLE form_submissions (
-    id              BIGSERIAL PRIMARY KEY,
-    file_id         BIGINT NOT NULL,
-    row_id          BIGINT NOT NULL,
-    file_name       TEXT NOT NULL DEFAULT '',
-    form_key        VARCHAR(150) NOT NULL,
-    form_label      TEXT NOT NULL,
-    consent_text    TEXT NOT NULL DEFAULT '',
-    consent_given   BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    firstname       VARCHAR(100) NOT NULL DEFAULT '',
-    lastname        VARCHAR(100) NOT NULL DEFAULT '',
+    id                           BIGSERIAL PRIMARY KEY,
+    file_id                      BIGINT NOT NULL,
+    row_id                       BIGINT NOT NULL,
+    file_name                    TEXT NOT NULL DEFAULT '',
+    form_key                     VARCHAR(150) NOT NULL,
+    form_label                   TEXT NOT NULL,
+    consent_text                 TEXT NOT NULL DEFAULT '',
+    consent_given                BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    firstname                    VARCHAR(100) NOT NULL DEFAULT '',
+    lastname                     VARCHAR(100) NOT NULL DEFAULT '',
 
-    created_by      INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
-    edited_by       INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
-    reviewed_by     INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
-    status          review_status NOT NULL DEFAULT 'pending',
+    created_by                   BIGINT NULL REFERENCES users(id) ON DELETE SET NULL,
+    edited_by                    BIGINT NULL REFERENCES users(id) ON DELETE SET NULL,
+    reviewed_by                  BIGINT NULL REFERENCES users(id) ON DELETE SET NULL,
+
+    status                       review_status NOT NULL DEFAULT 'pending'::review_status,
+    reviewed_at                  TIMESTAMPTZ NULL,
+    reviewer_comment             TEXT NOT NULL DEFAULT '',
+    review_email_trigger_success BOOLEAN NOT NULL DEFAULT FALSE,
 
     CONSTRAINT uq_form_submissions_file_row_form
-        UNIQUE (row_id, file_id, form_key)
+        UNIQUE (file_id, row_id, form_key)
 );
 
 CREATE TABLE form_submission_details (
@@ -303,14 +307,21 @@ CREATE TABLE form_submission_uploads (
                      REFERENCES form_submissions(id) ON DELETE CASCADE,
     detail_id        BIGINT NOT NULL
                      REFERENCES form_submission_details(id) ON DELETE CASCADE,
-    upload_type      VARCHAR(20) NOT NULL CHECK (upload_type IN ('document', 'photo')),
+    upload_type      VARCHAR(20) NOT NULL
+                     CHECK (upload_type IN ('document', 'photo')),
     file_name        TEXT NOT NULL,
     mime_type        TEXT NOT NULL DEFAULT '',
-    file_size_bytes  BIGINT NOT NULL DEFAULT 0 CHECK (file_size_bytes >= 0),
+    file_size_bytes  BIGINT NOT NULL DEFAULT 0
+                     CHECK (file_size_bytes >= 0),
     file_url         TEXT NULL,
     file_category    TEXT NOT NULL DEFAULT '',
     file_comment     TEXT NOT NULL DEFAULT '',
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    status           upload_review_status NOT NULL DEFAULT 'pending'::upload_review_status,
+    reviewer_comment TEXT NOT NULL DEFAULT '',
+    reviewed_by      INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+    reviewed_at      TIMESTAMPTZ NULL
 );
 
 CREATE TABLE form_file_mappings (

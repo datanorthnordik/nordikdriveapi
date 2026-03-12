@@ -54,14 +54,13 @@ func isValidReviewStatus(v string) bool {
 	return ok
 }
 
-func buildReviewUpdateMap(status string, reviewerComment string, rejectionReason string, reviewerID int, reviewedAt time.Time) map[string]interface{} {
+func buildReviewUpdateMap(status string, reviewerComment string, reviewerID int, reviewedAt time.Time) map[string]interface{} {
 	status = normalizeReviewStatus(status)
 
 	if status == "pending" {
 		return map[string]interface{}{
 			"status":           status,
 			"reviewer_comment": "",
-			"rejection_reason": "",
 			"reviewed_by":      nil,
 			"reviewed_at":      nil,
 		}
@@ -70,7 +69,6 @@ func buildReviewUpdateMap(status string, reviewerComment string, rejectionReason
 	return map[string]interface{}{
 		"status":           status,
 		"reviewer_comment": strings.TrimSpace(reviewerComment),
-		"rejection_reason": strings.TrimSpace(rejectionReason),
 		"reviewed_by":      reviewerID,
 		"reviewed_at":      reviewedAt,
 	}
@@ -498,7 +496,6 @@ func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fil
 				Photos:                    []FormSubmissionUploadResponse{},
 				Status:                    "pending",
 				ReviewerComment:           "",
-				RejectionReason:           "",
 				ReviewEmailTriggerSuccess: false,
 			}
 			if fileID != nil {
@@ -839,7 +836,6 @@ func (s *FormSubmissionService) ReviewSubmission(req *ReviewFormSubmissionReques
 			submissionUpdates := buildReviewUpdateMap(
 				req.SubmissionReview.Status,
 				req.SubmissionReview.ReviewerComment,
-				req.SubmissionReview.RejectionReason,
 				reviewerID,
 				now,
 			)
@@ -874,7 +870,6 @@ func (s *FormSubmissionService) ReviewSubmission(req *ReviewFormSubmissionReques
 				uploadUpdates := buildReviewUpdateMap(
 					item.Status,
 					item.ReviewerComment,
-					item.RejectionReason,
 					reviewerID,
 					now,
 				)

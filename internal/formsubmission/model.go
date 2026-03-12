@@ -28,7 +28,6 @@ type ReviewUploadItemRequest struct {
 	UploadID        int64  `json:"upload_id" binding:"required"`
 	Status          string `json:"status" binding:"required"` // approved / rejected
 	ReviewerComment string `json:"reviewer_comment"`
-	RejectionReason string `json:"rejection_reason"`
 }
 
 type FormSubmission struct {
@@ -157,7 +156,6 @@ type FormSubmissionUploadResponse struct {
 
 	Status          string     `json:"status"`
 	ReviewerComment string     `json:"reviewer_comment"`
-	RejectionReason string     `json:"rejection_reason"`
 	ReviewedBy      string     `json:"reviewed_by"`
 	ReviewedAt      *time.Time `json:"reviewed_at"`
 }
@@ -184,7 +182,6 @@ type GetFormSubmissionResponse struct {
 
 	Status          string     `json:"status"`
 	ReviewerComment string     `json:"reviewer_comment"`
-	RejectionReason string     `json:"rejection_reason"`
 	ReviewedAt      *time.Time `json:"reviewed_at"`
 
 	ReviewEmailTriggerSuccess bool `json:"review_email_trigger_success"`
@@ -222,7 +219,6 @@ type FormSubmissionListItemResponse struct {
 
 	Status          string     `json:"status"`
 	ReviewerComment string     `json:"reviewer_comment"`
-	RejectionReason string     `json:"rejection_reason"`
 	ReviewedAt      *time.Time `json:"reviewed_at"`
 
 	ReviewEmailTriggerSuccess bool `json:"review_email_trigger_success"`
@@ -263,12 +259,10 @@ type ReviewFormSubmissionRequest struct {
 type SubmissionReviewInput struct {
 	Status          string `json:"status"`
 	ReviewerComment string `json:"reviewer_comment"`
-	RejectionReason string `json:"rejection_reason"`
 }
 
 type UploadReviewInput struct {
 	UploadID        int64  `json:"upload_id"`
 	Status          string `json:"status"`
 	ReviewerComment string `json:"reviewer_comment"`
-	RejectionReason string `json:"rejection_reason"`
 }
