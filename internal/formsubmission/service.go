@@ -687,11 +687,8 @@ func (s *FormSubmissionService) SearchSubmissions(
 		q = q.Where("consent_given = ?", *req.ConsentGiven)
 	}
 
-	if req.Status != nil {
-		v := strings.TrimSpace(*req.Status)
-		if v != "" {
-			q = q.Where("status = ?", v)
-		}
+	if len(req.Status) > 0 {
+		q = q.Where("status IN ?", req.Status)
 	}
 
 	var total int64
@@ -721,26 +718,24 @@ func (s *FormSubmissionService) SearchSubmissions(
 	respItems := make([]FormSubmissionListItemResponse, 0, len(items))
 	for _, item := range items {
 		respItems = append(respItems, FormSubmissionListItemResponse{
-			ID:           item.ID,
-			FileID:       item.FileID,
-			RowID:        item.RowID,
-			FileName:     item.FileName,
-			FormKey:      item.FormKey,
-			FormLabel:    item.FormLabel,
-			ConsentText:  item.ConsentText,
-			ConsentGiven: item.ConsentGiven,
-			CreatedAt:    item.CreatedAt,
-			UpdatedAt:    item.UpdatedAt,
-			FirstName:    item.FirstName,
-			LastName:     item.LastName,
-			CreatedBy:    userEmail(item.CreatedByUser),
-			EditedBy:     userEmail(item.EditedByUser),
-			ReviewedBy:   userEmail(item.ReviewedByUser),
-
-			Status:          item.Status,
-			ReviewerComment: item.ReviewerComment,
-			ReviewedAt:      item.ReviewedAt,
-
+			ID:                        item.ID,
+			FileID:                    item.FileID,
+			RowID:                     item.RowID,
+			FileName:                  item.FileName,
+			FormKey:                   item.FormKey,
+			FormLabel:                 item.FormLabel,
+			ConsentText:               item.ConsentText,
+			ConsentGiven:              item.ConsentGiven,
+			CreatedAt:                 item.CreatedAt,
+			UpdatedAt:                 item.UpdatedAt,
+			FirstName:                 item.FirstName,
+			LastName:                  item.LastName,
+			CreatedBy:                 userEmail(item.CreatedByUser),
+			EditedBy:                  userEmail(item.EditedByUser),
+			ReviewedBy:                userEmail(item.ReviewedByUser),
+			Status:                    item.Status,
+			ReviewerComment:           item.ReviewerComment,
+			ReviewedAt:                item.ReviewedAt,
 			ReviewEmailTriggerSuccess: item.ReviewEmailTriggerSuccess,
 		})
 	}
@@ -950,11 +945,8 @@ func (s *FormSubmissionService) SearchMySubmissions(
 		q = q.Where("consent_given = ?", *req.ConsentGiven)
 	}
 
-	if req.Status != nil {
-		v := strings.TrimSpace(*req.Status)
-		if v != "" {
-			q = q.Where("status = ?", v)
-		}
+	if len(req.Status) > 0 {
+		q = q.Where("status IN ?", req.Status)
 	}
 
 	var total int64
