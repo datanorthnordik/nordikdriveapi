@@ -132,11 +132,11 @@ func (cc *FormSubmissionController) SearchFormSubmissions(c *gin.Context) {
 		return
 	}
 
-	// defaults
 	page := req.Page
 	if page < 1 {
 		page = 1
 	}
+
 	pageSize := req.PageSize
 	if pageSize <= 0 {
 		pageSize = 20
@@ -145,7 +145,6 @@ func (cc *FormSubmissionController) SearchFormSubmissions(c *gin.Context) {
 		pageSize = 100
 	}
 
-	// normalize optional strings
 	trimOpt := func(p **string) {
 		if p == nil || *p == nil {
 			return
@@ -158,10 +157,38 @@ func (cc *FormSubmissionController) SearchFormSubmissions(c *gin.Context) {
 		*p = &v
 	}
 
+	normalizeStatusArray := func(values []string) []string {
+		if len(values) == 0 {
+			return nil
+		}
+
+		seen := make(map[string]struct{}, len(values))
+		out := make([]string, 0, len(values))
+
+		for _, v := range values {
+			s := strings.TrimSpace(v)
+			if s == "" {
+				continue
+			}
+
+			if _, exists := seen[s]; exists {
+				continue
+			}
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+
+		if len(out) == 0 {
+			return nil
+		}
+
+		return out
+	}
+
 	trimOpt(&req.FormKey)
 	trimOpt(&req.FirstName)
 	trimOpt(&req.LastName)
-	trimOpt(&req.Status)
+	req.Status = normalizeStatusArray(req.Status)
 
 	res, err := cc.FormSubmissionService.SearchSubmissions(c.Request.Context(), req, page, pageSize)
 	if err != nil {
@@ -277,10 +304,38 @@ func (cc *FormSubmissionController) SearchMyFormSubmissions(c *gin.Context) {
 		*p = &v
 	}
 
+	normalizeStatusArray := func(values []string) []string {
+		if len(values) == 0 {
+			return nil
+		}
+
+		seen := make(map[string]struct{}, len(values))
+		out := make([]string, 0, len(values))
+
+		for _, v := range values {
+			s := strings.TrimSpace(v)
+			if s == "" {
+				continue
+			}
+
+			if _, exists := seen[s]; exists {
+				continue
+			}
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+
+		if len(out) == 0 {
+			return nil
+		}
+
+		return out
+	}
+
 	trimOpt(&req.FormKey)
 	trimOpt(&req.FirstName)
 	trimOpt(&req.LastName)
-	trimOpt(&req.Status)
+	req.Status = normalizeStatusArray(req.Status)
 
 	res, err := cc.FormSubmissionService.SearchMySubmissions(
 		c.Request.Context(),

@@ -188,15 +188,15 @@ type GetFormSubmissionResponse struct {
 }
 
 type SearchFormSubmissionsRequest struct {
-	Page         int     `json:"page"`
-	PageSize     int     `json:"page_size"`
-	FileID       *int64  `json:"file_id"`
-	FormKey      *string `json:"form_key"`
-	FirstName    *string `json:"first_name"`
-	LastName     *string `json:"last_name"`
-	CreatedBy    *int    `json:"created_by"`
-	ConsentGiven *bool   `json:"consent_given"`
-	Status       *string `json:"status"`
+	Page         int      `json:"page"`
+	PageSize     int      `json:"page_size"`
+	FileID       *int64   `json:"file_id"`
+	FormKey      *string  `json:"form_key"`
+	FirstName    *string  `json:"first_name"`
+	LastName     *string  `json:"last_name"`
+	CreatedBy    *int     `json:"created_by"`
+	ConsentGiven *bool    `json:"consent_given"`
+	Status       []string `json:"status"`
 }
 
 type FormSubmissionListItemResponse struct {
