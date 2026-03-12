@@ -255,7 +255,7 @@ CREATE TYPE review_status AS ENUM (
     'pending',
     'approved',
     'rejected',
-    'needs_more_information'
+    'needs more information'
 );
 
 CREATE TABLE form_submissions (

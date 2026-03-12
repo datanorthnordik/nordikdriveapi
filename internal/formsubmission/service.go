@@ -42,7 +42,7 @@ var validReviewStatuses = map[string]struct{}{
 	"pending":                {},
 	"approved":               {},
 	"rejected":               {},
-	"needs_more_information": {},
+	"needs more information": {},
 }
 
 func normalizeReviewStatus(v string) string {
