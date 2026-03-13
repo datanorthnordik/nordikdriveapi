@@ -675,7 +675,7 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 			FileName:         fileName,
 			SizeBytes:        sizeBytes,
 			IsGalleryPhoto:   false,
-			IsApproved:       false,
+			Status:           "pending",
 			CreatedAt:        time.Now(),
 			SourceFile:       input.Filename,
 			FileID:           input.FileID,
@@ -715,7 +715,7 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 			FileName:         fileName,
 			SizeBytes:        sizeBytes,
 			IsGalleryPhoto:   true,
-			IsApproved:       false,
+			Status:           "pending",
 			CreatedAt:        time.Now(),
 			SourceFile:       input.Filename,
 			FileID:           input.FileID,
@@ -769,7 +769,7 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 			FileName:       fileName,
 			SizeBytes:      sizeBytes,
 			IsGalleryPhoto: false,
-			IsApproved:     false,
+			Status:         "pending",
 			CreatedAt:      time.Now(),
 			SourceFile:     input.Filename,
 			FileID:         input.FileID,
@@ -1036,7 +1036,7 @@ func (fs *FileService) ApproveEditRequest(requestID uint, updates []FileEditRequ
 			Where("request_id = ?", requestID).
 			Updates(map[string]interface{}{
 				"status":      "approved",
-				"approved_by": userId,
+				"reviewed_by": userId,
 			}).Error; err != nil {
 			return err
 		}
@@ -1067,7 +1067,7 @@ func (fs *FileService) GetDocsByRequest(requestID uint) ([]FileEditRequestPhoto,
 func (fs *FileService) GetPhotosByRow(requestID uint) ([]FileEditRequestPhoto, error) {
 	var photos []FileEditRequestPhoto
 
-	if err := fs.DB.Where("row_id = ? and is_approved = ? and document_type = ?", requestID, true, "photos").Find(&photos).Error; err != nil {
+	if err := fs.DB.Where("row_id = ? and status = ? and document_type = ?", requestID, "approved", "photos").Find(&photos).Error; err != nil {
 		return nil, err
 	}
 
@@ -1077,7 +1077,7 @@ func (fs *FileService) GetPhotosByRow(requestID uint) ([]FileEditRequestPhoto, e
 func (fs *FileService) GetDocsByRow(requestID uint) ([]FileEditRequestPhoto, error) {
 	var documents []FileEditRequestPhoto
 
-	if err := fs.DB.Where("row_id = ? and is_approved = ? and document_type = ?", requestID, true, "document").Find(&documents).Error; err != nil {
+	if err := fs.DB.Where("row_id = ? and status = ? and document_type = ?", requestID, "approved", "document").Find(&documents).Error; err != nil {
 		return nil, err
 	}
 	return documents, nil
@@ -1132,9 +1132,9 @@ func (fs *FileService) ReviewPhotos(approved []uint, rejected []uint, reviewer s
 		err := fs.DB.Model(&FileEditRequestPhoto{}).
 			Where("id IN ?", approved).
 			Updates(map[string]interface{}{
-				"is_approved": true,
-				"approved_by": reviewer,
-				"approved_at": now,
+				"status":      "approved",
+				"reviewed_by": reviewer,
+				"reviewed_at": now,
 			}).Error
 
 		if err != nil {
@@ -1149,9 +1149,9 @@ func (fs *FileService) ReviewPhotos(approved []uint, rejected []uint, reviewer s
 		err := fs.DB.Model(&FileEditRequestPhoto{}).
 			Where("id IN ?", rejected).
 			Updates(map[string]interface{}{
-				"is_approved": false,
-				"approved_by": reviewer,
-				"approved_at": now,
+				"status":      "rejected",
+				"reviewed_by": reviewer,
+				"reviewed_at": now,
 			}).Error
 
 		if err != nil {

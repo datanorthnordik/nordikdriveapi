@@ -1417,7 +1417,7 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 
 	var reqUpdated FileEditRequest
 	_ = db.Where("request_id = ?", req.RequestID).First(&reqUpdated).Error
-	if reqUpdated.Status != "approved" || reqUpdated.ApprovedBy == nil || *reqUpdated.ApprovedBy != 9 || reqUpdated.RowID == 0 {
+	if reqUpdated.Status != "approved" || reqUpdated.ReviewedBy == nil || *reqUpdated.ReviewedBy != 9 || reqUpdated.RowID == 0 {
 		t.Fatalf("unexpected updated request: %#v", reqUpdated)
 	}
 
@@ -1481,7 +1481,7 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 	}
 	var updatedReq FileEditRequest
 	_ = db.Where("request_id = ?", req.RequestID).First(&updatedReq).Error
-	if updatedReq.Status != "approved" || updatedReq.ApprovedBy == nil || *updatedReq.ApprovedBy != 9 {
+	if updatedReq.Status != "approved" || updatedReq.ReviewedBy == nil || *updatedReq.ReviewedBy != 9 {
 		t.Fatalf("unexpected req: %#v", updatedReq)
 	}
 }
@@ -1495,8 +1495,8 @@ func TestFileService_PhotoDocQueries_And_ReviewPhotos(t *testing.T) {
 	svc := &FileService{DB: db}
 
 	// seed photos/docs
-	p1 := FileEditRequestPhoto{RequestID: 1, RowID: 10, DocumentType: "photos", IsApproved: false, FileName: "p.jpg"}
-	d1 := FileEditRequestPhoto{RequestID: 1, RowID: 10, DocumentType: "document", IsApproved: false, FileName: "d.pdf"}
+	p1 := FileEditRequestPhoto{RequestID: 1, RowID: 10, DocumentType: "photos", Status: "pending", FileName: "p.jpg"}
+	d1 := FileEditRequestPhoto{RequestID: 1, RowID: 10, DocumentType: "document", Status: "pending", FileName: "d.pdf"}
 	_ = db.Create(&p1).Error
 	_ = db.Create(&d1).Error
 
@@ -1512,12 +1512,12 @@ func TestFileService_PhotoDocQueries_And_ReviewPhotos(t *testing.T) {
 	// approved-by-row queries
 	now := time.Now()
 	_ = db.Model(&FileEditRequestPhoto{}).Where("id = ?", p1.ID).Updates(map[string]any{
-		"is_approved": true,
-		"approved_at": now,
+		"status":      "approved",
+		"reviewed_at": now,
 	}).Error
 	_ = db.Model(&FileEditRequestPhoto{}).Where("id = ?", d1.ID).Updates(map[string]any{
-		"is_approved": true,
-		"approved_at": now,
+		"status":      "approved",
+		"reviewed_at": now,
 	}).Error
 
 	phByRow, err := svc.GetPhotosByRow(uint(10))
@@ -1543,7 +1543,7 @@ func TestFileService_PhotoDocQueries_And_ReviewPhotos(t *testing.T) {
 	// ReviewPhotos reject error
 	db = newTestDB(t)
 	svc = &FileService{DB: db}
-	_ = db.Create(&FileEditRequestPhoto{RequestID: 1, RowID: 10, DocumentType: "photos", IsApproved: true}).Error
+	_ = db.Create(&FileEditRequestPhoto{RequestID: 1, RowID: 10, DocumentType: "photos", Status: "approved"}).Error
 	_ = db.Migrator().DropTable(&FileEditRequestPhoto{})
 	if err := svc.ReviewPhotos(nil, []uint{1}, "r"); err == nil {
 		t.Fatalf("expected reject error")
@@ -1552,8 +1552,8 @@ func TestFileService_PhotoDocQueries_And_ReviewPhotos(t *testing.T) {
 	// ReviewPhotos success (approve + reject)
 	db = newTestDB(t)
 	svc = &FileService{DB: db}
-	a := FileEditRequestPhoto{RequestID: 1, RowID: 10, DocumentType: "photos", IsApproved: false}
-	r := FileEditRequestPhoto{RequestID: 1, RowID: 10, DocumentType: "photos", IsApproved: true}
+	a := FileEditRequestPhoto{RequestID: 1, RowID: 10, DocumentType: "photos", Status: "rejected"}
+	r := FileEditRequestPhoto{RequestID: 1, RowID: 10, DocumentType: "photos", Status: "approved"}
 	_ = db.Create(&a).Error
 	_ = db.Create(&r).Error
 
@@ -1563,8 +1563,8 @@ func TestFileService_PhotoDocQueries_And_ReviewPhotos(t *testing.T) {
 	var aa, rr FileEditRequestPhoto
 	_ = db.First(&aa, a.ID).Error
 	_ = db.First(&rr, r.ID).Error
-	if aa.IsApproved != true || rr.IsApproved != false {
-		t.Fatalf("unexpected review result: approve=%v reject=%v", aa.IsApproved, rr.IsApproved)
+	if aa.Status != "approved" || rr.Status != "rejected" {
+		t.Fatalf("unexpected review result: approve=%v reject=%v", rr.Status, aa.Status)
 	}
 }
 

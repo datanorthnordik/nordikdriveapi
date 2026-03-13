@@ -87,7 +87,7 @@ type FileEditRequest struct {
 	CreatedAt         time.Time      `gorm:"autoCreateTime" json:"created_at"`
 	IsEdited          bool           `gorm:"default:false" json:"is_edited"`
 	FileID            uint           `gorm:"column:file_id;not null;" json:"file_id"`
-	ApprovedBy        *int           `gorm:"column:approved_by" json:"approved_by"`
+	ReviewedBy        *int           `gorm:"column:reviewed_by" json:"reviewed_by"`
 	Community         pq.StringArray `gorm:"type:text[];column:community;default:'{}'" json:"community"`
 	UploaderCommunity pq.StringArray `gorm:"type:text[];column:uploader_community;default:'{}'" json:"uploader_community"`
 }
@@ -156,22 +156,23 @@ type EditChangeInput struct {
 }
 
 type FileEditRequestPhoto struct {
-	ID               uint      `gorm:"primaryKey" json:"id"`
-	RequestID        uint      `json:"request_id"`
-	RowID            int       `json:"row_id"`
-	PhotoURL         string    `json:"photo_url"`
-	FileName         string    `json:"file_name"`
-	SizeBytes        int64     `json:"size_bytes"`
-	IsGalleryPhoto   bool      `json:"is_gallery_photo"`
-	IsApproved       bool      `json:"is_approved"`
-	ApprovedBy       string    `json:"approved_by"`
-	ApprovedAt       time.Time `json:"approved_at"`
-	CreatedAt        time.Time `json:"created_at"`
-	SourceFile       string    `json:"source_file"`
-	FileID           uint      `json:"file_id"`
-	DocumentType     string    `gorm:"type:varchar(20);default:'photos'" json:"document_type"`
-	DocumentCategory string    `gorm:"type:varchar(50)" json:"document_category"`
-	PhotoComment     string    `gorm:"type:text;column:photo_comment" json:"photo_comment"`
+	ID               uint       `gorm:"primaryKey" json:"id"`
+	RequestID        uint       `json:"request_id"`
+	RowID            int        `json:"row_id"`
+	PhotoURL         string     `json:"photo_url"`
+	FileName         string     `json:"file_name"`
+	SizeBytes        int64      `json:"size_bytes"`
+	IsGalleryPhoto   bool       `json:"is_gallery_photo"`
+	Status           string     `gorm:"type:varchar(20);default:'pending'" json:"status"`
+	ReviewBy         *int       `gorm:"column:reviewed_by" json:"reviewed_by"`
+	ReviewComment    string     `gorm:"type:text;column:review_comment" json:"review_comment"`
+	ReviewedAt       *time.Time `gorm:"column:reviewed_at" json:"reviewed_at"`
+	CreatedAt        time.Time  `json:"created_at"`
+	SourceFile       string     `json:"source_file"`
+	FileID           uint       `json:"file_id"`
+	DocumentType     string     `gorm:"type:varchar(20);default:'photos'" json:"document_type"`
+	DocumentCategory string     `gorm:"type:varchar(50)" json:"document_category"`
+	PhotoComment     string     `gorm:"type:text;column:photo_comment" json:"photo_comment"`
 }
 
 type PhotoInput struct {
