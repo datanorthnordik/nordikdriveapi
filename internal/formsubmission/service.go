@@ -34,7 +34,7 @@ var (
 	ErrUploadNotFoundForSubmission = errors.New("one or more uploads do not belong to the submission")
 )
 
-var triggerFormSubmissionReviewEmailHook = func(submissionID int64) error {
+var triggerFormSubmissionReviewEmailHook = func(_ int64) error {
 	return errors.New("review email trigger not implemented")
 }
 
@@ -67,8 +67,56 @@ func buildReviewUpdateMap(status string, reviewerComment string, reviewerID int,
 	}
 }
 
+type formSubmissionReadCloser struct {
+	io.ReadCloser
+	closeFn func() error
+}
+
+func (r *formSubmissionReadCloser) Close() error {
+	var firstErr error
+
+	if r.ReadCloser != nil {
+		if err := r.ReadCloser.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if r.closeFn != nil {
+		if err := r.closeFn(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+var formSubmissionGoHook = func(fn func()) {
+	go fn()
+}
+
+var openFormUploadReaderHook = func(ctx context.Context, rec FormSubmissionUpload) (io.ReadCloser, string, string, error) {
+	bucket, objectPath, err := parseFormUploadGSURL(rec.FileURL)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	client, err := newFormSubmissionGCSClientHook(ctx)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	rc, err := client.Bucket(bucket).Object(objectPath).NewReader(ctx)
+	if err != nil {
+		_ = client.Close()
+		return nil, "", "", err
+	}
+
+	return &formSubmissionReadCloser{
+		ReadCloser: rc,
+		closeFn:    client.Close,
+	}, strings.TrimSpace(rc.ContentType()), objectPath, nil
+}
+
 func (s *FormSubmissionService) triggerReviewEmailAsync(submissionID int64) {
-	go func() {
+	formSubmissionGoHook(func() {
 		defer func() {
 			if recover() != nil {
 				// keep review_email_trigger_success = false
@@ -76,14 +124,13 @@ func (s *FormSubmissionService) triggerReviewEmailAsync(submissionID int64) {
 		}()
 
 		if err := triggerFormSubmissionReviewEmailHook(submissionID); err != nil {
-			// placeholder not implemented yet, keep false for cron
 			return
 		}
 
 		_ = s.DB.Model(&FormSubmission{}).
 			Where("id = ?", submissionID).
 			Update("review_email_trigger_success", true).Error
-	}()
+	})
 }
 
 func parseFormUploadGSURL(gsURL string) (bucket string, objectPath string, err error) {
@@ -597,19 +644,8 @@ func (s *FormSubmissionService) GetUploadBytes(id uint) ([]byte, string, string,
 		return nil, "", "", err
 	}
 
-	bucket, objectPath, err := parseFormUploadGSURL(rec.FileURL)
-	if err != nil {
-		return nil, "", "", err
-	}
-
 	ctx := context.Background()
-	client, err := newFormSubmissionGCSClientHook(ctx)
-	if err != nil {
-		return nil, "", "", err
-	}
-	defer client.Close()
-
-	rc, err := client.Bucket(bucket).Object(objectPath).NewReader(ctx)
+	rc, contentType, objectPath, err := openFormUploadReaderHook(ctx, rec)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -620,7 +656,7 @@ func (s *FormSubmissionService) GetUploadBytes(id uint) ([]byte, string, string,
 		return nil, "", "", err
 	}
 
-	contentType := strings.TrimSpace(rc.ContentType())
+	contentType = strings.TrimSpace(contentType)
 	if contentType == "" {
 		contentType = strings.TrimSpace(rec.MimeType)
 	}

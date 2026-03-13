@@ -27,9 +27,9 @@ type FileServicePort interface {
 
 	CreateEditRequest(input EditRequestInput, userID uint) (*FileEditRequest, error)
 	GetEditRequests(statusCSV *string, userID *uint) ([]FileEditRequestWithUser, error)
-	ApproveEditRequest(requestID uint, updates []FileEditRequestDetails, userId uint) error
+	ReviewEditRequest(requestID uint, status string, reviewComment string, updates []FileEditRequestDetails, userId uint) error
 
-	ReviewPhotos(approved []uint, rejected []uint, reviewer string) error
+	ReviewPhotos(reviews []PhotoReviewInput, reviewerID uint) error
 
 	GetPhotosByRequest(requestID uint) ([]FileEditRequestPhoto, error)
 	GetDocsByRequest(requestID uint) ([]FileEditRequestPhoto, error)

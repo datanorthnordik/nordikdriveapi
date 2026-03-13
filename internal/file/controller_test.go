@@ -187,16 +187,14 @@ func (b *badGetEditsSvc) GetEditRequests(statusCSV *string, userID *uint) ([]Fil
 	return nil, errors.New("get edits failed")
 }
 
-type badApproveSvc struct{ *fakeFileService }
-
-func (b *badApproveSvc) ApproveEditRequest(requestID uint, updates []FileEditRequestDetails, userId uint) error {
-	b.bump("ApproveEditRequest")
-	return errors.New("approve failed")
-}
-
 type badReviewSvc struct{ *fakeFileService }
 
-func (b *badReviewSvc) ReviewPhotos(approved []uint, rejected []uint, reviewer string) error {
+func (b *badReviewSvc) ReviewEditRequest(uint, string, string, []FileEditRequestDetails, uint) error {
+	b.bump("ReviewEditRequest")
+	return errors.New("review failed")
+}
+
+func (b *badReviewSvc) ReviewPhotos(reviews []PhotoReviewInput, reviewerID uint) error {
 	b.bump("ReviewPhotos")
 	return errors.New("review failed")
 }
@@ -1270,32 +1268,48 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 		requireContains(t, w.Body.String(), "invalid input")
 	})
 
-	t.Run("ApproveEditRequest - 400 service error (need svc)", func(t *testing.T) {
+	t.Run("ReviewEditRequest - 400 service error", func(t *testing.T) {
 		base := &fakeFileService{}
-		svc := &badApproveSvc{fakeFileService: base}
+		svc := &badReviewSvc{fakeFileService: base}
 		logSvc := &fakeLogService{}
 		fc := &FileController{FileService: svc, LogService: logSvc}
 		r := setupRouterForController(fc)
 
-		body := map[string]any{"request_id": 5, "updates": []any{}}
+		body := map[string]any{
+			"request_id":     5,
+			"status":         "approved",
+			"review_comment": "looks good",
+			"updates":        []any{},
+		}
+
 		req := newJSONReq(http.MethodPut, "/api/file/approve/request", body, authHeaders)
 		w := doReq(r, req)
+
 		assertStatus(t, w, http.StatusBadRequest)
-		requireContains(t, w.Body.String(), "approve failed")
+		requireContains(t, w.Body.String(), "review failed")
 	})
 
-	t.Run("ApproveEditRequest - 200 ok", func(t *testing.T) {
+	t.Run("ReviewEditRequest - 200 approved", func(t *testing.T) {
 		svc := &fakeFileService{}
 		logSvc := &fakeLogService{}
 		fc := &FileController{FileService: svc, LogService: logSvc}
 		r := setupRouterForController(fc)
 
-		body := map[string]any{"request_id": 99, "updates": []any{}}
+		body := map[string]any{
+			"request_id":     99,
+			"status":         "approved",
+			"review_comment": "approved",
+			"updates":        []any{},
+		}
+
 		req := newJSONReq(http.MethodPut, "/api/file/approve/request", body, authHeaders)
 		w := doReq(r, req)
+
 		assertStatus(t, w, http.StatusOK)
-		if svc.Called["ApproveEditRequest"] != 1 {
-			t.Fatalf("expected ApproveEditRequest called once, got %+v", svc.Called)
+		requireContains(t, w.Body.String(), "Request approved and file updated")
+
+		if svc.Called["ReviewEditRequest"] != 1 {
+			t.Fatalf("expected ReviewEditRequest called once, got %+v", svc.Called)
 		}
 	})
 
@@ -1331,13 +1345,32 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 		requireContains(t, w.Body.String(), "review failed")
 	})
 
-	t.Run("ReviewPhotos - 200 ok uses reviewer email", func(t *testing.T) {
+	t.Run("ReviewPhotos - 200 ok uses reviewer id", func(t *testing.T) {
 		svc := &fakeFileService{}
 		logSvc := &fakeLogService{}
 		fc := &FileController{FileService: svc, LogService: logSvc}
 		r := setupRouterForController(fc)
 
-		body := map[string]any{"approved_photos": []any{1, 2}, "rejected_photos": []any{3}}
+		body := map[string]any{
+			"reviews": []any{
+				map[string]any{
+					"photo_id":       1,
+					"status":         "approved",
+					"review_comment": "good photo",
+				},
+				map[string]any{
+					"photo_id":       2,
+					"status":         "approved",
+					"review_comment": "clear image",
+				},
+				map[string]any{
+					"photo_id":       3,
+					"status":         "rejected",
+					"review_comment": "blurred",
+				},
+			},
+		}
+
 		req := newJSONReq(http.MethodPost, "/api/file/photos/review", body, authHeaders)
 		w := doReq(r, req)
 		assertStatus(t, w, http.StatusOK)
@@ -1345,11 +1378,13 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 		if svc.Called["ReviewPhotos"] != 1 {
 			t.Fatalf("expected ReviewPhotos called once, got %+v", svc.Called)
 		}
-		if svc.LastReviewer != "reviewer@nordik.ca" {
-			t.Fatalf("expected reviewer email, got %q", svc.LastReviewer)
+		if svc.LastReviewerID != 1 {
+			t.Fatalf("expected reviewer id 1, got %d", svc.LastReviewerID)
+		}
+		if len(svc.LastPhotoReviews) != 3 {
+			t.Fatalf("expected 3 photo reviews, got %d", len(svc.LastPhotoReviews))
 		}
 	})
-
 	// ---------------- GetPhotos/Docs by Request/Row ----------------
 
 	t.Run("GetPhotosByRequest - 400 invalid request id", func(t *testing.T) {

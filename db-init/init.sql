@@ -157,7 +157,8 @@ CREATE TABLE IF NOT EXISTS logs (
 CREATE TABLE file_edit_request (
     request_id SERIAL PRIMARY KEY,
     user_id INT NOT NULL,
-    status VARCHAR(50) DEFAULT 'pending',
+    status VARCHAR(20) NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'approved', 'rejected')),
     firstname VARCHAR(100),
     lastname VARCHAR(100),
     consent BOOLEAN DEFAULT FALSE,
@@ -166,32 +167,34 @@ CREATE TABLE file_edit_request (
     row_id INT NULL,
     is_edited BOOLEAN DEFAULT TRUE,
     file_id INT NOT NULL REFERENCES file(id) ON DELETE CASCADE,
-    approved_by VARCHAR(255) REFERENCES users(id) ON DELETE SET NULL,
+    review_by INT REFERENCES users(id) ON DELETE SET NULL,
+    review_comment TEXT,
     community TEXT[] NOT NULL DEFAULT '{}'::text[],
     uploader_community TEXT[] NOT NULL DEFAULT '{}'::text[]
 );
 
 
-
 CREATE TABLE file_edit_request_photos (
-     id SERIAL PRIMARY KEY,
-    request_id INT NOT NULL,
+    id SERIAL PRIMARY KEY,
+    request_id INT NOT NULL REFERENCES file_edit_request(request_id) ON DELETE CASCADE,
 
     photo_url TEXT NOT NULL,
     file_name TEXT NOT NULL,
     size_bytes BIGINT NOT NULL,
 
     is_gallery_photo BOOLEAN DEFAULT FALSE,
-    is_approved BOOLEAN DEFAULT FALSE,
-    approved_by VARCHAR(255),
-    approved_at TIMESTAMP,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'approved', 'rejected')),
+    review_by INT REFERENCES users(id) ON DELETE SET NULL,
+    review_comment TEXT,
+    reviewed_at TIMESTAMP,
 
     row_id INT,
     file_id INT NOT NULL REFERENCES file(id) ON DELETE CASCADE,
     created_at TIMESTAMP DEFAULT NOW(),
 
     document_type VARCHAR(20) NOT NULL DEFAULT 'photos',
-    document_category VARCHAR(50) NULL,  
+    document_category VARCHAR(50) NULL,
     photo_comment TEXT NULL
 );
 

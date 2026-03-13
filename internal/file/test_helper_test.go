@@ -90,7 +90,7 @@ func setupRouterForController(fc *FileController) *gin.Engine {
 		g.GET("/docs/:rowId", fc.GetDocsByRow)
 		g.GET("/photo/:photoId", fc.GetPhoto)
 		g.GET("/doc/:docId", fc.GetDoc)
-		g.PUT("/approve/request", fc.ApproveEditRequest)
+		g.PUT("/approve/request", fc.ReviewEditRequest)
 		g.POST("/photos/review", fc.ReviewPhotos)
 		g.POST("/doc/download/:id", fc.DownloadMediaByID)
 	}
@@ -160,6 +160,9 @@ func (f *fakeLogService) Log(l logs.SystemLog, payload interface{}) error {
 
 type fakeFileService struct {
 	Called map[string]int
+
+	LastReviewerID   uint
+	LastPhotoReviews []PhotoReviewInput
 
 	LastSaveUserID uint
 	LastDeleteID   string
@@ -279,16 +282,17 @@ func (f *fakeFileService) GetEditRequests(statusCSV *string, userID *uint) ([]Fi
 	f.bump("GetEditRequests")
 	return []FileEditRequestWithUser{}, nil
 }
-func (f *fakeFileService) ApproveEditRequest(requestID uint, updates []FileEditRequestDetails, userId uint) error {
-	f.bump("ApproveEditRequest")
+func (f *fakeFileService) ReviewEditRequest(requestID uint, status string, reviewComment string, updates []FileEditRequestDetails, userId uint) error {
+	f.bump("ReviewEditRequest")
 	f.LastApproveReqID = requestID
 	f.LastApproveBy = userId
 	return nil
 }
 
-func (f *fakeFileService) ReviewPhotos(approved []uint, rejected []uint, reviewer string) error {
+func (f *fakeFileService) ReviewPhotos(reviews []PhotoReviewInput, reviewerID uint) error {
 	f.bump("ReviewPhotos")
-	f.LastReviewer = reviewer
+	f.LastReviewerID = reviewerID
+	f.LastPhotoReviews = reviews
 	return nil
 }
 
