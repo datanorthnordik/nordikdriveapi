@@ -31,7 +31,7 @@ func RegisterRoutes(r *gin.Engine, fileService FileServicePort, logService LogSe
 		userGroup.GET("/docs/:rowId", fileController.GetDocsByRow)
 		userGroup.GET("/photo/:photoId", fileController.GetPhoto)
 		userGroup.GET("/doc/:docId", fileController.GetDoc)
-		userGroup.PUT("/approve/request", fileController.ApproveEditRequest)
+		userGroup.PUT("/approve/request", fileController.ReviewEditRequest)
 		userGroup.POST("/photos/review", fileController.ReviewPhotos)
 		userGroup.POST("/doc/download/:id", fileController.DownloadMediaByID)
 	}

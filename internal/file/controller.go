@@ -688,7 +688,7 @@ func (fc *FileController) GetEditRequests(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"requests": requests})
 }
 
-func (fc *FileController) ApproveEditRequest(c *gin.Context) {
+func (fc *FileController) ReviewEditRequest(c *gin.Context) {
 	userIDVal, exists := c.Get("userID")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "user ID not found"})
@@ -696,14 +696,16 @@ func (fc *FileController) ApproveEditRequest(c *gin.Context) {
 	}
 
 	userID, ok := userIDVal.(float64)
-
 	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
 		return
 	}
+
 	var input struct {
-		RequestID uint                     `json:"request_id"`
-		Updates   []FileEditRequestDetails `json:"updates"`
+		RequestID     uint                     `json:"request_id"`
+		Status        string                   `json:"status"`
+		ReviewComment string                   `json:"review_comment"`
+		Updates       []FileEditRequestDetails `json:"updates"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -711,20 +713,44 @@ func (fc *FileController) ApproveEditRequest(c *gin.Context) {
 		return
 	}
 
-	if err := fc.FileService.ApproveEditRequest(input.RequestID, input.Updates, uint(userID)); err != nil {
+	if err := fc.FileService.ReviewEditRequest(
+		input.RequestID,
+		input.Status,
+		input.ReviewComment,
+		input.Updates,
+		uint(userID),
+	); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Request approved and file updated"})
+	message := "Request reviewed successfully"
+	switch strings.ToLower(strings.TrimSpace(input.Status)) {
+	case "approved":
+		message = "Request approved and file updated"
+	case "rejected":
+		message = "Request rejected successfully"
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": message})
 }
 
 // POST /api/file/photos/review
 func (fc *FileController) ReviewPhotos(c *gin.Context) {
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user ID not found"})
+		return
+	}
+
+	userIDFloat, ok := userIDVal.(float64)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
 
 	var input struct {
-		Approved []uint `json:"approved_photos"`
-		Rejected []uint `json:"rejected_photos"`
+		Reviews []PhotoReviewInput `json:"reviews"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -732,10 +758,7 @@ func (fc *FileController) ReviewPhotos(c *gin.Context) {
 		return
 	}
 
-	// Get reviewer name (optional)
-	reviewer := c.GetString("user_email")
-
-	if err := fc.FileService.ReviewPhotos(input.Approved, input.Rejected, reviewer); err != nil {
+	if err := fc.FileService.ReviewPhotos(input.Reviews, uint(userIDFloat)); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

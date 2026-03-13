@@ -75,6 +75,12 @@ type FileWithUser struct {
 	Lastname  string `json:"lastname"`
 }
 
+type PhotoReviewInput struct {
+	PhotoID       uint   `json:"photo_id"`
+	Status        string `json:"status"`
+	ReviewComment string `json:"review_comment"`
+}
+
 type FileEditRequest struct {
 	RequestID         uint           `gorm:"primaryKey;autoIncrement" json:"request_id"`
 	RowID             int            `gorm:"not null" json:"row_id"`
@@ -88,9 +94,11 @@ type FileEditRequest struct {
 	IsEdited          bool           `gorm:"default:false" json:"is_edited"`
 	FileID            uint           `gorm:"column:file_id;not null;" json:"file_id"`
 	ReviewedBy        *int           `gorm:"column:reviewed_by" json:"reviewed_by"`
+	ReviewComment     string         `gorm:"type:text;column:review_comment" json:"review_comment"`
 	Community         pq.StringArray `gorm:"type:text[];column:community;default:'{}'" json:"community"`
 	UploaderCommunity pq.StringArray `gorm:"type:text[];column:uploader_community;default:'{}'" json:"uploader_community"`
 }
+
 type FileEditRequestDetails struct {
 	ID        uint      `gorm:"primaryKey;autoIncrement" json:"id"`
 	RequestID uint      `gorm:"not null" json:"request_id"`
