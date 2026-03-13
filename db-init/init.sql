@@ -185,7 +185,7 @@ CREATE TABLE file_edit_request_photos (
     is_gallery_photo BOOLEAN DEFAULT FALSE,
     status VARCHAR(20) NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'approved', 'rejected')),
-    review_by INT REFERENCES users(id) ON DELETE SET NULL,
+    reviewed_by INT REFERENCES users(id) ON DELETE SET NULL,
     review_comment TEXT,
     reviewed_at TIMESTAMP,
 

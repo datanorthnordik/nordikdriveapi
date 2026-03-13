@@ -1055,11 +1055,13 @@ func (fs *FileService) ReviewEditRequest(
 		}
 
 		// 5) Save request review result
+		reviewedByID := int(userId)
+
 		if err := tx.Model(&FileEditRequest{}).
 			Where("request_id = ?", requestID).
 			Updates(map[string]interface{}{
 				"status":         status,
-				"reviewed_by":    userId,
+				"reviewed_by":    reviewedByID,
 				"review_comment": reviewComment,
 			}).Error; err != nil {
 			return err
@@ -1151,6 +1153,7 @@ func (fs *FileService) ReviewPhotos(reviews []PhotoReviewInput, reviewerID uint)
 	}
 
 	now := time.Now()
+	reviewerIDInt := int(reviewerID)
 
 	return fs.DB.Transaction(func(tx *gorm.DB) error {
 		for _, review := range reviews {
@@ -1167,7 +1170,7 @@ func (fs *FileService) ReviewPhotos(reviews []PhotoReviewInput, reviewerID uint)
 				Where("id = ?", review.PhotoID).
 				Updates(map[string]interface{}{
 					"status":         status,
-					"reviewed_by":    reviewerID,
+					"reviewed_by":    reviewerIDInt,
 					"review_comment": strings.TrimSpace(review.ReviewComment),
 					"reviewed_at":    now,
 				}).Error; err != nil {
