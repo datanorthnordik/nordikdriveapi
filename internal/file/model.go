@@ -78,7 +78,7 @@ type FileWithUser struct {
 type PhotoReviewInput struct {
 	PhotoID       uint   `json:"photo_id"`
 	Status        string `json:"status"`
-	ReviewComment string `json:"review_comment"`
+	ReviewComment string `json:"reviewer_comment"`
 }
 
 type FileEditRequest struct {
@@ -94,7 +94,7 @@ type FileEditRequest struct {
 	IsEdited          bool           `gorm:"default:false" json:"is_edited"`
 	FileID            uint           `gorm:"column:file_id;not null;" json:"file_id"`
 	ReviewedBy        *int           `gorm:"column:reviewed_by" json:"reviewed_by"`
-	ReviewComment     string         `gorm:"type:text;column:review_comment" json:"review_comment"`
+	ReviewComment     string         `gorm:"type:text;column:reviewer_comment" json:"reviewer_comment"`
 	Community         pq.StringArray `gorm:"type:text[];column:community;default:'{}'" json:"community"`
 	UploaderCommunity pq.StringArray `gorm:"type:text[];column:uploader_community;default:'{}'" json:"uploader_community"`
 }
@@ -173,7 +173,7 @@ type FileEditRequestPhoto struct {
 	IsGalleryPhoto   bool       `json:"is_gallery_photo"`
 	Status           string     `gorm:"type:varchar(20);default:'pending'" json:"status"`
 	ReviewBy         *int       `gorm:"column:reviewed_by" json:"reviewed_by"`
-	ReviewComment    string     `gorm:"type:text;column:review_comment" json:"review_comment"`
+	ReviewComment    string     `gorm:"type:text;column:reviewer_comment" json:"reviewer_comment"`
 	ReviewedAt       *time.Time `gorm:"column:reviewed_at" json:"reviewed_at"`
 	CreatedAt        time.Time  `json:"created_at"`
 	SourceFile       string     `json:"source_file"`

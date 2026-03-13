@@ -167,8 +167,8 @@ CREATE TABLE file_edit_request (
     row_id INT NULL,
     is_edited BOOLEAN DEFAULT TRUE,
     file_id INT NOT NULL REFERENCES file(id) ON DELETE CASCADE,
-    review_by INT REFERENCES users(id) ON DELETE SET NULL,
-    review_comment TEXT,
+    reviewed_by INT REFERENCES users(id) ON DELETE SET NULL,
+    reviewer_comment TEXT,
     community TEXT[] NOT NULL DEFAULT '{}'::text[],
     uploader_community TEXT[] NOT NULL DEFAULT '{}'::text[]
 );
@@ -186,7 +186,7 @@ CREATE TABLE file_edit_request_photos (
     status VARCHAR(20) NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'approved', 'rejected')),
     reviewed_by INT REFERENCES users(id) ON DELETE SET NULL,
-    review_comment TEXT,
+    reviewer_comment TEXT,
     reviewed_at TIMESTAMP,
 
     row_id INT,

@@ -1276,10 +1276,10 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 		r := setupRouterForController(fc)
 
 		body := map[string]any{
-			"request_id":     5,
-			"status":         "approved",
-			"review_comment": "looks good",
-			"updates":        []any{},
+			"request_id":       5,
+			"status":           "approved",
+			"reviewer_comment": "looks good",
+			"updates":          []any{},
 		}
 
 		req := newJSONReq(http.MethodPut, "/api/file/approve/request", body, authHeaders)
@@ -1296,10 +1296,10 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 		r := setupRouterForController(fc)
 
 		body := map[string]any{
-			"request_id":     99,
-			"status":         "approved",
-			"review_comment": "approved",
-			"updates":        []any{},
+			"request_id":       99,
+			"status":           "approved",
+			"reviewer_comment": "approved",
+			"updates":          []any{},
 		}
 
 		req := newJSONReq(http.MethodPut, "/api/file/approve/request", body, authHeaders)
@@ -1354,19 +1354,19 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 		body := map[string]any{
 			"reviews": []any{
 				map[string]any{
-					"photo_id":       1,
-					"status":         "approved",
-					"review_comment": "good photo",
+					"photo_id":         1,
+					"status":           "approved",
+					"reviewer_comment": "good photo",
 				},
 				map[string]any{
-					"photo_id":       2,
-					"status":         "approved",
-					"review_comment": "clear image",
+					"photo_id":         2,
+					"status":           "approved",
+					"reviewer_comment": "clear image",
 				},
 				map[string]any{
-					"photo_id":       3,
-					"status":         "rejected",
-					"review_comment": "blurred",
+					"photo_id":         3,
+					"status":           "rejected",
+					"reviewer_comment": "blurred",
 				},
 			},
 		}
