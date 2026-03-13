@@ -1060,9 +1060,9 @@ func (fs *FileService) ReviewEditRequest(
 		if err := tx.Model(&FileEditRequest{}).
 			Where("request_id = ?", requestID).
 			Updates(map[string]interface{}{
-				"status":         status,
-				"reviewed_by":    reviewedByID,
-				"review_comment": reviewComment,
+				"status":           status,
+				"reviewed_by":      reviewedByID,
+				"reviewer_comment": reviewComment,
 			}).Error; err != nil {
 			return err
 		}
@@ -1169,10 +1169,10 @@ func (fs *FileService) ReviewPhotos(reviews []PhotoReviewInput, reviewerID uint)
 			if err := tx.Model(&FileEditRequestPhoto{}).
 				Where("id = ?", review.PhotoID).
 				Updates(map[string]interface{}{
-					"status":         status,
-					"reviewed_by":    reviewerIDInt,
-					"review_comment": strings.TrimSpace(review.ReviewComment),
-					"reviewed_at":    now,
+					"status":           status,
+					"reviewed_by":      reviewerIDInt,
+					"reviewer_comment": strings.TrimSpace(review.ReviewComment),
+					"reviewed_at":      now,
 				}).Error; err != nil {
 				return fmt.Errorf("failed to update photo %d: %v", review.PhotoID, err)
 			}

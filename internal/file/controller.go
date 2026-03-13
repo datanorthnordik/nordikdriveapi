@@ -704,7 +704,7 @@ func (fc *FileController) ReviewEditRequest(c *gin.Context) {
 	var input struct {
 		RequestID     uint                     `json:"request_id"`
 		Status        string                   `json:"status"`
-		ReviewComment string                   `json:"review_comment"`
+		ReviewComment string                   `json:"reviewer_comment"`
 		Updates       []FileEditRequestDetails `json:"updates"`
 	}
 
