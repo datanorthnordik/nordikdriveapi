@@ -38,13 +38,6 @@ var triggerFormSubmissionReviewEmailHook = func(submissionID int64) error {
 	return errors.New("review email trigger not implemented")
 }
 
-var validReviewStatuses = map[string]struct{}{
-	"pending":                {},
-	"approved":               {},
-	"rejected":               {},
-	"needs more information": {},
-}
-
 func normalizeReviewStatus(v string) string {
 	return strings.TrimSpace(strings.ToLower(v))
 }

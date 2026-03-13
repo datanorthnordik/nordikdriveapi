@@ -17,12 +17,19 @@ const (
 	ReviewStatusPending             = "pending"
 	ReviewStatusApproved            = "approved"
 	ReviewStatusRejected            = "rejected"
-	ReviewStatusNeedMoreInformation = "need_more_information"
+	ReviewStatusNeedMoreInformation = "needs more information"
 
 	UploadReviewStatusPending  = "pending"
 	UploadReviewStatusApproved = "approved"
 	UploadReviewStatusRejected = "rejected"
 )
+
+var validReviewStatuses = map[string]struct{}{
+	ReviewStatusPending:             {},
+	ReviewStatusApproved:            {},
+	ReviewStatusRejected:            {},
+	ReviewStatusNeedMoreInformation: {},
+}
 
 type ReviewUploadItemRequest struct {
 	UploadID        int64  `json:"upload_id" binding:"required"`

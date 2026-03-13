@@ -11,7 +11,7 @@ import (
 )
 
 type FormSubmissionController struct {
-	FormSubmissionService *FormSubmissionService
+	FormSubmissionService FormSubmissionServiceInterface
 }
 
 // GET /api/form/answers?row_id=...&form_key=...&file_id=...
