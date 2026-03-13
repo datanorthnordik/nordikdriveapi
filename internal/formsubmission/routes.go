@@ -6,7 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func RegisterRoutes(r *gin.Engine, formSubmissionService *FormSubmissionService) {
+func RegisterRoutes(r *gin.Engine, formSubmissionService FormSubmissionServiceInterface) {
 	formSubmissionController := &FormSubmissionController{
 		FormSubmissionService: formSubmissionService,
 	}
