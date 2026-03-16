@@ -13,6 +13,7 @@ import (
 	"nordik-drive-api/internal/formsubmission"
 	"nordik-drive-api/internal/logs"
 	"nordik-drive-api/internal/lookup"
+	"nordik-drive-api/internal/mailer"
 	"nordik-drive-api/internal/role"
 	"os"
 
@@ -47,8 +48,15 @@ func main() {
 		AllowCredentials: true,
 	}))
 
+	mailerService := mailer.NewService(
+		cfg.GmailUser,
+		cfg.GmailPass,
+		"smtp.gmail.com",
+		"587",
+	)
+
 	logService := &logs.LogService{DB: db}
-	userService := &auth.AuthService{DB: db, CFG: &cfg}
+	userService := &auth.AuthService{DB: db, CFG: &cfg, Mailer: mailerService}
 	auth.RegisterRoutes(r, userService, logService)
 
 	fileService := &file.FileService{DB: db}

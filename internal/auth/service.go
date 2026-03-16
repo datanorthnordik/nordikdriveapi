@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/smtp"
 	"nordik-drive-api/config"
+	"nordik-drive-api/internal/mailer"
 	"nordik-drive-api/internal/util"
 	"strings"
 	"time"
@@ -14,8 +15,9 @@ import (
 )
 
 type AuthService struct {
-	DB  *gorm.DB
-	CFG *config.Config
+	DB     *gorm.DB
+	CFG    *config.Config
+	Mailer *mailer.Service
 }
 
 var sendMail = smtp.SendMail
@@ -92,16 +94,13 @@ type AccessWithUser struct {
 }
 
 func (s *AuthService) SendOTP(email string) (*Auth, string, error) {
-	// Check if user exists
 	var user Auth
 	if err := s.DB.Where("email = ?", email).First(&user).Error; err != nil {
 		return nil, "", errors.New("user not found")
 	}
 
-	// Generate 6-digit OTP
 	otp := fmt.Sprintf("%06d", util.RandomInt(100000, 999999))
 
-	// Save to DB
 	record := OTP{
 		Email: email,
 		Code:  otp,
@@ -109,12 +108,6 @@ func (s *AuthService) SendOTP(email string) (*Auth, string, error) {
 	if err := s.DB.Create(&record).Error; err != nil {
 		return nil, "", err
 	}
-
-	from := s.CFG.GmailUser
-	password := s.CFG.GmailPass
-	to := []string{user.Email}
-	smtpHost := "smtp.gmail.com"
-	smtpPort := "587"
 
 	subject := "OTP to change password"
 	body := fmt.Sprintf(
@@ -125,27 +118,7 @@ func (s *AuthService) SendOTP(email string) (*Auth, string, error) {
 		otp,
 	)
 
-	// 2. Format the email message.
-	// The email header and body must be formatted correctly with \r\n
-	// to ensure it's a valid email message.
-	message := []byte(fmt.Sprintf(
-		"To: %s\r\n"+
-			"Subject: %s\r\n"+
-			"\r\n"+
-			"%s",
-		user.Email,
-		subject,
-		body,
-	))
-
-	// 3. Authenticate with the SMTP server.
-	// This is the required step to prove your application has permission.
-	auth := smtp.PlainAuth("", from, password, smtpHost)
-
-	// 4. Send the email.
-	// This function connects to the server, authenticates, and sends the message.
-	err := sendMail(smtpHost+":"+smtpPort, auth, from, to, message)
-	if err != nil {
+	if err := s.Mailer.SendOne(user.Email, subject, body); err != nil {
 		log.Printf("Error sending email to %s: %v\n", user.Email, err)
 		return nil, "", errors.New("failed to send OTP email")
 	}
