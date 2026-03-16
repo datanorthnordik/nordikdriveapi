@@ -17,7 +17,7 @@ import (
 type AuthService struct {
 	DB     *gorm.DB
 	CFG    *config.Config
-	Mailer *mailer.Service
+	Mailer mailer.EmailSender
 }
 
 var sendMail = smtp.SendMail
