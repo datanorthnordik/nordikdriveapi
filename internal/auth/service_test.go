@@ -3,7 +3,6 @@ package auth
 import (
 	"errors"
 	"fmt"
-	"net/smtp"
 	"nordik-drive-api/config"
 	"regexp"
 	"strings"
@@ -39,6 +38,22 @@ func newTestDB(t *testing.T) *gorm.DB {
 	}
 
 	return db
+}
+
+type mockMailer struct {
+	to      string
+	subject string
+	body    string
+	called  bool
+	err     error
+}
+
+func (m *mockMailer) SendOne(to, subject, body string) error {
+	m.called = true
+	m.to = to
+	m.subject = subject
+	m.body = body
+	return m.err
 }
 
 func TestAuthService_GetUser_ReturnsUser(t *testing.T) {
@@ -445,60 +460,61 @@ func TestAuthService_SendOTP_UserNotFound(t *testing.T) {
 
 func TestAuthService_SendOTP_OK_CreatesOTP_AndSendsMail(t *testing.T) {
 	db := newTestDB(t)
-	if err := db.AutoMigrate(&OTP{}); err != nil {
-		t.Fatalf("automigrate otp: %v", err)
+
+	if err := db.AutoMigrate(&Auth{}, &OTP{}); err != nil {
+		t.Fatalf("automigrate: %v", err)
 	}
 
-	if err := db.Create(&Auth{Email: "a@b.com", Password: "x", Role: "User"}).Error; err != nil {
+	if err := db.Create(&Auth{
+		Email:    "a@b.com",
+		Password: "x",
+		Role:     "User",
+	}).Error; err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
 
-	prev := sendMail
-	t.Cleanup(func() { sendMail = prev })
-
-	var sentMsg []byte
-	sendMail = func(addr string, a smtp.Auth, from string, to []string, msg []byte) error {
-		sentMsg = msg
-		if addr != "smtp.gmail.com:587" {
-			t.Fatalf("unexpected addr: %s", addr)
-		}
-		if from != "from@test.com" {
-			t.Fatalf("unexpected from: %s", from)
-		}
-		if len(to) != 1 || to[0] != "a@b.com" {
-			t.Fatalf("unexpected to: %#v", to)
-		}
-		return nil
-	}
+	mailerMock := &mockMailer{}
 
 	svc := &AuthService{
-		DB:  db,
-		CFG: &config.Config{GmailUser: "from@test.com", GmailPass: "pass"},
+		DB:     db,
+		CFG:    &config.Config{GmailUser: "from@test.com", GmailPass: "pass"},
+		Mailer: mailerMock,
 	}
 
 	user, otp, err := svc.SendOTP("a@b.com")
 	if err != nil {
 		t.Fatalf("expected nil err, got: %v", err)
 	}
+
 	if user == nil || user.Email != "a@b.com" {
 		t.Fatalf("unexpected user: %+v", user)
 	}
 
-	// returned otp must be 6 digits
 	if matched, _ := regexp.MatchString(`^\d{6}$`, otp); !matched {
 		t.Fatalf("expected 6-digit otp, got: %q", otp)
 	}
 
-	// ensure email body contains same otp
-	if !strings.Contains(string(sentMsg), otp) {
-		t.Fatalf("expected email to contain otp %q, got msg=%s", otp, string(sentMsg))
+	if !mailerMock.called {
+		t.Fatal("expected mailer to be called")
 	}
 
-	// ensure saved in DB
+	if mailerMock.to != "a@b.com" {
+		t.Fatalf("unexpected to: %s", mailerMock.to)
+	}
+
+	if mailerMock.subject != "OTP to change password" {
+		t.Fatalf("unexpected subject: %s", mailerMock.subject)
+	}
+
+	if !strings.Contains(mailerMock.body, otp) {
+		t.Fatalf("expected email body to contain otp %q, got body=%s", otp, mailerMock.body)
+	}
+
 	var saved OTP
 	if err := db.Where("email = ?", "a@b.com").Order("created_at desc").First(&saved).Error; err != nil {
 		t.Fatalf("expected otp record: %v", err)
 	}
+
 	if saved.Code != otp {
 		t.Fatalf("otp mismatch: saved=%q returned=%q", saved.Code, otp)
 	}
@@ -528,31 +544,39 @@ func TestAuthService_SendOTP_SaveOTPDBError(t *testing.T) {
 
 func TestAuthService_SendOTP_SendMailFails_ReturnsFriendlyError(t *testing.T) {
 	db := newTestDB(t)
-	if err := db.AutoMigrate(&OTP{}); err != nil {
-		t.Fatalf("automigrate otp: %v", err)
+
+	if err := db.AutoMigrate(&Auth{}, &OTP{}); err != nil {
+		t.Fatalf("automigrate: %v", err)
 	}
 
-	if err := db.Create(&Auth{Email: "a@b.com", Password: "x", Role: "User"}).Error; err != nil {
+	if err := db.Create(&Auth{
+		Email:    "a@b.com",
+		Password: "x",
+		Role:     "User",
+	}).Error; err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
 
-	prev := sendMail
-	t.Cleanup(func() { sendMail = prev })
-
-	sendMail = func(addr string, a smtp.Auth, from string, to []string, msg []byte) error {
-		return assertErr("smtp down")
+	mailerMock := &mockMailer{
+		err: errors.New("smtp down"),
 	}
 
 	svc := &AuthService{
-		DB:  db,
-		CFG: &config.Config{GmailUser: "from@test.com", GmailPass: "pass"},
+		DB:     db,
+		CFG:    &config.Config{GmailUser: "from@test.com", GmailPass: "pass"},
+		Mailer: mailerMock,
 	}
 
 	_, _, err := svc.SendOTP("a@b.com")
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
+
 	if err.Error() != "failed to send OTP email" {
 		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !mailerMock.called {
+		t.Fatal("expected mailer to be called")
 	}
 }
