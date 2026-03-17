@@ -32,6 +32,17 @@ func NewScheduler(
 		return nil, fmt.Errorf("failed to register file edit review email cron: %w", err)
 	}
 
+	formSubmissionReviewEmailJob := NewFormSubmissionReviewEmailJob(db, mailerSvc, logger)
+
+	_, err = c.AddFunc("*/5 * * * *", func() {
+		if err := formSubmissionReviewEmailJob.Run(); err != nil && logger != nil {
+			logger.Printf("form submission review email cron failed: %v", err)
+		}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to register form submission review email cron: %w", err)
+	}
+
 	return &Scheduler{cron: c}, nil
 }
 
