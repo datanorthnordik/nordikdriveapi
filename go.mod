@@ -11,6 +11,7 @@ require (
 	github.com/glebarez/sqlite v1.11.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/lib/pq v1.10.9
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/xuri/excelize/v2 v2.9.1
 	golang.org/x/crypto v0.47.0
 	golang.org/x/oauth2 v0.34.0
