@@ -36,7 +36,7 @@ var (
 	ErrUploadNotFoundForSubmission = errors.New("one or more uploads do not belong to the submission")
 )
 
-var triggerFormSubmissionReviewEmailHook = func(sub *FormSubmission) error {
+var triggerFormSubmissionReviewEmailHook = func(sub *FormSubmission, mailer mailer.EmailSender) error {
 	return errors.New("review email trigger not implemented")
 }
 
@@ -121,11 +121,13 @@ func (s *FormSubmissionService) triggerReviewEmailAsync(sub *FormSubmission) {
 	formSubmissionGoHook(func() {
 		defer func() {
 			if recover() != nil {
-				// keep review_email_trigger_success = false
+				_ = s.DB.Model(&FormSubmission{}).
+					Where("id = ?", sub.ID).
+					Update("review_email_trigger_success", false).Error
 			}
 		}()
 
-		if err := triggerFormSubmissionReviewEmailHook(sub); err != nil {
+		if err := triggerFormSubmissionReviewEmailHook(sub, s.Mailer); err != nil {
 			return
 		}
 
@@ -869,6 +871,8 @@ func (s *FormSubmissionService) ReviewSubmission(req *ReviewFormSubmissionReques
 				now,
 			)
 
+			submissionUpdates["review_email_trigger_success"] = false
+
 			if err := tx.Model(&FormSubmission{}).
 				Where("id = ?", sub.ID).
 				Updates(submissionUpdates).Error; err != nil {
@@ -913,14 +917,6 @@ func (s *FormSubmissionService) ReviewSubmission(req *ReviewFormSubmissionReques
 			shouldTriggerEmail = true
 		}
 
-		if shouldTriggerEmail {
-			if err := tx.Model(&FormSubmission{}).
-				Where("id = ?", sub.ID).
-				Update("review_email_trigger_success", false).Error; err != nil {
-				return err
-			}
-		}
-
 		return nil
 	})
 	if err != nil {
@@ -928,6 +924,8 @@ func (s *FormSubmissionService) ReviewSubmission(req *ReviewFormSubmissionReques
 	}
 
 	if shouldTriggerEmail {
+		sub.Status = req.SubmissionReview.Status
+		sub.ReviewerComment = req.SubmissionReview.ReviewerComment
 		s.triggerReviewEmailAsync(&sub)
 	}
 

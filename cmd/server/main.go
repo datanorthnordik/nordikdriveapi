@@ -73,7 +73,7 @@ func main() {
 	configService := &dataconfig.DataConfigService{DB: db}
 	dataconfig.RegisterRoutes(r, configService)
 
-	formSubmissionService := &formsubmission.FormSubmissionService{DB: db}
+	formSubmissionService := &formsubmission.FormSubmissionService{DB: db, Mailer: mailerService}
 	formsubmission.RegisterRoutes(r, formSubmissionService)
 
 	lookupService := &lookup.LookupService{DB: db}

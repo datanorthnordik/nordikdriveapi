@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"nordik-drive-api/internal/mailer"
 	"strings"
 	"testing"
 	"time"
@@ -101,7 +102,7 @@ func TestTriggerReviewEmailAsync(t *testing.T) {
 	sub, _, _ := seedSubmissionWithDetailAndUpload(t, svc)
 
 	t.Run("success updates flag", func(t *testing.T) {
-		triggerFormSubmissionReviewEmailHook = func(sub *FormSubmission) error { return nil }
+		triggerFormSubmissionReviewEmailHook = func(sub *FormSubmission, mailer mailer.EmailSender) error { return nil }
 
 		if err := svc.DB.Model(&FormSubmission{}).Where("id = ?", sub.ID).Update("review_email_trigger_success", false).Error; err != nil {
 			t.Fatalf("reset flag: %v", err)
@@ -119,7 +120,7 @@ func TestTriggerReviewEmailAsync(t *testing.T) {
 	})
 
 	t.Run("hook error keeps false", func(t *testing.T) {
-		triggerFormSubmissionReviewEmailHook = func(sub *FormSubmission) error { return errors.New("nope") }
+		triggerFormSubmissionReviewEmailHook = func(sub *FormSubmission, mailer mailer.EmailSender) error { return errors.New("nope") }
 
 		if err := svc.DB.Model(&FormSubmission{}).Where("id = ?", sub.ID).Update("review_email_trigger_success", false).Error; err != nil {
 			t.Fatalf("reset flag: %v", err)
@@ -137,7 +138,7 @@ func TestTriggerReviewEmailAsync(t *testing.T) {
 	})
 
 	t.Run("panic keeps false", func(t *testing.T) {
-		triggerFormSubmissionReviewEmailHook = func(sub *FormSubmission) error {
+		triggerFormSubmissionReviewEmailHook = func(sub *FormSubmission, mailer mailer.EmailSender) error {
 			panic("boom")
 		}
 
@@ -692,7 +693,7 @@ func TestReviewSubmission(t *testing.T) {
 	}()
 
 	formSubmissionGoHook = func(fn func()) { fn() }
-	triggerFormSubmissionReviewEmailHook = func(sub *FormSubmission) error { return errors.New("skip success update") }
+	triggerFormSubmissionReviewEmailHook = func(sub *FormSubmission, mailer mailer.EmailSender) error { return errors.New("skip success update") }
 
 	t.Run("validation errors", func(t *testing.T) {
 		cases := []struct {
@@ -784,7 +785,8 @@ func TestReviewSubmission(t *testing.T) {
 		sub, _, up := seedSubmissionWithDetailAndUpload(t, svc)
 
 		resp, err := svc.ReviewSubmission(&ReviewFormSubmissionRequest{
-			SubmissionID: sub.ID,
+			SubmissionID:     sub.ID,
+			SubmissionReview: &SubmissionReviewInput{Status: "approved", ReviewerComment: "ok"},
 			UploadReviews: []UploadReviewInput{
 				{UploadID: up.ID, Status: "rejected", ReviewerComment: "blurred"},
 			},

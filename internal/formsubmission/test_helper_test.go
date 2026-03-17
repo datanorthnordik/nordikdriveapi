@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"nordik-drive-api/internal/mailer"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -67,7 +68,7 @@ func newTestService(t *testing.T) *FormSubmissionService {
 
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
-	return &FormSubmissionService{DB: db}
+	return &FormSubmissionService{DB: db, Mailer: mailer.NewService("abc@gmail.com", "password", "smtp.gmail.com", "587")}
 }
 
 func breakDB(t *testing.T, db *gorm.DB) {
