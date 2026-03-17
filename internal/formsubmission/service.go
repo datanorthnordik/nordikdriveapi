@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"nordik-drive-api/internal/mailer"
 	"nordik-drive-api/internal/util"
 
 	"cloud.google.com/go/storage"
@@ -20,7 +21,8 @@ import (
 )
 
 type FormSubmissionService struct {
-	DB *gorm.DB
+	DB     *gorm.DB
+	Mailer mailer.EmailSender
 }
 
 var uploadBase64ToGCSHook = util.UploadPhotoToGCS
@@ -34,7 +36,7 @@ var (
 	ErrUploadNotFoundForSubmission = errors.New("one or more uploads do not belong to the submission")
 )
 
-var triggerFormSubmissionReviewEmailHook = func(_ int64) error {
+var triggerFormSubmissionReviewEmailHook = func(sub *FormSubmission) error {
 	return errors.New("review email trigger not implemented")
 }
 
@@ -115,7 +117,7 @@ var openFormUploadReaderHook = func(ctx context.Context, rec FormSubmissionUploa
 	}, strings.TrimSpace(rc.ContentType()), objectPath, nil
 }
 
-func (s *FormSubmissionService) triggerReviewEmailAsync(submissionID int64) {
+func (s *FormSubmissionService) triggerReviewEmailAsync(sub *FormSubmission) {
 	formSubmissionGoHook(func() {
 		defer func() {
 			if recover() != nil {
@@ -123,12 +125,12 @@ func (s *FormSubmissionService) triggerReviewEmailAsync(submissionID int64) {
 			}
 		}()
 
-		if err := triggerFormSubmissionReviewEmailHook(submissionID); err != nil {
+		if err := triggerFormSubmissionReviewEmailHook(sub); err != nil {
 			return
 		}
 
 		_ = s.DB.Model(&FormSubmission{}).
-			Where("id = ?", submissionID).
+			Where("id = ?", sub.ID).
 			Update("review_email_trigger_success", true).Error
 	})
 }
@@ -849,7 +851,10 @@ func (s *FormSubmissionService) ReviewSubmission(req *ReviewFormSubmissionReques
 	shouldTriggerEmail := false
 
 	err := s.DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("id = ?", req.SubmissionID).First(&sub).Error; err != nil {
+		if err := tx.
+			Preload("CreatedByUser").
+			Where("id = ?", req.SubmissionID).
+			First(&sub).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrFormSubmissionNotFound
 			}
@@ -923,7 +928,7 @@ func (s *FormSubmissionService) ReviewSubmission(req *ReviewFormSubmissionReques
 	}
 
 	if shouldTriggerEmail {
-		s.triggerReviewEmailAsync(sub.ID)
+		s.triggerReviewEmailAsync(&sub)
 	}
 
 	fileID := sub.FileID

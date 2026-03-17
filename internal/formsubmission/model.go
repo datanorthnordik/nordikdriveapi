@@ -6,13 +6,6 @@ import (
 	"gorm.io/datatypes"
 )
 
-type FormSubmissionUserRef struct {
-	ID    int    `gorm:"column:id;primaryKey"`
-	Email string `gorm:"column:email"`
-}
-
-func (FormSubmissionUserRef) TableName() string { return "users" }
-
 const (
 	ReviewStatusPending             = "pending"
 	ReviewStatusApproved            = "approved"
@@ -273,3 +266,12 @@ type UploadReviewInput struct {
 	Status          string `json:"status"`
 	ReviewerComment string `json:"reviewer_comment"`
 }
+
+type FormSubmissionUserRef struct {
+	ID        int    `json:"id" gorm:"column:id;primaryKey"`
+	FirstName string `json:"firstname" gorm:"column:firstname"`
+	LastName  string `json:"lastname" gorm:"column:lastname"`
+	Email     string `json:"email" gorm:"column:email"`
+}
+
+func (FormSubmissionUserRef) TableName() string { return "users" }

@@ -26,7 +26,7 @@ func TestUserEmail(t *testing.T) {
 	if got := userEmail(nil); got != "" {
 		t.Fatalf("expected empty, got %q", got)
 	}
-	if got := userEmail(&FormSubmissionUserRef{Email: "a@b.com"}); got != "a@b.com" {
+	if got := userEmail(&FormSubmissionUserRef{Email: "a@b.com", FirstName: "Athul", LastName: "N"}); got != "a@b.com" {
 		t.Fatalf("unexpected email %q", got)
 	}
 }
@@ -101,13 +101,13 @@ func TestTriggerReviewEmailAsync(t *testing.T) {
 	sub, _, _ := seedSubmissionWithDetailAndUpload(t, svc)
 
 	t.Run("success updates flag", func(t *testing.T) {
-		triggerFormSubmissionReviewEmailHook = func(submissionID int64) error { return nil }
+		triggerFormSubmissionReviewEmailHook = func(sub *FormSubmission) error { return nil }
 
 		if err := svc.DB.Model(&FormSubmission{}).Where("id = ?", sub.ID).Update("review_email_trigger_success", false).Error; err != nil {
 			t.Fatalf("reset flag: %v", err)
 		}
 
-		svc.triggerReviewEmailAsync(sub.ID)
+		svc.triggerReviewEmailAsync(&sub)
 
 		var got FormSubmission
 		if err := svc.DB.First(&got, sub.ID).Error; err != nil {
@@ -119,13 +119,13 @@ func TestTriggerReviewEmailAsync(t *testing.T) {
 	})
 
 	t.Run("hook error keeps false", func(t *testing.T) {
-		triggerFormSubmissionReviewEmailHook = func(submissionID int64) error { return errors.New("nope") }
+		triggerFormSubmissionReviewEmailHook = func(sub *FormSubmission) error { return errors.New("nope") }
 
 		if err := svc.DB.Model(&FormSubmission{}).Where("id = ?", sub.ID).Update("review_email_trigger_success", false).Error; err != nil {
 			t.Fatalf("reset flag: %v", err)
 		}
 
-		svc.triggerReviewEmailAsync(sub.ID)
+		svc.triggerReviewEmailAsync(&sub)
 
 		var got FormSubmission
 		if err := svc.DB.First(&got, sub.ID).Error; err != nil {
@@ -137,7 +137,7 @@ func TestTriggerReviewEmailAsync(t *testing.T) {
 	})
 
 	t.Run("panic keeps false", func(t *testing.T) {
-		triggerFormSubmissionReviewEmailHook = func(submissionID int64) error {
+		triggerFormSubmissionReviewEmailHook = func(sub *FormSubmission) error {
 			panic("boom")
 		}
 
@@ -145,7 +145,7 @@ func TestTriggerReviewEmailAsync(t *testing.T) {
 			t.Fatalf("reset flag: %v", err)
 		}
 
-		svc.triggerReviewEmailAsync(sub.ID)
+		svc.triggerReviewEmailAsync(&sub)
 
 		var got FormSubmission
 		if err := svc.DB.First(&got, sub.ID).Error; err != nil {
@@ -692,7 +692,7 @@ func TestReviewSubmission(t *testing.T) {
 	}()
 
 	formSubmissionGoHook = func(fn func()) { fn() }
-	triggerFormSubmissionReviewEmailHook = func(submissionID int64) error { return errors.New("skip success update") }
+	triggerFormSubmissionReviewEmailHook = func(sub *FormSubmission) error { return errors.New("skip success update") }
 
 	t.Run("validation errors", func(t *testing.T) {
 		cases := []struct {
