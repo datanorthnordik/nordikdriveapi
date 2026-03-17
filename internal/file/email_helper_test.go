@@ -19,10 +19,9 @@ func TestBuildFileEditRequestReviewEmailBody(t *testing.T) {
 			firstName:       "John",
 			lastName:        "Doe",
 			reviewerComment: "Looks good",
-			expected: "Hi Athul Narayanan,\n\n" +
-				"Your request to add details for John Doe has been approved.\n\n" +
-				"Reason / reviewer comment: Looks good\n\n" +
-				`Please login and see "**Requests -> Add Info Requests**" for details.`,
+			expected: "<p>Hi Athul Narayanan,</p><p>Your request to add details for John Doe has been approved.</p>" +
+				"<p>Reason / reviewer comment: Looks good</p>" +
+				`<p>Please login and see &quot;<b>Requests -&gt; Add Info Requests</b>&quot; for details.</p>`,
 		},
 		{
 			name:            "rejected without reviewer comment",
@@ -31,9 +30,8 @@ func TestBuildFileEditRequestReviewEmailBody(t *testing.T) {
 			firstName:       "Jane",
 			lastName:        "Smith",
 			reviewerComment: "",
-			expected: "Hi Athul,\n\n" +
-				"Your request to add details for Jane Smith has been rejected.\n\n" +
-				`Please login and see "**Requests -> Add Info Requests**" for details.`,
+			expected: "<p>Hi Athul,</p><p>Your request to add details for Jane Smith has been rejected.</p>" +
+				`<p>Please login and see &quot;<b>Requests -&gt; Add Info Requests</b>&quot; for details.</p>`,
 		},
 		{
 			name:            "default updated status for unknown status",
@@ -42,10 +40,9 @@ func TestBuildFileEditRequestReviewEmailBody(t *testing.T) {
 			firstName:       "Sam",
 			lastName:        "Wilson",
 			reviewerComment: "Please review again",
-			expected: "Hi Athul,\n\n" +
-				"Your request to add details for Sam Wilson has been updated.\n\n" +
-				"Reason / reviewer comment: Please review again\n\n" +
-				`Please login and see "**Requests -> Add Info Requests**" for details.`,
+			expected: "<p>Hi Athul,</p><p>Your request to add details for Sam Wilson has been updated.</p>" +
+				"<p>Reason / reviewer comment: Please review again</p>" +
+				`<p>Please login and see &quot;<b>Requests -&gt; Add Info Requests</b>&quot; for details.</p>`,
 		},
 		{
 			name:            "empty created user falls back to User",
@@ -54,9 +51,8 @@ func TestBuildFileEditRequestReviewEmailBody(t *testing.T) {
 			firstName:       "John",
 			lastName:        "Doe",
 			reviewerComment: "",
-			expected: "Hi User,\n\n" +
-				"Your request to add details for John Doe has been approved.\n\n" +
-				`Please login and see "**Requests -> Add Info Requests**" for details.`,
+			expected: "<p>Hi User,</p><p>Your request to add details for John Doe has been approved.</p>" +
+				`<p>Please login and see &quot;<b>Requests -&gt; Add Info Requests</b>&quot; for details.</p>`,
 		},
 		{
 			name:            "empty first and last name falls back to requested user",
@@ -65,9 +61,8 @@ func TestBuildFileEditRequestReviewEmailBody(t *testing.T) {
 			firstName:       "",
 			lastName:        "",
 			reviewerComment: "",
-			expected: "Hi Athul,\n\n" +
-				"Your request to add details for the requested user has been approved.\n\n" +
-				`Please login and see "**Requests -> Add Info Requests**" for details.`,
+			expected: "<p>Hi Athul,</p><p>Your request to add details for the requested user has been approved.</p>" +
+				`<p>Please login and see &quot;<b>Requests -&gt; Add Info Requests</b>&quot; for details.</p>`,
 		},
 		{
 			name:            "trims spaces from all inputs",
@@ -76,10 +71,9 @@ func TestBuildFileEditRequestReviewEmailBody(t *testing.T) {
 			firstName:       "  John  ",
 			lastName:        "  Doe  ",
 			reviewerComment: "  Looks good  ",
-			expected: "Hi Athul,\n\n" +
-				"Your request to add details for John Doe has been approved.\n\n" +
-				"Reason / reviewer comment: Looks good\n\n" +
-				`Please login and see "**Requests -> Add Info Requests**" for details.`,
+			expected: "<p>Hi Athul,</p><p>Your request to add details for John Doe has been approved.</p>" +
+				"<p>Reason / reviewer comment: Looks good</p>" +
+				`<p>Please login and see &quot;<b>Requests -&gt; Add Info Requests</b>&quot; for details.</p>`,
 		},
 		{
 			name:            "status comparison is case insensitive",
@@ -88,9 +82,8 @@ func TestBuildFileEditRequestReviewEmailBody(t *testing.T) {
 			firstName:       "John",
 			lastName:        "Doe",
 			reviewerComment: "",
-			expected: "Hi Athul,\n\n" +
-				"Your request to add details for John Doe has been approved.\n\n" +
-				`Please login and see "**Requests -> Add Info Requests**" for details.`,
+			expected: "<p>Hi Athul,</p><p>Your request to add details for John Doe has been approved.</p>" +
+				`<p>Please login and see &quot;<b>Requests -&gt; Add Info Requests</b>&quot; for details.</p>`,
 		},
 		{
 			name:            "single first name only",
@@ -99,10 +92,9 @@ func TestBuildFileEditRequestReviewEmailBody(t *testing.T) {
 			firstName:       "Madonna",
 			lastName:        "",
 			reviewerComment: "Missing data",
-			expected: "Hi Athul,\n\n" +
-				"Your request to add details for Madonna has been rejected.\n\n" +
-				"Reason / reviewer comment: Missing data\n\n" +
-				`Please login and see "**Requests -> Add Info Requests**" for details.`,
+			expected: "<p>Hi Athul,</p><p>Your request to add details for Madonna has been rejected.</p>" +
+				"<p>Reason / reviewer comment: Missing data</p>" +
+				`<p>Please login and see &quot;<b>Requests -&gt; Add Info Requests</b>&quot; for details.</p>`,
 		},
 	}
 

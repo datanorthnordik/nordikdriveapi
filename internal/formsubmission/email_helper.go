@@ -54,13 +54,13 @@ func BuildFormSubmissionReviewEmailBody(
 		)
 	}
 
-	body := fmt.Sprintf("Hi %s,\n\n%s\n\n", createdUserName, headline)
+	body := fmt.Sprintf("<p>Hi %s,</p><p>%s</p>", createdUserName, headline)
 
 	if reviewerComment != "" {
-		body += fmt.Sprintf("Reason / reviewer comment: %s\n\n", reviewerComment)
+		body += fmt.Sprintf("<p>Reason / reviewer comment: %s</p>", reviewerComment)
 	}
 
-	body += "Please login and see Requests -> Form Submission Requests for details."
+	body += `<p>Please login and see &quot;<b>Requests -&gt; Form Submission Requests</b>&quot; for details.</p>`
 
 	return body
 }
