@@ -63,7 +63,7 @@ func TestAdminService_searchChanges_NoDetailFilters_AggByFile(t *testing.T) {
 			"request_id", "status", "file_id", "file_name",
 			"firstname", "lastname",
 			"community", "uploader_community",
-			"requested_by", "approved_by",
+			"requested_by", "reviewed_by",
 			"consent", "change_count", "created_at",
 		}).AddRow(
 			uint(10), "PENDING", uint(5), "fileA.xlsx",
@@ -117,7 +117,7 @@ func TestAdminService_searchChanges_WithDetailFilters_AggByField(t *testing.T) {
 			"request_id", "status", "file_id", "file_name",
 			"firstname", "lastname",
 			"community", "uploader_community",
-			"requested_by", "approved_by",
+			"requested_by", "reviewed_by",
 			"consent", "change_count", "created_at",
 		}).AddRow(
 			uint(11), "APPROVED", uint(9), "fileB.xlsx",

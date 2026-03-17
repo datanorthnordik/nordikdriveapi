@@ -44,7 +44,7 @@ func (as *AdminService) searchChanges(req AdminFileEditSearchRequest) (*AdminSea
 	reqBase := as.DB.Table("file_edit_request r").
 		Joins("LEFT JOIN file f ON f.id = r.file_id").
 		Joins("LEFT JOIN users u_req ON u_req.id = r.user_id").
-		Joins("LEFT JOIN users u_app ON u_app.id = r.approved_by")
+		Joins("LEFT JOIN users u_app ON u_app.id = r.reviewed_by")
 
 	// split clauses: request-level vs detail-level
 	reqClauses, detailClauses := splitClauses(req.Clauses)
@@ -157,7 +157,7 @@ func (as *AdminService) searchChanges(req AdminFileEditSearchRequest) (*AdminSea
 			COALESCE(r.uploader_community, '{}'::text[]) AS uploader_community,
 
 			COALESCE(u_req.firstname || ' ' || u_req.lastname, 'User ' || r.user_id::text) AS requested_by,
-			COALESCE(u_app.firstname || ' ' || u_app.lastname, '') AS approved_by,
+			COALESCE(u_app.firstname || ' ' || u_app.lastname, '') AS reviewed_by,
 
 			r.consent,
 			COALESCE(dc.change_count, 0) AS change_count,
@@ -248,8 +248,8 @@ func applyRequestFilters(q *gorm.DB, clauses []Clause, rAlias string) (*gorm.DB,
 			q = applyIntOp(q, rAlias+".file_id", c)
 		case "requested_by":
 			q = applyIntOp(q, rAlias+".user_id", c)
-		case "approved_by":
-			q = applyIntOp(q, rAlias+".approved_by", c)
+		case "reviewed_by":
+			q = applyIntOp(q, rAlias+".reviewed_by", c)
 		case "consent":
 			q = applyBoolOp(q, rAlias+".consent", c)
 
