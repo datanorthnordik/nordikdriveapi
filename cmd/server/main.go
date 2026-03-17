@@ -96,13 +96,6 @@ func main() {
 	admin.RegisterRoutes(r, adminService)
 
 	// --- Cloud Run expects plain HTTP, on $PORT, bind to 0.0.0.0 ---
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-	log.Printf("Starting server on 0.0.0.0:%s ...", port)
-	log.Fatal(r.Run("0.0.0.0:" + port))
-
 	scheduler, err := jobs.NewScheduler(db, mailerService, log.Default())
 	if err != nil {
 		log.Fatalf("failed to create scheduler: %v", err)
@@ -110,4 +103,11 @@ func main() {
 
 	scheduler.Start()
 	defer scheduler.Stop()
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Printf("Starting server on 0.0.0.0:%s ...", port)
+	log.Fatal(r.Run("0.0.0.0:" + port))
 }
