@@ -3,9 +3,10 @@ package jobs
 import (
 	"fmt"
 	"log"
+	"strings"
+
 	"nordik-drive-api/internal/formsubmission"
 	"nordik-drive-api/internal/mailer"
-	"strings"
 
 	"gorm.io/gorm"
 )
@@ -54,7 +55,7 @@ func (j *FormSubmissionReviewEmailJob) Run() error {
 			form_submissions.lastname,
 			form_submissions.reviewer_comment,
 			u.email AS created_user_email,
-			TRIM(COALESCE(u.first_name, '') || ' ' || COALESCE(u.last_name, '')) AS created_user_name
+			TRIM(COALESCE(u.firstname, '') || ' ' || COALESCE(u.lastname, '')) AS created_user_name
 		`).
 		Joins("JOIN users u ON u.id = form_submissions.created_by").
 		Where("form_submissions.status <> ? AND form_submissions.review_email_trigger_success = ?", "pending", false).

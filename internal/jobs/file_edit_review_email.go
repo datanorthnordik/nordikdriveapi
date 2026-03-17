@@ -3,10 +3,10 @@ package jobs
 import (
 	"fmt"
 	"log"
-	"nordik-drive-api/internal/mailer"
 	"strings"
 
 	filehelper "nordik-drive-api/internal/file"
+	"nordik-drive-api/internal/mailer"
 
 	"gorm.io/gorm"
 )
@@ -55,7 +55,7 @@ func (j *FileEditReviewEmailJob) Run() error {
 			fer.lastname,
 			fer.reviewer_comment,
 			u.email,
-			TRIM(COALESCE(u.first_name, '') || ' ' || COALESCE(u.last_name, '')) AS created_user_name
+			TRIM(COALESCE(u.firstname, '') || ' ' || COALESCE(u.lastname, '')) AS created_user_name
 		`).
 		Joins("JOIN users u ON u.id = fer.user_id").
 		Where("fer.status <> ? AND fer.review_email_trigger_success = ?", "pending", false).
