@@ -1118,6 +1118,8 @@ func (fs *FileService) ReviewEditRequest(
 			return err
 		}
 
+		fs.triggerReviewEmailAsync(&req)
+
 		return nil
 	})
 }
