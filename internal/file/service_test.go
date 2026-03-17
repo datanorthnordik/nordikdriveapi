@@ -26,6 +26,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
+	"nordik-drive-api/internal/mailer"
 	"nordik-drive-api/internal/util"
 )
 
@@ -1330,7 +1331,7 @@ func TestFileService_GetEditRequests_AllBranches(t *testing.T) {
 
 func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 	db := newTestDB(t)
-	svc := &FileService{DB: db}
+	svc := &FileService{DB: db, Mailer: mailer.NewService("test@example.com", "key", "domain", "http://localhost")}
 
 	// restore hooks
 	prevMove := moveGCSFolderHook
@@ -1347,7 +1348,7 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 
 	// recreate
 	db = newTestDB(t)
-	svc = &FileService{DB: db}
+	svc = &FileService{DB: db, Mailer: mailer.NewService("test@example.com", "key", "domain", "http://localhost")}
 
 	// request not found
 	if err := svc.ReviewEditRequest(999, "approved", "Test comment", nil, 9); err == nil {
@@ -1364,7 +1365,7 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 
 	// --- NOT EDITED path errors + success ---
 	db = newTestDB(t)
-	svc = &FileService{DB: db}
+	svc = &FileService{DB: db, Mailer: mailer.NewService("test@example.com", "key", "domain", "http://localhost")}
 
 	req = FileEditRequest{UserID: 1, Status: "pending", IsEdited: false, FirstName: "A", LastName: "B", RowID: 0, FileID: 10}
 	_ = db.Create(&req).Error
@@ -1379,7 +1380,7 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 
 	// move folder hook error
 	db = newTestDB(t)
-	svc = &FileService{DB: db}
+	svc = &FileService{DB: db, Mailer: mailer.NewService("test@example.com", "key", "domain", "http://localhost")}
 	moveGCSFolderHook = func(bucket, src, dst string) (map[string]string, error) {
 		return nil, errors.New("move fail")
 	}
@@ -1393,7 +1394,7 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 
 	// NOT EDITED success
 	db = newTestDB(t)
-	svc = &FileService{DB: db}
+	svc = &FileService{DB: db, Mailer: mailer.NewService("test@example.com", "key", "domain", "http://localhost")}
 	moveGCSFolderHook = func(bucket, src, dst string) (map[string]string, error) { return map[string]string{}, nil }
 
 	req = FileEditRequest{UserID: 1, Status: "pending", IsEdited: false, FirstName: "A", LastName: "B", RowID: 0, FileID: 10}
@@ -1423,7 +1424,7 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 
 	// --- EDITED path errors + success ---
 	db = newTestDB(t)
-	svc = &FileService{DB: db}
+	svc = &FileService{DB: db, Mailer: mailer.NewService("test@example.com", "key", "domain", "http://localhost")}
 
 	req = FileEditRequest{UserID: 1, Status: "pending", IsEdited: true, RowID: 123, FileID: 10}
 	_ = db.Create(&req).Error
@@ -1436,7 +1437,7 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 
 	// row_data unmarshal error
 	db = newTestDB(t)
-	svc = &FileService{DB: db}
+	svc = &FileService{DB: db, Mailer: mailer.NewService("test@example.com", "key", "domain", "http://localhost")}
 	req = FileEditRequest{UserID: 1, Status: "pending", IsEdited: true, RowID: 123, FileID: 10}
 	_ = db.Create(&req).Error
 	_ = db.Create(&FileEditRequestDetails{RequestID: req.RequestID, FileID: 10, RowID: 123, FieldName: "A", NewValue: "X"}).Error
@@ -1447,7 +1448,7 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 
 	// update file_data error
 	db = newTestDB(t)
-	svc = &FileService{DB: db}
+	svc = &FileService{DB: db, Mailer: mailer.NewService("test@example.com", "key", "domain", "http://localhost")}
 	req = FileEditRequest{UserID: 1, Status: "pending", IsEdited: true, RowID: 123, FileID: 10}
 	_ = db.Create(&req).Error
 	_ = db.Create(&FileEditRequestDetails{RequestID: req.RequestID, FileID: 10, RowID: 123, FieldName: "A", NewValue: "X"}).Error
@@ -1459,7 +1460,7 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 
 	// status update error (drop request table before final update)
 	db = newTestDB(t)
-	svc = &FileService{DB: db}
+	svc = &FileService{DB: db, Mailer: mailer.NewService("test@example.com", "key", "domain", "http://localhost")}
 	req = FileEditRequest{UserID: 1, Status: "pending", IsEdited: true, RowID: 123, FileID: 10}
 	_ = db.Create(&req).Error
 	_ = db.Create(&FileEditRequestDetails{RequestID: req.RequestID, FileID: 10, RowID: 123, FieldName: "A", NewValue: "X"}).Error
@@ -1471,7 +1472,7 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 
 	// EDITED success
 	db = newTestDB(t)
-	svc = &FileService{DB: db}
+	svc = &FileService{DB: db, Mailer: mailer.NewService("test@example.com", "key", "domain", "http://localhost")}
 	req = FileEditRequest{UserID: 1, Status: "pending", IsEdited: true, RowID: 123, FileID: 10}
 	_ = db.Create(&req).Error
 	_ = db.Create(&FileEditRequestDetails{RequestID: req.RequestID, FileID: 10, RowID: 123, FieldName: "A", NewValue: "X"}).Error

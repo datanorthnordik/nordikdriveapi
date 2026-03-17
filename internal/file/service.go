@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"nordik-drive-api/internal/auth"
+	"nordik-drive-api/internal/mailer"
 	"nordik-drive-api/internal/util"
 	"os"
 	"path"
@@ -26,7 +27,8 @@ import (
 )
 
 type FileService struct {
-	DB *gorm.DB
+	DB     *gorm.DB
+	Mailer mailer.EmailSender
 }
 
 var (
@@ -892,6 +894,55 @@ func (fs *FileService) GetEditRequests(statusCSV *string, userID *uint) ([]FileE
 	}
 
 	return final, nil
+}
+
+var formSubmissionGoHook = func(fn func()) {
+	go fn()
+}
+
+var triggerFormSubmissionReviewEmailHook = func(fileedit *FileEditRequest, user auth.Auth, mailer mailer.EmailSender) error {
+
+	createdUser := fmt.Sprintf("%s %s", user.FirstName, user.LastName)
+	body := BuildFileEditRequestReviewEmailBody(
+		createdUser,
+		fileedit.Status,
+		user.FirstName,
+		user.LastName,
+		fileedit.ReviewComment,
+	)
+
+	err := mailer.SendOne(
+		user.Email,
+		"Update to your submission",
+		body,
+	)
+
+	return err
+}
+
+func (fs *FileService) triggerReviewEmailAsync(fileedit *FileEditRequest) {
+	formSubmissionGoHook(func() {
+		defer func() {
+			if recover() != nil {
+				_ = fs.DB.Model(&FileEditRequest{}).
+					Where("request_id = ?", fileedit.RequestID).
+					Update("review_email_trigger_success", false).Error
+			}
+		}()
+
+		var user auth.Auth
+		if err := fs.DB.Where("id = ?", fileedit.UserID).First(&user).Error; err != nil {
+			return
+		}
+
+		if err := triggerFormSubmissionReviewEmailHook(fileedit, user, fs.Mailer); err != nil {
+			return
+		}
+
+		_ = fs.DB.Model(&FileEditRequest{}).
+			Where("request_id = ?", fileedit.RequestID).
+			Update("review_email_trigger_success", true).Error
+	})
 }
 
 func (fs *FileService) ReviewEditRequest(

@@ -170,7 +170,8 @@ CREATE TABLE file_edit_request (
     reviewed_by INT REFERENCES users(id) ON DELETE SET NULL,
     reviewer_comment TEXT,
     community TEXT[] NOT NULL DEFAULT '{}'::text[],
-    uploader_community TEXT[] NOT NULL DEFAULT '{}'::text[]
+    uploader_community TEXT[] NOT NULL DEFAULT '{}'::text[],
+    review_email_trigger_success BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 
