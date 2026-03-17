@@ -59,7 +59,7 @@ func main() {
 	userService := &auth.AuthService{DB: db, CFG: &cfg, Mailer: mailerService}
 	auth.RegisterRoutes(r, userService, logService)
 
-	fileService := &file.FileService{DB: db}
+	fileService := &file.FileService{DB: db, Mailer: mailerService}
 	file.RegisterRoutes(r, fileService, logService)
 
 	roleService := &role.RoleService{DB: db}

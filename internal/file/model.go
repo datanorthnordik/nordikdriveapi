@@ -82,21 +82,22 @@ type PhotoReviewInput struct {
 }
 
 type FileEditRequest struct {
-	RequestID         uint           `gorm:"primaryKey;autoIncrement" json:"request_id"`
-	RowID             int            `gorm:"not null" json:"row_id"`
-	UserID            uint           `gorm:"not null" json:"user_id"`
-	Status            string         `gorm:"type:varchar(50);default:'pending'" json:"status"`
-	FirstName         string         `gorm:"type:varchar(100);column:firstname" json:"firstname"`
-	LastName          string         `gorm:"type:varchar(100);column:lastname" json:"lastname"`
-	Consent           bool           `gorm:"default:false" json:"consent"`
-	ArchiveConsent    bool           `gorm:"column:archive_consent;default:false" json:"archive_consent"`
-	CreatedAt         time.Time      `gorm:"autoCreateTime" json:"created_at"`
-	IsEdited          bool           `gorm:"default:false" json:"is_edited"`
-	FileID            uint           `gorm:"column:file_id;not null;" json:"file_id"`
-	ReviewedBy        *int           `gorm:"column:reviewed_by" json:"reviewed_by"`
-	ReviewComment     string         `gorm:"type:text;column:reviewer_comment" json:"reviewer_comment"`
-	Community         pq.StringArray `gorm:"type:text[];column:community;default:'{}'" json:"community"`
-	UploaderCommunity pq.StringArray `gorm:"type:text[];column:uploader_community;default:'{}'" json:"uploader_community"`
+	RequestID                 uint           `gorm:"primaryKey;autoIncrement" json:"request_id"`
+	RowID                     int            `gorm:"not null" json:"row_id"`
+	UserID                    uint           `gorm:"not null" json:"user_id"`
+	Status                    string         `gorm:"type:varchar(50);default:'pending'" json:"status"`
+	FirstName                 string         `gorm:"type:varchar(100);column:firstname" json:"firstname"`
+	LastName                  string         `gorm:"type:varchar(100);column:lastname" json:"lastname"`
+	Consent                   bool           `gorm:"default:false" json:"consent"`
+	ArchiveConsent            bool           `gorm:"column:archive_consent;default:false" json:"archive_consent"`
+	CreatedAt                 time.Time      `gorm:"autoCreateTime" json:"created_at"`
+	IsEdited                  bool           `gorm:"default:false" json:"is_edited"`
+	FileID                    uint           `gorm:"column:file_id;not null;" json:"file_id"`
+	ReviewedBy                *int           `gorm:"column:reviewed_by" json:"reviewed_by"`
+	ReviewComment             string         `gorm:"type:text;column:reviewer_comment" json:"reviewer_comment"`
+	Community                 pq.StringArray `gorm:"type:text[];column:community;default:'{}'" json:"community"`
+	UploaderCommunity         pq.StringArray `gorm:"type:text[];column:uploader_community;default:'{}'" json:"uploader_community"`
+	ReviewEmailTriggerSuccess bool           `gorm:"column:review_email_trigger_success;not null;default:false" json:"review_email_trigger_success"`
 }
 
 type FileEditRequestDetails struct {

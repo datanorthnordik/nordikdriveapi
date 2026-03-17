@@ -50,7 +50,7 @@ var triggerFormSubmissionReviewEmailHook = func(sub *FormSubmission, mailer mail
 
 	err := mailer.SendOne(
 		sub.CreatedByUser.Email,
-		fmt.Sprintf("Your submission for %s is under review", sub.FormLabel),
+		fmt.Sprintf("Update to your submission for %s", sub.FormLabel),
 		body,
 	)
 
