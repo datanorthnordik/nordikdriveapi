@@ -37,7 +37,24 @@ var (
 )
 
 var triggerFormSubmissionReviewEmailHook = func(sub *FormSubmission, mailer mailer.EmailSender) error {
-	return errors.New("review email trigger not implemented")
+	createdUserName := strings.TrimSpace(sub.CreatedByUser.FirstName + " " + sub.CreatedByUser.LastName)
+
+	body := BuildFormSubmissionReviewEmailBody(
+		createdUserName,
+		sub.FormLabel,
+		sub.Status,
+		sub.FirstName,
+		sub.LastName,
+		sub.ReviewerComment,
+	)
+
+	err := mailer.SendOne(
+		sub.CreatedByUser.Email,
+		fmt.Sprintf("Your submission for %s is under review", sub.FormLabel),
+		body,
+	)
+
+	return err
 }
 
 func normalizeReviewStatus(v string) string {
