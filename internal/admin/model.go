@@ -86,7 +86,7 @@ type AdminChangeRow struct {
 	UploaderCommunity pq.StringArray `json:"uploader_community" gorm:"type:text[]"`
 
 	RequestedBy string `json:"requested_by"`
-	ApprovedBy  string `json:"approved_by"`
+	ReviewedBy  string `json:"reviewed_by"`
 
 	Consent     bool      `json:"consent"`
 	ChangeCount int64     `json:"change_count"`
@@ -115,7 +115,7 @@ type AdminPhotoRow struct {
 	Community         string `json:"community"`
 	UploaderCommunity string `json:"uploader_community"`
 
-	ApprovedBy string    `json:"approved_by"`
+	ReviewedBy string    `json:"reviewed_by"`
 	CreatedAt  time.Time `json:"created_at"`
 }
 
