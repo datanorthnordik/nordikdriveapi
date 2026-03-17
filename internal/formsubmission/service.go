@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"nordik-drive-api/internal/mailer"
 	"nordik-drive-api/internal/util"
 
 	"cloud.google.com/go/storage"
@@ -20,7 +21,8 @@ import (
 )
 
 type FormSubmissionService struct {
-	DB *gorm.DB
+	DB     *gorm.DB
+	Mailer mailer.EmailSender
 }
 
 var uploadBase64ToGCSHook = util.UploadPhotoToGCS
@@ -34,8 +36,25 @@ var (
 	ErrUploadNotFoundForSubmission = errors.New("one or more uploads do not belong to the submission")
 )
 
-var triggerFormSubmissionReviewEmailHook = func(_ int64) error {
-	return errors.New("review email trigger not implemented")
+var triggerFormSubmissionReviewEmailHook = func(sub *FormSubmission, mailer mailer.EmailSender) error {
+	createdUserName := strings.TrimSpace(sub.CreatedByUser.FirstName + " " + sub.CreatedByUser.LastName)
+
+	body := BuildFormSubmissionReviewEmailBody(
+		createdUserName,
+		sub.FormLabel,
+		sub.Status,
+		sub.FirstName,
+		sub.LastName,
+		sub.ReviewerComment,
+	)
+
+	err := mailer.SendOne(
+		sub.CreatedByUser.Email,
+		fmt.Sprintf("Your submission for %s is under review", sub.FormLabel),
+		body,
+	)
+
+	return err
 }
 
 func normalizeReviewStatus(v string) string {
@@ -115,20 +134,22 @@ var openFormUploadReaderHook = func(ctx context.Context, rec FormSubmissionUploa
 	}, strings.TrimSpace(rc.ContentType()), objectPath, nil
 }
 
-func (s *FormSubmissionService) triggerReviewEmailAsync(submissionID int64) {
+func (s *FormSubmissionService) triggerReviewEmailAsync(sub *FormSubmission) {
 	formSubmissionGoHook(func() {
 		defer func() {
 			if recover() != nil {
-				// keep review_email_trigger_success = false
+				_ = s.DB.Model(&FormSubmission{}).
+					Where("id = ?", sub.ID).
+					Update("review_email_trigger_success", false).Error
 			}
 		}()
 
-		if err := triggerFormSubmissionReviewEmailHook(submissionID); err != nil {
+		if err := triggerFormSubmissionReviewEmailHook(sub, s.Mailer); err != nil {
 			return
 		}
 
 		_ = s.DB.Model(&FormSubmission{}).
-			Where("id = ?", submissionID).
+			Where("id = ?", sub.ID).
 			Update("review_email_trigger_success", true).Error
 	})
 }
@@ -849,7 +870,10 @@ func (s *FormSubmissionService) ReviewSubmission(req *ReviewFormSubmissionReques
 	shouldTriggerEmail := false
 
 	err := s.DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("id = ?", req.SubmissionID).First(&sub).Error; err != nil {
+		if err := tx.
+			Preload("CreatedByUser").
+			Where("id = ?", req.SubmissionID).
+			First(&sub).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrFormSubmissionNotFound
 			}
@@ -863,6 +887,8 @@ func (s *FormSubmissionService) ReviewSubmission(req *ReviewFormSubmissionReques
 				reviewerID,
 				now,
 			)
+
+			submissionUpdates["review_email_trigger_success"] = false
 
 			if err := tx.Model(&FormSubmission{}).
 				Where("id = ?", sub.ID).
@@ -908,14 +934,6 @@ func (s *FormSubmissionService) ReviewSubmission(req *ReviewFormSubmissionReques
 			shouldTriggerEmail = true
 		}
 
-		if shouldTriggerEmail {
-			if err := tx.Model(&FormSubmission{}).
-				Where("id = ?", sub.ID).
-				Update("review_email_trigger_success", false).Error; err != nil {
-				return err
-			}
-		}
-
 		return nil
 	})
 	if err != nil {
@@ -923,7 +941,9 @@ func (s *FormSubmissionService) ReviewSubmission(req *ReviewFormSubmissionReques
 	}
 
 	if shouldTriggerEmail {
-		s.triggerReviewEmailAsync(sub.ID)
+		sub.Status = req.SubmissionReview.Status
+		sub.ReviewerComment = req.SubmissionReview.ReviewerComment
+		s.triggerReviewEmailAsync(&sub)
 	}
 
 	fileID := sub.FileID

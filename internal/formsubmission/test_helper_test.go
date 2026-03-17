@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"nordik-drive-api/internal/mailer"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -52,14 +53,14 @@ func newTestService(t *testing.T) *FormSubmissionService {
 	}
 
 	users := []FormSubmissionUserRef{
-		{ID: 1, Email: "user1@example.com"},
-		{ID: 2, Email: "user2@example.com"},
-		{ID: 5, Email: "user5@example.com"},
-		{ID: 7, Email: "user7@example.com"},
-		{ID: 8, Email: "user8@example.com"},
-		{ID: 9, Email: "user9@example.com"},
-		{ID: 42, Email: "user42@example.com"},
-		{ID: 99, Email: "reviewer@example.com"},
+		{ID: 1, Email: "user1@example.com", FirstName: "User", LastName: "One"},
+		{ID: 2, Email: "user2@example.com", FirstName: "User", LastName: "Two"},
+		{ID: 5, Email: "user5@example.com", FirstName: "User", LastName: "Five"},
+		{ID: 7, Email: "user7@example.com", FirstName: "User", LastName: "Seven"},
+		{ID: 8, Email: "user8@example.com", FirstName: "User", LastName: "Eight"},
+		{ID: 9, Email: "user9@example.com", FirstName: "User", LastName: "Nine"},
+		{ID: 42, Email: "user42@example.com", FirstName: "User", LastName: "Forty-Two"},
+		{ID: 99, Email: "reviewer@example.com", FirstName: "Reviewer", LastName: "One"},
 	}
 	if err := db.Create(&users).Error; err != nil {
 		t.Fatalf("seed users: %v", err)
@@ -67,7 +68,7 @@ func newTestService(t *testing.T) *FormSubmissionService {
 
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
-	return &FormSubmissionService{DB: db}
+	return &FormSubmissionService{DB: db, Mailer: mailer.NewService("abc@gmail.com", "password", "smtp.gmail.com", "587")}
 }
 
 func breakDB(t *testing.T, db *gorm.DB) {
