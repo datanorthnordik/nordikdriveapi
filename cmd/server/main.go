@@ -11,6 +11,7 @@ import (
 	"nordik-drive-api/internal/dataconfig"
 	"nordik-drive-api/internal/file"
 	"nordik-drive-api/internal/formsubmission"
+	"nordik-drive-api/internal/jobs"
 	"nordik-drive-api/internal/logs"
 	"nordik-drive-api/internal/lookup"
 	"nordik-drive-api/internal/mailer"
@@ -101,4 +102,12 @@ func main() {
 	}
 	log.Printf("Starting server on 0.0.0.0:%s ...", port)
 	log.Fatal(r.Run("0.0.0.0:" + port))
+
+	scheduler, err := jobs.NewScheduler(db, mailerService, log.Default())
+	if err != nil {
+		log.Fatalf("failed to create scheduler: %v", err)
+	}
+
+	scheduler.Start()
+	defer scheduler.Stop()
 }

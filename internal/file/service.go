@@ -906,8 +906,8 @@ var triggerFormSubmissionReviewEmailHook = func(fileedit *FileEditRequest, user 
 	body := BuildFileEditRequestReviewEmailBody(
 		createdUser,
 		fileedit.Status,
-		user.FirstName,
-		user.LastName,
+		fileedit.FirstName,
+		fileedit.LastName,
 		fileedit.ReviewComment,
 	)
 
