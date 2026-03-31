@@ -113,18 +113,19 @@ type FileEditRequestDetails struct {
 }
 
 type FileEditRequestWithUser struct {
-	RequestID  uint                     `json:"request_id"`
-	RowID      int                      `json:"row_id"`
-	UserID     uint                     `json:"user_id"`
-	Firstname  string                   `json:"firstname"`
-	Lastname   string                   `json:"lastname"`
-	Status     string                   `json:"status"`
-	CreatedAt  time.Time                `json:"created_at"`
-	Details    []FileEditRequestDetails `json:"details"`
-	EFirstName string                   `json:"efirstname"`
-	ELastName  string                   `json:"elastname"`
-	IsEdited   bool                     `gorm:"default:true" json:"is_edited"`
-	Consent    bool                     `json:"consent"`
+	RequestID     uint                     `json:"request_id"`
+	RowID         int                      `json:"row_id"`
+	UserID        uint                     `json:"user_id"`
+	Firstname     string                   `json:"firstname"`
+	Lastname      string                   `json:"lastname"`
+	Status        string                   `json:"status"`
+	ReviewComment string                   `json:"reviewer_comment"`
+	CreatedAt     time.Time                `json:"created_at"`
+	Details       []FileEditRequestDetails `json:"details"`
+	EFirstName    string                   `json:"efirstname"`
+	ELastName     string                   `json:"elastname"`
+	IsEdited      bool                     `gorm:"default:true" json:"is_edited"`
+	Consent       bool                     `json:"consent"`
 }
 
 type EditRequestInput struct {
