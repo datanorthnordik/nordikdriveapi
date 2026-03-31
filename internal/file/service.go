@@ -816,18 +816,19 @@ func parseStatuses(csv string) []string {
 
 func (fs *FileService) GetEditRequests(statusCSV *string, userID *uint) ([]FileEditRequestWithUser, error) {
 	var baseRequests []struct {
-		RequestID  uint
-		RowID      int
-		UserID     uint
-		Firstname  string
-		Lastname   string
-		Status     string
-		CreatedAt  time.Time
-		EFirstName string `gorm:"column:efirstname"`
-		ELastName  string `gorm:"column:elastname"`
-		IsEdited   bool   `gorm:"default:true"`
-		Consent    bool
-		FileID     uint `gorm:"column:file_id"`
+		RequestID     uint
+		RowID         int
+		UserID        uint
+		Firstname     string
+		Lastname      string
+		Status        string
+		ReviewComment string `gorm:"column:reviewer_comment"`
+		CreatedAt     time.Time
+		EFirstName    string `gorm:"column:efirstname"`
+		ELastName     string `gorm:"column:elastname"`
+		IsEdited      bool   `gorm:"default:true"`
+		Consent       bool
+		FileID        uint `gorm:"column:file_id"`
 	}
 
 	q := fs.DB.Table("file_edit_request").
@@ -838,6 +839,7 @@ func (fs *FileService) GetEditRequests(statusCSV *string, userID *uint) ([]FileE
 			users.firstname,
 			users.lastname,
 			file_edit_request.status,
+			COALESCE(file_edit_request.reviewer_comment, '') as reviewer_comment,
 			file_edit_request.created_at,
 			file_edit_request.firstname as efirstname,
 			file_edit_request.lastname as elastname,
@@ -878,18 +880,19 @@ func (fs *FileService) GetEditRequests(statusCSV *string, userID *uint) ([]FileE
 		}
 
 		final = append(final, FileEditRequestWithUser{
-			RequestID:  req.RequestID,
-			UserID:     req.UserID,
-			Firstname:  req.Firstname,
-			Lastname:   req.Lastname,
-			Status:     req.Status,
-			CreatedAt:  req.CreatedAt,
-			Details:    details,
-			EFirstName: req.EFirstName,
-			ELastName:  req.ELastName,
-			RowID:      req.RowID,
-			IsEdited:   req.IsEdited,
-			Consent:    req.Consent,
+			RequestID:     req.RequestID,
+			UserID:        req.UserID,
+			Firstname:     req.Firstname,
+			Lastname:      req.Lastname,
+			Status:        req.Status,
+			ReviewComment: req.ReviewComment,
+			CreatedAt:     req.CreatedAt,
+			Details:       details,
+			EFirstName:    req.EFirstName,
+			ELastName:     req.ELastName,
+			RowID:         req.RowID,
+			IsEdited:      req.IsEdited,
+			Consent:       req.Consent,
 		})
 	}
 

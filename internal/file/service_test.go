@@ -1277,9 +1277,10 @@ func TestFileService_GetEditRequests_AllBranches(t *testing.T) {
 
 	// seed pending + approved
 	r1 := FileEditRequest{UserID: uint(u.ID), Status: "pending", CreatedAt: time.Now(), FirstName: "E", LastName: "F", RowID: 0, IsEdited: true, Consent: true, FileID: 1}
-	r2 := FileEditRequest{UserID: uint(u.ID), Status: "approved", CreatedAt: time.Now().Add(-time.Hour), FirstName: "E2", LastName: "F2", RowID: 0, IsEdited: true, Consent: true, FileID: 1}
+	r2 := FileEditRequest{UserID: uint(u.ID), Status: "approved", CreatedAt: time.Now().Add(-time.Hour), FirstName: "E2", LastName: "F2", RowID: 0, IsEdited: true, Consent: true, FileID: 1, ReviewComment: "approved after review"}
 	_ = db.Create(&r1).Error
 	_ = db.Create(&r2).Error
+	_ = db.Exec("UPDATE file_edit_request SET reviewer_comment = NULL WHERE request_id = ?", r1.RequestID).Error
 
 	_ = db.Create(&FileEditRequestDetails{RequestID: r1.RequestID, FileID: 1, Filename: "x", RowID: 0, FieldName: "A", OldValue: "", NewValue: "1"}).Error
 	_ = db.Create(&FileEditRequestDetails{RequestID: r2.RequestID, FileID: 1, Filename: "x", RowID: 0, FieldName: "A", OldValue: "", NewValue: "2"}).Error
@@ -1289,6 +1290,9 @@ func TestFileService_GetEditRequests_AllBranches(t *testing.T) {
 	if err != nil || len(out) != 1 || out[0].Status != "pending" {
 		t.Fatalf("expected pending only, got %#v err=%v", out, err)
 	}
+	if out[0].ReviewComment != "" {
+		t.Fatalf("expected empty review comment for NULL db value, got %#v", out[0].ReviewComment)
+	}
 
 	// both filters => IN (...)
 	statusCSV := "approved, pending"
@@ -1296,6 +1300,12 @@ func TestFileService_GetEditRequests_AllBranches(t *testing.T) {
 	out, err = svc.GetEditRequests(&statusCSV, &uid)
 	if err != nil || len(out) != 2 {
 		t.Fatalf("expected 2, got %d err=%v", len(out), err)
+	}
+	if out[0].Status != "pending" || out[0].ReviewComment != "" {
+		t.Fatalf("expected pending request first with empty review comment, got %#v", out[0])
+	}
+	if out[1].Status != "approved" || out[1].ReviewComment != "approved after review" {
+		t.Fatalf("expected approved request to include review comment, got %#v", out[1])
 	}
 
 	// garbage statusCSV => fallback pending
