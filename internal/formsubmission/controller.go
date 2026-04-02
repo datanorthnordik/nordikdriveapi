@@ -66,7 +66,12 @@ func (cc *FormSubmissionController) GetActiveFormSubmission(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, res)
+	if res == nil || !res.Found {
+		c.JSON(http.StatusOK, gin.H{"data": nil})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": res})
 }
 
 // POST /api/form/answers
