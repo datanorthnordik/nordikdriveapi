@@ -643,6 +643,47 @@ func TestGetByRowAndForm(t *testing.T) {
 	})
 }
 
+func TestGetByID(t *testing.T) {
+	svc := newTestService(t)
+
+	t.Run("validation", func(t *testing.T) {
+		if _, err := svc.GetByID(0); err == nil {
+			t.Fatalf("expected id validation error")
+		}
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		resp, err := svc.GetByID(999)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if resp.Found || resp.ID != 999 {
+			t.Fatalf("unexpected resp: %+v", resp)
+		}
+		if len(resp.Details) != 0 || len(resp.Documents) != 0 || len(resp.Photos) != 0 {
+			t.Fatalf("expected empty slices")
+		}
+	})
+
+	t.Run("success", func(t *testing.T) {
+		sub, _, _ := seedSubmissionWithDetailAndUpload(t, svc)
+
+		resp, err := svc.GetByID(sub.ID)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if !resp.Found || resp.ID != sub.ID {
+			t.Fatalf("unexpected resp: %+v", resp)
+		}
+		if resp.FileID != sub.FileID || resp.RowID != sub.RowID || resp.FormKey != sub.FormKey {
+			t.Fatalf("unexpected submission fields: %+v", resp)
+		}
+		if len(resp.Details) != 1 || len(resp.Documents) != 1 || len(resp.Photos) != 0 {
+			t.Fatalf("unexpected collections: %+v", resp)
+		}
+	})
+}
+
 func TestGetUploadBytes(t *testing.T) {
 	svc := newTestService(t)
 
