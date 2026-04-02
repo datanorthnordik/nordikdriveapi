@@ -35,6 +35,40 @@ func (cc *FormSubmissionController) GetFormSubmission(c *gin.Context) {
 	c.JSON(http.StatusOK, res)
 }
 
+// GET /api/form/answers/active?row_id=...&form_key=...&file_id=...
+func (cc *FormSubmissionController) GetActiveFormSubmission(c *gin.Context) {
+	rowID, err := parseRequiredInt64Query(c.Query("row_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "valid row_id is required"})
+		return
+	}
+
+	formKey := strings.TrimSpace(c.Query("form_key"))
+	if formKey == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "form_key is required"})
+		return
+	}
+
+	var fileIDPtr *int64
+	fileIDStr := strings.TrimSpace(c.Query("file_id"))
+	if fileIDStr != "" {
+		fileID, err := strconv.ParseInt(fileIDStr, 10, 64)
+		if err != nil || fileID <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file_id"})
+			return
+		}
+		fileIDPtr = &fileID
+	}
+
+	res, err := cc.FormSubmissionService.GetActiveByRowAndForm(rowID, formKey, fileIDPtr)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, res)
+}
+
 // POST /api/form/answers
 func (cc *FormSubmissionController) SaveFormSubmission(c *gin.Context) {
 	userIDVal, exists := c.Get("userID")

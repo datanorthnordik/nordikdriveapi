@@ -11,18 +11,22 @@ import (
 )
 
 type mockFormSubmissionService struct {
-	getByIDFn           func(id int64) (*GetFormSubmissionResponse, error)
-	getByRowAndFormFn   func(rowID int64, formKey string, fileID *int64) (*GetFormSubmissionResponse, error)
-	upsertFn            func(req *SaveFormSubmissionRequest, userID int) (*GetFormSubmissionResponse, error)
-	getUploadBytesFn    func(id uint) ([]byte, string, string, error)
-	searchSubmissionsFn func(ctx context.Context, req SearchFormSubmissionsRequest, page int, pageSize int) (*PaginatedFormSubmissionsResponse, error)
-	getFormsByFileIDFn  func(fileID int64) ([]FormFileMappingResponse, error)
-	reviewSubmissionFn  func(req *ReviewFormSubmissionRequest, reviewerID int) (*GetFormSubmissionResponse, error)
-	searchMyFn          func(ctx context.Context, userID int, req SearchFormSubmissionsRequest, page int, pageSize int) (*PaginatedFormSubmissionsResponse, error)
+	getByIDFn               func(id int64) (*GetFormSubmissionResponse, error)
+	getActiveByRowAndFormFn func(rowID int64, formKey string, fileID *int64) (*GetFormSubmissionResponse, error)
+	getByRowAndFormFn       func(rowID int64, formKey string, fileID *int64) (*GetFormSubmissionResponse, error)
+	upsertFn                func(req *SaveFormSubmissionRequest, userID int) (*GetFormSubmissionResponse, error)
+	getUploadBytesFn        func(id uint) ([]byte, string, string, error)
+	searchSubmissionsFn     func(ctx context.Context, req SearchFormSubmissionsRequest, page int, pageSize int) (*PaginatedFormSubmissionsResponse, error)
+	getFormsByFileIDFn      func(fileID int64) ([]FormFileMappingResponse, error)
+	reviewSubmissionFn      func(req *ReviewFormSubmissionRequest, reviewerID int) (*GetFormSubmissionResponse, error)
+	searchMyFn              func(ctx context.Context, userID int, req SearchFormSubmissionsRequest, page int, pageSize int) (*PaginatedFormSubmissionsResponse, error)
 }
 
 func (m *mockFormSubmissionService) GetByID(id int64) (*GetFormSubmissionResponse, error) {
 	return m.getByIDFn(id)
+}
+func (m *mockFormSubmissionService) GetActiveByRowAndForm(rowID int64, formKey string, fileID *int64) (*GetFormSubmissionResponse, error) {
+	return m.getActiveByRowAndFormFn(rowID, formKey, fileID)
 }
 func (m *mockFormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fileID *int64) (*GetFormSubmissionResponse, error) {
 	return m.getByRowAndFormFn(rowID, formKey, fileID)
@@ -49,9 +53,10 @@ func (m *mockFormSubmissionService) SearchMySubmissions(ctx context.Context, use
 func TestRegisterRoutes(t *testing.T) {
 	r := newGinRouter(nil, func(r *gin.Engine) {
 		RegisterRoutes(r, &mockFormSubmissionService{
-			getByIDFn:        func(id int64) (*GetFormSubmissionResponse, error) { return nil, nil },
-			upsertFn:         func(req *SaveFormSubmissionRequest, userID int) (*GetFormSubmissionResponse, error) { return nil, nil },
-			getUploadBytesFn: func(id uint) ([]byte, string, string, error) { return nil, "", "", nil },
+			getByIDFn:               func(id int64) (*GetFormSubmissionResponse, error) { return nil, nil },
+			getActiveByRowAndFormFn: func(rowID int64, formKey string, fileID *int64) (*GetFormSubmissionResponse, error) { return nil, nil },
+			upsertFn:                func(req *SaveFormSubmissionRequest, userID int) (*GetFormSubmissionResponse, error) { return nil, nil },
+			getUploadBytesFn:        func(id uint) ([]byte, string, string, error) { return nil, "", "", nil },
 			searchSubmissionsFn: func(ctx context.Context, req SearchFormSubmissionsRequest, page int, pageSize int) (*PaginatedFormSubmissionsResponse, error) {
 				return nil, nil
 			},
@@ -65,8 +70,8 @@ func TestRegisterRoutes(t *testing.T) {
 		})
 	})
 
-	if len(r.Routes()) != 7 {
-		t.Fatalf("expected 7 routes, got %d", len(r.Routes()))
+	if len(r.Routes()) != 8 {
+		t.Fatalf("expected 8 routes, got %d", len(r.Routes()))
 	}
 }
 
@@ -136,6 +141,98 @@ func TestGetFormSubmission(t *testing.T) {
 		assertStatus(t, rr, http.StatusOK)
 		if gotID != 42 {
 			t.Fatalf("expected id 42, got %d", gotID)
+		}
+	})
+}
+
+func TestGetActiveFormSubmission(t *testing.T) {
+	t.Run("invalid row_id", func(t *testing.T) {
+		c := &FormSubmissionController{}
+		r := newGinRouter(nil, func(r *gin.Engine) {
+			r.GET("/api/form/answers/active", c.GetActiveFormSubmission)
+		})
+
+		rr := doReq(r, http.MethodGet, "/api/form/answers/active?row_id=x&form_key=f1", nil)
+		assertErrorContains(t, rr, http.StatusBadRequest, "valid row_id is required")
+	})
+
+	t.Run("missing form_key", func(t *testing.T) {
+		c := &FormSubmissionController{}
+		r := newGinRouter(nil, func(r *gin.Engine) {
+			r.GET("/api/form/answers/active", c.GetActiveFormSubmission)
+		})
+
+		rr := doReq(r, http.MethodGet, "/api/form/answers/active?row_id=1", nil)
+		assertErrorContains(t, rr, http.StatusBadRequest, "form_key is required")
+	})
+
+	t.Run("invalid file_id", func(t *testing.T) {
+		c := &FormSubmissionController{}
+		r := newGinRouter(nil, func(r *gin.Engine) {
+			r.GET("/api/form/answers/active", c.GetActiveFormSubmission)
+		})
+
+		rr := doReq(r, http.MethodGet, "/api/form/answers/active?row_id=1&form_key=f1&file_id=0", nil)
+		assertErrorContains(t, rr, http.StatusBadRequest, "invalid file_id")
+	})
+
+	t.Run("service error", func(t *testing.T) {
+		c := &FormSubmissionController{
+			FormSubmissionService: &mockFormSubmissionService{
+				getActiveByRowAndFormFn: func(rowID int64, formKey string, fileID *int64) (*GetFormSubmissionResponse, error) {
+					return nil, errors.New("boom")
+				},
+			},
+		}
+		r := newGinRouter(nil, func(r *gin.Engine) {
+			r.GET("/api/form/answers/active", c.GetActiveFormSubmission)
+		})
+
+		rr := doReq(r, http.MethodGet, "/api/form/answers/active?row_id=1&form_key=f1", nil)
+		assertErrorContains(t, rr, http.StatusInternalServerError, "boom")
+	})
+
+	t.Run("success with nil file id", func(t *testing.T) {
+		var gotNil bool
+
+		c := &FormSubmissionController{
+			FormSubmissionService: &mockFormSubmissionService{
+				getActiveByRowAndFormFn: func(rowID int64, formKey string, fileID *int64) (*GetFormSubmissionResponse, error) {
+					gotNil = fileID == nil
+					return &GetFormSubmissionResponse{Found: true, RowID: rowID, FormKey: formKey}, nil
+				},
+			},
+		}
+		r := newGinRouter(nil, func(r *gin.Engine) {
+			r.GET("/api/form/answers/active", c.GetActiveFormSubmission)
+		})
+
+		rr := doReq(r, http.MethodGet, "/api/form/answers/active?row_id=1&form_key=f1", nil)
+		assertStatus(t, rr, http.StatusOK)
+		if !gotNil {
+			t.Fatalf("expected nil fileID")
+		}
+	})
+
+	t.Run("success with file id", func(t *testing.T) {
+		var gotFileID int64
+
+		c := &FormSubmissionController{
+			FormSubmissionService: &mockFormSubmissionService{
+				getActiveByRowAndFormFn: func(rowID int64, formKey string, fileID *int64) (*GetFormSubmissionResponse, error) {
+					gotFileID = *fileID
+					return &GetFormSubmissionResponse{Found: true, FileID: *fileID}, nil
+				},
+			},
+		}
+		r := newGinRouter(nil, func(r *gin.Engine) {
+			r.GET("/api/form/answers/active", c.GetActiveFormSubmission)
+		})
+
+		rr := doReq(r, http.MethodGet, "/api/form/answers/active?row_id=1&form_key=f1&file_id=12", nil)
+		assertStatus(t, rr, http.StatusOK)
+		if gotFileID != 12 {
+			t.Fatalf("expected fileID 12, got %d", gotFileID)
 		}
 	})
 }

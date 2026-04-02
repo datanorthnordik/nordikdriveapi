@@ -684,6 +684,100 @@ func TestGetByID(t *testing.T) {
 	})
 }
 
+func TestGetActiveByRowAndForm(t *testing.T) {
+	svc := newTestService(t)
+
+	t.Run("validation", func(t *testing.T) {
+		if _, err := svc.GetActiveByRowAndForm(0, "x", nil); err == nil {
+			t.Fatalf("expected row validation error")
+		}
+		if _, err := svc.GetActiveByRowAndForm(1, " ", nil); err == nil {
+			t.Fatalf("expected form key validation error")
+		}
+	})
+
+	t.Run("not found when only rejected exists", func(t *testing.T) {
+		createdBy := 1
+		sub := FormSubmission{
+			FileID:      49,
+			RowID:       73992,
+			FileName:    "sheet.xlsx",
+			FormKey:     "boarding_home",
+			FormLabel:   "Boarding",
+			CreatedByID: &createdBy,
+			Status:      ReviewStatusRejected,
+		}
+		if err := svc.DB.Create(&sub).Error; err != nil {
+			t.Fatalf("create rejected submission: %v", err)
+		}
+
+		resp, err := svc.GetActiveByRowAndForm(73992, "boarding_home", int64Ptr(49))
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if resp.Found {
+			t.Fatalf("expected not found when only rejected submission exists, got %+v", resp)
+		}
+		if resp.FileID != 49 || resp.RowID != 73992 || resp.FormKey != "boarding_home" {
+			t.Fatalf("unexpected not-found response: %+v", resp)
+		}
+	})
+
+	t.Run("success returns non-rejected submission", func(t *testing.T) {
+		createdBy := 1
+		rejected := FormSubmission{
+			FileID:      49,
+			RowID:       73992,
+			FileName:    "sheet.xlsx",
+			FormKey:     "boarding_home",
+			FormLabel:   "Boarding",
+			CreatedByID: &createdBy,
+			Status:      ReviewStatusRejected,
+		}
+		if err := svc.DB.Create(&rejected).Error; err != nil {
+			t.Fatalf("create rejected submission: %v", err)
+		}
+
+		active := FormSubmission{
+			FileID:      49,
+			RowID:       73992,
+			FileName:    "sheet.xlsx",
+			FormKey:     "boarding_home",
+			FormLabel:   "Boarding",
+			CreatedByID: &createdBy,
+			Status:      ReviewStatusPending,
+		}
+		if err := svc.DB.Create(&active).Error; err != nil {
+			t.Fatalf("create active submission: %v", err)
+		}
+
+		detail := FormSubmissionDetail{
+			SubmissionID: active.ID,
+			DetailKey:    "passport_no",
+			DetailLabel:  "Passport",
+			FieldType:    "text",
+			ValueJSON:    []byte(`"A12345"`),
+		}
+		if err := svc.DB.Create(&detail).Error; err != nil {
+			t.Fatalf("create detail: %v", err)
+		}
+
+		resp, err := svc.GetActiveByRowAndForm(73992, "boarding_home", int64Ptr(49))
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if !resp.Found || resp.ID != active.ID {
+			t.Fatalf("expected active submission, got %+v", resp)
+		}
+		if resp.Status != ReviewStatusPending {
+			t.Fatalf("expected pending status, got %q", resp.Status)
+		}
+		if len(resp.Details) != 1 || resp.Details[0].DetailKey != "passport_no" {
+			t.Fatalf("unexpected details: %+v", resp.Details)
+		}
+	})
+}
+
 func TestGetUploadBytes(t *testing.T) {
 	svc := newTestService(t)
 
