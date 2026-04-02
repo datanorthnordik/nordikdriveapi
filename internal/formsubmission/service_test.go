@@ -405,6 +405,155 @@ func TestUpsert_CreateAndUpdate(t *testing.T) {
 	}
 }
 
+func TestUpsert_CreatesNewSubmissionWhenOnlyRejectedExists(t *testing.T) {
+	svc := newTestService(t)
+
+	createdBy := 7
+	rejected := FormSubmission{
+		FileID:      10,
+		RowID:       20,
+		FileName:    "sheet.xlsx",
+		FormKey:     "boarding",
+		FormLabel:   "Boarding",
+		CreatedByID: &createdBy,
+		Status:      ReviewStatusRejected,
+	}
+	if err := svc.DB.Create(&rejected).Error; err != nil {
+		t.Fatalf("create rejected submission: %v", err)
+	}
+
+	oldDetail := FormSubmissionDetail{
+		SubmissionID: rejected.ID,
+		DetailKey:    "old_passport",
+		DetailLabel:  "Old Passport",
+		FieldType:    "text",
+		ValueJSON:    []byte(`"OLD-123"`),
+	}
+	if err := svc.DB.Create(&oldDetail).Error; err != nil {
+		t.Fatalf("create old detail: %v", err)
+	}
+
+	resp, err := svc.Upsert(&SaveFormSubmissionRequest{
+		FileID:    10,
+		RowID:     20,
+		FileName:  "sheet.xlsx",
+		FormKey:   "boarding",
+		FormLabel: "Boarding",
+		FirstName: "New",
+		LastName:  "Request",
+		Details: []FormSubmissionDetailInput{
+			{DetailKey: "passport_no", DetailLabel: "Passport", FieldType: "text", Value: "NEW-999"},
+		},
+	}, 8)
+	if err != nil {
+		t.Fatalf("upsert retry after rejection err: %v", err)
+	}
+
+	if resp.ID == rejected.ID {
+		t.Fatalf("expected a new submission, got rejected submission id %d", resp.ID)
+	}
+	if resp.Status != ReviewStatusPending {
+		t.Fatalf("expected new submission to be pending, got %q", resp.Status)
+	}
+	if len(resp.Details) != 1 || resp.Details[0].DetailKey != "passport_no" {
+		t.Fatalf("unexpected response details: %+v", resp.Details)
+	}
+
+	var subs []FormSubmission
+	if err := svc.DB.
+		Where("file_id = ? AND row_id = ? AND form_key = ?", 10, 20, "boarding").
+		Order("id asc").
+		Find(&subs).Error; err != nil {
+		t.Fatalf("list submissions: %v", err)
+	}
+	if len(subs) != 2 {
+		t.Fatalf("expected 2 submissions, got %d", len(subs))
+	}
+	if subs[0].ID != rejected.ID || subs[0].Status != ReviewStatusRejected {
+		t.Fatalf("expected original submission to remain rejected, got %+v", subs[0])
+	}
+	if subs[1].ID != resp.ID || subs[1].Status != ReviewStatusPending {
+		t.Fatalf("expected second submission to be the new pending one, got %+v", subs[1])
+	}
+
+	var oldDetails []FormSubmissionDetail
+	if err := svc.DB.Where("submission_id = ?", rejected.ID).Find(&oldDetails).Error; err != nil {
+		t.Fatalf("load old details: %v", err)
+	}
+	if len(oldDetails) != 1 || oldDetails[0].DetailKey != "old_passport" {
+		t.Fatalf("expected rejected submission details to stay unchanged, got %+v", oldDetails)
+	}
+
+	var newDetails []FormSubmissionDetail
+	if err := svc.DB.Where("submission_id = ?", resp.ID).Find(&newDetails).Error; err != nil {
+		t.Fatalf("load new details: %v", err)
+	}
+	if len(newDetails) != 1 || newDetails[0].DetailKey != "passport_no" {
+		t.Fatalf("expected new submission details on new row, got %+v", newDetails)
+	}
+}
+
+func TestFormSubmissionUniqueIndex_AllowsRetryAfterRejectedOnly(t *testing.T) {
+	svc := newTestService(t)
+
+	createdBy := 1
+	base := FormSubmission{
+		FileID:      44,
+		RowID:       55,
+		FileName:    "sheet.xlsx",
+		FormKey:     "boarding",
+		FormLabel:   "Boarding",
+		CreatedByID: &createdBy,
+		Status:      ReviewStatusRejected,
+	}
+
+	if err := svc.DB.Create(&base).Error; err != nil {
+		t.Fatalf("create first rejected submission: %v", err)
+	}
+
+	anotherRejected := FormSubmission{
+		FileID:      44,
+		RowID:       55,
+		FileName:    "sheet.xlsx",
+		FormKey:     "boarding",
+		FormLabel:   "Boarding",
+		CreatedByID: &createdBy,
+		Status:      ReviewStatusRejected,
+	}
+
+	if err := svc.DB.Create(&anotherRejected).Error; err != nil {
+		t.Fatalf("expected another rejected submission to be allowed, got: %v", err)
+	}
+
+	retryPending := FormSubmission{
+		FileID:      44,
+		RowID:       55,
+		FileName:    "sheet.xlsx",
+		FormKey:     "boarding",
+		FormLabel:   "Boarding",
+		CreatedByID: &createdBy,
+		Status:      ReviewStatusPending,
+	}
+
+	if err := svc.DB.Create(&retryPending).Error; err != nil {
+		t.Fatalf("expected pending retry after only rejected submissions, got: %v", err)
+	}
+
+	blockedPending := FormSubmission{
+		FileID:      44,
+		RowID:       55,
+		FileName:    "sheet.xlsx",
+		FormKey:     "boarding",
+		FormLabel:   "Boarding",
+		CreatedByID: &createdBy,
+		Status:      ReviewStatusPending,
+	}
+
+	if err := svc.DB.Create(&blockedPending).Error; err == nil {
+		t.Fatalf("expected second active submission for same file_id/row_id/form_key to be blocked")
+	}
+}
+
 func TestGetByRowAndForm(t *testing.T) {
 	svc := newTestService(t)
 
