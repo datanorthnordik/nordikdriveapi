@@ -336,6 +336,12 @@ func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest, userId in
 		return nil, errors.New("form_label is required")
 	}
 
+	formKey := strings.TrimSpace(req.FormKey)
+	fileName := strings.TrimSpace(req.FileName)
+	formLabel := strings.TrimSpace(req.FormLabel)
+	firstName := strings.TrimSpace(req.FirstName)
+	lastName := strings.TrimSpace(req.LastName)
+
 	// Validate detail keys before upload
 	detailKeys := make(map[string]struct{}, len(req.Details))
 	for _, d := range req.Details {
@@ -372,10 +378,12 @@ func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest, userId in
 		return nil, err
 	}
 
+	var savedSubmissionID int64
 	err = s.DB.Transaction(func(tx *gorm.DB) error {
 		var sub FormSubmission
 		findErr := tx.
-			Where("file_id = ? AND row_id = ? AND form_key = ?", req.FileID, req.RowID, req.FormKey).
+			Where("file_id = ? AND row_id = ? AND form_key = ? AND status <> ?", req.FileID, req.RowID, formKey, ReviewStatusRejected).
+			Order("id desc").
 			First(&sub).Error
 
 		if findErr != nil && !errors.Is(findErr, gorm.ErrRecordNotFound) {
@@ -386,13 +394,13 @@ func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest, userId in
 			sub = FormSubmission{
 				FileID:       req.FileID,
 				RowID:        req.RowID,
-				FileName:     strings.TrimSpace(req.FileName),
-				FormKey:      strings.TrimSpace(req.FormKey),
-				FormLabel:    strings.TrimSpace(req.FormLabel),
+				FileName:     fileName,
+				FormKey:      formKey,
+				FormLabel:    formLabel,
 				ConsentText:  req.ConsentText,
 				ConsentGiven: req.Consent,
-				FirstName:    req.FirstName,
-				LastName:     req.LastName,
+				FirstName:    firstName,
+				LastName:     lastName,
 				CreatedByID:  &userId,
 			}
 			if err := tx.Create(&sub).Error; err != nil {
@@ -400,17 +408,19 @@ func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest, userId in
 			}
 		} else {
 			if err := tx.Model(&sub).Updates(map[string]interface{}{
-				"file_name":     strings.TrimSpace(req.FileName),
-				"form_label":    strings.TrimSpace(req.FormLabel),
+				"file_name":     fileName,
+				"form_label":    formLabel,
 				"consent_text":  req.ConsentText,
 				"consent_given": req.Consent,
-				"firstname":     strings.TrimSpace(req.FirstName),
-				"lastname":      strings.TrimSpace(req.LastName),
+				"firstname":     firstName,
+				"lastname":      lastName,
 				"edited_by":     userId,
 			}).Error; err != nil {
 				return err
 			}
 		}
+
+		savedSubmissionID = sub.ID
 
 		// Load existing details once so we can preserve IDs
 		var existingDetails []FormSubmissionDetail
@@ -516,8 +526,7 @@ func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest, userId in
 		return nil, err
 	}
 
-	fileID := req.FileID
-	return s.GetByRowAndForm(req.RowID, req.FormKey, &fileID)
+	return s.getSubmissionResponseByID(savedSubmissionID)
 }
 
 func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fileID *int64) (*GetFormSubmissionResponse, error) {
@@ -529,14 +538,10 @@ func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fil
 		return nil, errors.New("form_key is required")
 	}
 
-	preloadUser := func(db *gorm.DB) *gorm.DB {
-		return db.Select("id", "email")
-	}
-
 	q := s.DB.
-		Preload("CreatedByUser", preloadUser).
-		Preload("EditedByUser", preloadUser).
-		Preload("ReviewedByUser", preloadUser).
+		Preload("CreatedByUser", preloadFormSubmissionUser).
+		Preload("EditedByUser", preloadFormSubmissionUser).
+		Preload("ReviewedByUser", preloadFormSubmissionUser).
 		Where("row_id = ? AND form_key = ?", rowID, key)
 
 	if fileID != nil && *fileID > 0 {
@@ -567,6 +572,27 @@ func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fil
 		return nil, err
 	}
 
+	return s.buildFormSubmissionResponse(sub)
+}
+
+func preloadFormSubmissionUser(db *gorm.DB) *gorm.DB {
+	return db.Select("id", "email")
+}
+
+func (s *FormSubmissionService) getSubmissionResponseByID(id int64) (*GetFormSubmissionResponse, error) {
+	var sub FormSubmission
+	if err := s.DB.
+		Preload("CreatedByUser", preloadFormSubmissionUser).
+		Preload("EditedByUser", preloadFormSubmissionUser).
+		Preload("ReviewedByUser", preloadFormSubmissionUser).
+		First(&sub, id).Error; err != nil {
+		return nil, err
+	}
+
+	return s.buildFormSubmissionResponse(sub)
+}
+
+func (s *FormSubmissionService) buildFormSubmissionResponse(sub FormSubmission) (*GetFormSubmissionResponse, error) {
 	var details []FormSubmissionDetail
 	if err := s.DB.
 		Where("submission_id = ?", sub.ID).
@@ -577,7 +603,7 @@ func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fil
 
 	var uploads []FormSubmissionUpload
 	if err := s.DB.
-		Preload("ReviewedByUser", preloadUser).
+		Preload("ReviewedByUser", preloadFormSubmissionUser).
 		Where("submission_id = ?", sub.ID).
 		Order("id asc").
 		Find(&uploads).Error; err != nil {

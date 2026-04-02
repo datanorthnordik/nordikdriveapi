@@ -283,11 +283,12 @@ CREATE TABLE form_submissions (
     status                       review_status NOT NULL DEFAULT 'pending'::review_status,
     reviewed_at                  TIMESTAMPTZ NULL,
     reviewer_comment             TEXT NOT NULL DEFAULT '',
-    review_email_trigger_success BOOLEAN NOT NULL DEFAULT FALSE,
-
-    CONSTRAINT uq_form_submissions_file_row_form
-        UNIQUE (file_id, row_id, form_key)
+    review_email_trigger_success BOOLEAN NOT NULL DEFAULT FALSE
 );
+
+CREATE UNIQUE INDEX uq_form_submissions_file_row_form_active
+    ON form_submissions (file_id, row_id, form_key)
+    WHERE status <> 'rejected';
 
 CREATE TABLE form_submission_details (
     id                BIGSERIAL PRIMARY KEY,

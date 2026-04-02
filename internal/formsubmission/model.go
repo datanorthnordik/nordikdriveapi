@@ -32,10 +32,10 @@ type ReviewUploadItemRequest struct {
 
 type FormSubmission struct {
 	ID           int64     `json:"id" gorm:"primaryKey;autoIncrement"`
-	FileID       int64     `json:"file_id" gorm:"not null;uniqueIndex:uq_form_submissions_file_row_form"`
-	RowID        int64     `json:"row_id" gorm:"not null;uniqueIndex:uq_form_submissions_file_row_form"`
+	FileID       int64     `json:"file_id" gorm:"not null;uniqueIndex:uq_form_submissions_file_row_form_active,where:status <> 'rejected',priority:1"`
+	RowID        int64     `json:"row_id" gorm:"not null;uniqueIndex:uq_form_submissions_file_row_form_active,where:status <> 'rejected',priority:2"`
 	FileName     string    `json:"file_name" gorm:"type:text;not null;default:''"`
-	FormKey      string    `json:"form_key" gorm:"type:varchar(150);not null;uniqueIndex:uq_form_submissions_file_row_form"`
+	FormKey      string    `json:"form_key" gorm:"type:varchar(150);not null;uniqueIndex:uq_form_submissions_file_row_form_active,where:status <> 'rejected',priority:3"`
 	FormLabel    string    `json:"form_label" gorm:"type:text;not null"`
 	ConsentText  string    `json:"consent_text" gorm:"type:text;not null;default:''"`
 	ConsentGiven bool      `json:"consent_given" gorm:"not null;default:false"`
