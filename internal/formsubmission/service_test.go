@@ -715,11 +715,18 @@ func TestGetActiveByRowAndForm(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
-		if resp.Found {
-			t.Fatalf("expected not found when only rejected submission exists, got %+v", resp)
+		if resp != nil {
+			t.Fatalf("expected nil when only rejected submission exists, got %+v", resp)
 		}
-		if resp.FileID != 49 || resp.RowID != 73992 || resp.FormKey != "boarding_home" {
-			t.Fatalf("unexpected not-found response: %+v", resp)
+	})
+
+	t.Run("not found when nothing exists", func(t *testing.T) {
+		resp, err := svc.GetActiveByRowAndForm(12345, "missing_form", int64Ptr(49))
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if resp != nil {
+			t.Fatalf("expected nil when nothing exists, got %+v", resp)
 		}
 	})
 

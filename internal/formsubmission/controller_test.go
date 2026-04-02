@@ -2,6 +2,7 @@ package formsubmission
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -212,6 +213,11 @@ func TestGetActiveFormSubmission(t *testing.T) {
 		if !gotNil {
 			t.Fatalf("expected nil fileID")
 		}
+
+		body := mustDecode[map[string]json.RawMessage](t, rr)
+		if len(body["data"]) == 0 || string(body["data"]) == "null" {
+			t.Fatalf("expected data object, got %s", rr.Body.String())
+		}
 	})
 
 	t.Run("success with file id", func(t *testing.T) {
@@ -233,6 +239,53 @@ func TestGetActiveFormSubmission(t *testing.T) {
 		assertStatus(t, rr, http.StatusOK)
 		if gotFileID != 12 {
 			t.Fatalf("expected fileID 12, got %d", gotFileID)
+		}
+
+		body := mustDecode[map[string]json.RawMessage](t, rr)
+		if len(body["data"]) == 0 || string(body["data"]) == "null" {
+			t.Fatalf("expected data object, got %s", rr.Body.String())
+		}
+	})
+
+	t.Run("not found returns null data", func(t *testing.T) {
+		c := &FormSubmissionController{
+			FormSubmissionService: &mockFormSubmissionService{
+				getActiveByRowAndFormFn: func(rowID int64, formKey string, fileID *int64) (*GetFormSubmissionResponse, error) {
+					return &GetFormSubmissionResponse{Found: false, RowID: rowID, FormKey: formKey}, nil
+				},
+			},
+		}
+		r := newGinRouter(nil, func(r *gin.Engine) {
+			r.GET("/api/form/answers/active", c.GetActiveFormSubmission)
+		})
+
+		rr := doReq(r, http.MethodGet, "/api/form/answers/active?row_id=1&form_key=f1", nil)
+		assertStatus(t, rr, http.StatusOK)
+
+		body := mustDecode[map[string]json.RawMessage](t, rr)
+		if string(body["data"]) != "null" {
+			t.Fatalf("expected data null, got %s", rr.Body.String())
+		}
+	})
+
+	t.Run("nil response returns null data", func(t *testing.T) {
+		c := &FormSubmissionController{
+			FormSubmissionService: &mockFormSubmissionService{
+				getActiveByRowAndFormFn: func(rowID int64, formKey string, fileID *int64) (*GetFormSubmissionResponse, error) {
+					return nil, nil
+				},
+			},
+		}
+		r := newGinRouter(nil, func(r *gin.Engine) {
+			r.GET("/api/form/answers/active", c.GetActiveFormSubmission)
+		})
+
+		rr := doReq(r, http.MethodGet, "/api/form/answers/active?row_id=1&form_key=f1", nil)
+		assertStatus(t, rr, http.StatusOK)
+
+		body := mustDecode[map[string]json.RawMessage](t, rr)
+		if string(body["data"]) != "null" {
+			t.Fatalf("expected data null, got %s", rr.Body.String())
 		}
 	})
 }

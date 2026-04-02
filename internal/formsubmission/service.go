@@ -599,22 +599,7 @@ func (s *FormSubmissionService) GetActiveByRowAndForm(rowID int64, formKey strin
 	err := q.First(&sub).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			resp := &GetFormSubmissionResponse{
-				Found:                     false,
-				ID:                        0,
-				RowID:                     rowID,
-				FormKey:                   key,
-				Details:                   []FormSubmissionDetailResponse{},
-				Documents:                 []FormSubmissionUploadResponse{},
-				Photos:                    []FormSubmissionUploadResponse{},
-				Status:                    "pending",
-				ReviewerComment:           "",
-				ReviewEmailTriggerSuccess: false,
-			}
-			if fileID != nil {
-				resp.FileID = *fileID
-			}
-			return resp, nil
+			return nil, nil
 		}
 		return nil, err
 	}
