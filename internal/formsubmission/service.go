@@ -575,6 +575,53 @@ func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fil
 	return s.buildFormSubmissionResponse(sub)
 }
 
+func (s *FormSubmissionService) GetActiveByRowAndForm(rowID int64, formKey string, fileID *int64) (*GetFormSubmissionResponse, error) {
+	key := strings.TrimSpace(formKey)
+	if rowID <= 0 {
+		return nil, errors.New("row_id is required")
+	}
+	if key == "" {
+		return nil, errors.New("form_key is required")
+	}
+
+	q := s.DB.
+		Preload("CreatedByUser", preloadFormSubmissionUser).
+		Preload("EditedByUser", preloadFormSubmissionUser).
+		Preload("ReviewedByUser", preloadFormSubmissionUser).
+		Where("row_id = ? AND form_key = ? AND status <> ?", rowID, key, ReviewStatusRejected).
+		Order("id desc")
+
+	if fileID != nil && *fileID > 0 {
+		q = q.Where("file_id = ?", *fileID)
+	}
+
+	var sub FormSubmission
+	err := q.First(&sub).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			resp := &GetFormSubmissionResponse{
+				Found:                     false,
+				ID:                        0,
+				RowID:                     rowID,
+				FormKey:                   key,
+				Details:                   []FormSubmissionDetailResponse{},
+				Documents:                 []FormSubmissionUploadResponse{},
+				Photos:                    []FormSubmissionUploadResponse{},
+				Status:                    "pending",
+				ReviewerComment:           "",
+				ReviewEmailTriggerSuccess: false,
+			}
+			if fileID != nil {
+				resp.FileID = *fileID
+			}
+			return resp, nil
+		}
+		return nil, err
+	}
+
+	return s.buildFormSubmissionResponse(sub)
+}
+
 func (s *FormSubmissionService) GetByID(id int64) (*GetFormSubmissionResponse, error) {
 	if id <= 0 {
 		return nil, errors.New("id is required")
