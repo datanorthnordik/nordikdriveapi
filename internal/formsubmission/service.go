@@ -575,6 +575,35 @@ func (s *FormSubmissionService) GetByRowAndForm(rowID int64, formKey string, fil
 	return s.buildFormSubmissionResponse(sub)
 }
 
+func (s *FormSubmissionService) GetByID(id int64) (*GetFormSubmissionResponse, error) {
+	if id <= 0 {
+		return nil, errors.New("id is required")
+	}
+
+	var sub FormSubmission
+	if err := s.DB.
+		Preload("CreatedByUser", preloadFormSubmissionUser).
+		Preload("EditedByUser", preloadFormSubmissionUser).
+		Preload("ReviewedByUser", preloadFormSubmissionUser).
+		First(&sub, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return &GetFormSubmissionResponse{
+				Found:                     false,
+				ID:                        id,
+				Details:                   []FormSubmissionDetailResponse{},
+				Documents:                 []FormSubmissionUploadResponse{},
+				Photos:                    []FormSubmissionUploadResponse{},
+				Status:                    "pending",
+				ReviewerComment:           "",
+				ReviewEmailTriggerSuccess: false,
+			}, nil
+		}
+		return nil, err
+	}
+
+	return s.buildFormSubmissionResponse(sub)
+}
+
 func preloadFormSubmissionUser(db *gorm.DB) *gorm.DB {
 	return db.Select("id", "email")
 }
@@ -972,8 +1001,7 @@ func (s *FormSubmissionService) ReviewSubmission(req *ReviewFormSubmissionReques
 		s.triggerReviewEmailAsync(&sub)
 	}
 
-	fileID := sub.FileID
-	return s.GetByRowAndForm(sub.RowID, sub.FormKey, &fileID)
+	return s.getSubmissionResponseByID(sub.ID)
 }
 
 func (s *FormSubmissionService) SearchMySubmissions(
