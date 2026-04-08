@@ -841,7 +841,7 @@ func buildXLSX(byFile map[uint][]exportRow) ([]byte, error) {
 	})
 
 	highlightStyle, _ := f.NewStyle(&excelize.Style{
-		Fill: excelize.Fill{Type: "pattern", Pattern: 1, Color: []string{"#FFFF00"}},
+		Fill: excelize.Fill{Type: "pattern", Pattern: 1, Color: []string{"#FFFF99"}},
 	})
 
 	defaultSheet := f.GetSheetName(0)
