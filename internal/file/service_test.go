@@ -161,12 +161,12 @@ func xlsxBytesWithStyles(t *testing.T) []byte {
 	_ = f.SetCellValue(sheet, "B2", "30")
 
 	// style with fill color that maps in parseExcelReader:
-	// "#FFFF00" => "FURTHER INVESTIGATION REQUIRED"
+	// "#FFFF99" => "FURTHER INVESTIGATION REQUIRED"
 	styleID, err := f.NewStyle(&excelize.Style{
 		Fill: excelize.Fill{
 			Type:    "pattern",
 			Pattern: 1,
-			Color:   []string{"FFFF00"},
+			Color:   []string{"FFFF99"},
 		},
 	})
 	if err != nil {
@@ -338,8 +338,8 @@ func TestNormalizeColorHex_AllBranches(t *testing.T) {
 	if got := normalizeColorHex(""); got != "" {
 		t.Fatalf("expected empty, got %q", got)
 	}
-	if got := normalizeColorHex("0xFFffff00"); got != "#FFFF00" {
-		t.Fatalf("ARGB drop alpha expected #FFFF00, got %q", got)
+	if got := normalizeColorHex("0xFFffff99"); got != "#FFFF99" {
+		t.Fatalf("ARGB drop alpha expected #FFFF99, got %q", got)
 	}
 	if got := normalizeColorHex("#abc"); got != "#AABBCC" {
 		t.Fatalf("3-digit expected #AABBCC, got %q", got)
