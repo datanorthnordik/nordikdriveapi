@@ -179,3 +179,32 @@ func TestAdminService_loadMediaRows_InvalidDocType(t *testing.T) {
 		t.Fatalf("expected error")
 	}
 }
+
+func TestAdminService_loadMediaRows_OnlyApproved_UsesStatusColumn(t *testing.T) {
+	db, mock, sqlDB := newMockDB(t)
+	defer sqlDB.Close()
+
+	as := &AdminService{DB: db}
+	approved := true
+
+	mock.ExpectQuery(`(?i)from\s+file_edit_request_photos\s+p.*p\.status\s*=\s*\$[0-9]+`).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "request_id", "row_id", "photo_url", "file_name", "document_type", "document_category",
+			"user_id", "user_first", "user_last",
+		}).AddRow(
+			uint(1), uint(10), 5, "gs://bucket/docs/a.pdf", "a.pdf", "document", "",
+			uint(7), "John", "Doe",
+		))
+
+	rows, err := as.loadMediaRows([]uint{10}, "document", &approved)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(rows) != 1 || rows[0].DocumentType != "document" {
+		t.Fatalf("unexpected rows: %#v", rows)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}

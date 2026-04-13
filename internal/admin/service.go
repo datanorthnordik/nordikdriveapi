@@ -1098,8 +1098,12 @@ func (as *AdminService) loadMediaRows(requestIDs []uint, docType string, onlyApp
 		q = q.Where("p.document_type = ?", docType)
 	}
 
-	if onlyApproved != nil && *onlyApproved == true {
-		q = q.Where("p.is_approved = ?", *onlyApproved)
+	if onlyApproved != nil {
+		if *onlyApproved {
+			q = q.Where("p.status = ?", "approved")
+		} else {
+			q = q.Where("p.status <> ?", "approved")
+		}
 	}
 
 	var out []mediaZipRow
