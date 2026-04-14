@@ -78,21 +78,6 @@ func (h textprotoMIMEHeader) toHeader() map[string][]string {
 	return out
 }
 
-func Test_matchesCommunities(t *testing.T) {
-	if matchesCommunities([]byte(`not-json`), []string{"A"}) {
-		t.Fatal("expected false for invalid json")
-	}
-	if matchesCommunities([]byte(`{"x":1}`), []string{"A"}) {
-		t.Fatal("expected false when key missing")
-	}
-	if matchesCommunities([]byte(`{"First Nation/Community":123}`), []string{"A"}) {
-		t.Fatal("expected false when value not string")
-	}
-	if !matchesCommunities([]byte(`{"First Nation/Community":" A "}`), []string{"A"}) {
-		t.Fatal("expected true when trimmed matches")
-	}
-}
-
 func Test_parseRateFromMime(t *testing.T) {
 	if parseRateFromMime("") != 0 {
 		t.Fatal("expected 0")
@@ -172,7 +157,6 @@ func TestChatService_Chat_MarshalError_InvalidRowJSON(t *testing.T) {
 	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*file_id.*and.*version`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
 			AddRow(uint(1), uint(1), 2, `{bad`))
-
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
 	_, err := cs.Chat("q", nil, "sheet.xlsx", nil)
 	if err == nil || !strings.Contains(err.Error(), "failed to marshal file data") {
@@ -191,7 +175,6 @@ func TestChatService_Chat_GenerationError(t *testing.T) {
 	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*file_id.*and.*version`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
 			AddRow(uint(1), uint(1), 2, `{"First Nation/Community":"A"}`))
-
 	old := genaiGenerateContentHook
 	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content) (*genai.GenerateContentResponse, error) {
 		return nil, errors.New("gemini down")
@@ -216,7 +199,6 @@ func TestChatService_Chat_NoResponseFromGemini(t *testing.T) {
 	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*file_id.*and.*version`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
 			AddRow(uint(1), uint(1), 2, `{"First Nation/Community":"A"}`))
-
 	old := genaiGenerateContentHook
 	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content) (*genai.GenerateContentResponse, error) {
 		var out genai.GenerateContentResponse
@@ -244,7 +226,6 @@ func TestChatService_Chat_Audio_OpenError(t *testing.T) {
 	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*file_id.*and.*version`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
 			AddRow(uint(1), uint(1), 2, `{"First Nation/Community":"A"}`))
-
 	oldOpen := openMultipartFileHook
 	openMultipartFileHook = func(_ *multipart.FileHeader) (multipart.File, error) {
 		return nil, errors.New("open fail")
@@ -269,7 +250,6 @@ func TestChatService_Chat_Audio_ReadError(t *testing.T) {
 	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*file_id.*and.*version`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
 			AddRow(uint(1), uint(1), 2, `{"First Nation/Community":"A"}`))
-
 	// Use real fileheader but force readAll error
 	fh := makeAudioFileHeader(t, "audio/webm", []byte("xxx"))
 
@@ -295,7 +275,6 @@ func TestChatService_Chat_Audio_OctetStreamMimeFallback_Success(t *testing.T) {
 	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*file_id.*and.*version`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
 			AddRow(uint(1), uint(1), 2, `{"First Nation/Community":"A"}`))
-
 	fh := makeAudioFileHeader(t, "application/octet-stream", []byte("abc"))
 
 	oldGen := genaiGenerateContentHook
@@ -311,9 +290,157 @@ func TestChatService_Chat_Audio_OctetStreamMimeFallback_Success(t *testing.T) {
 	t.Cleanup(func() { genaiGenerateContentHook = oldGen })
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
-	ans, err := cs.Chat("q", fh, "sheet.xlsx", nil)
-	if err != nil || ans != "AUDIO_OK" {
-		t.Fatalf("expected AUDIO_OK, got ans=%q err=%v", ans, err)
+	result, err := cs.Chat("q", fh, "sheet.xlsx", nil)
+	if err != nil || result.Answer != "AUDIO_OK" {
+		t.Fatalf("expected AUDIO_OK, got result=%#v err=%v", result, err)
+	}
+}
+
+func TestChatService_Chat_ReturnsMatchedRowID_WhenSinglePersonMatchFound(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	mock.ExpectQuery(`(?i)select.*from.*file.*where.*filename.*order.*version.*desc.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "filename", "version"}).
+			AddRow(uint(1), "sheet.xlsx", 2))
+
+	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*file_id.*and.*version`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
+			AddRow(uint(42), uint(1), 2, `{"firstname":"Audrey","lastname":"Lesage"}`).
+			AddRow(uint(99), uint(1), 2, `{"firstname":"Mary","lastname":"Martin"}`))
+	old := genaiGenerateContentHook
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content) (*genai.GenerateContentResponse, error) {
+		if len(contents) == 0 || contents[0] == nil || len(contents[0].Parts) == 0 {
+			t.Fatalf("expected prompt contents, got %#v", contents)
+		}
+		prompt := contents[0].Parts[0].Text
+		if !strings.Contains(prompt, `"row_ref":"R1"`) {
+			t.Fatalf("expected prompt to include synthetic row_ref, got %s", prompt)
+		}
+		var out genai.GenerateContentResponse
+		_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"answer\":\"MATCH_OK\",\"matched_row_ref\":\"R1\"}"}]}}]}`), &out)
+		return &out, nil
+	}
+	t.Cleanup(func() { genaiGenerateContentHook = old })
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	result, err := cs.Chat("Tell me about Audry Lesage", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if result.Answer != "MATCH_OK" {
+		t.Fatalf("unexpected answer: %#v", result)
+	}
+	if result.MatchedRowID == nil || *result.MatchedRowID != 42 {
+		t.Fatalf("expected matched_row_id=42, got %#v", result)
+	}
+}
+
+func TestChatService_Chat_RespectsNullMatchedRowRefFromAI(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	mock.ExpectQuery(`(?i)select.*from.*file.*where.*filename.*order.*version.*desc.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "filename", "version"}).
+			AddRow(uint(1), "sheet.xlsx", 2))
+
+	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*file_id.*and.*version`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
+			AddRow(uint(42), uint(1), 2, `{"firstname":"Audrey","lastname":"Lesage"}`))
+	old := genaiGenerateContentHook
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content) (*genai.GenerateContentResponse, error) {
+		var out genai.GenerateContentResponse
+		_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"answer\":\"MATCH_OK\",\"matched_row_ref\":null}"}]}}]}`), &out)
+		return &out, nil
+	}
+	t.Cleanup(func() { genaiGenerateContentHook = old })
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	result, err := cs.Chat("Tell me about Audrey Lesage", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if result.Answer != "MATCH_OK" {
+		t.Fatalf("unexpected answer: %#v", result)
+	}
+	if result.MatchedRowID != nil {
+		t.Fatalf("expected no matched row when AI explicitly returned null, got %#v", result)
+	}
+}
+
+func TestChatService_Chat_DoesNotReturnMatchedRowID_WhenMultipleRowsMatch(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	mock.ExpectQuery(`(?i)select.*from.*file.*where.*filename.*order.*version.*desc.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "filename", "version"}).
+			AddRow(uint(1), "sheet.xlsx", 2))
+
+	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*file_id.*and.*version`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
+			AddRow(uint(42), uint(1), 2, `{"firstname":"Audrey","lastname":"Lesage"}`).
+			AddRow(uint(43), uint(1), 2, `{"Resident Name":"Audrey Lesage"}`))
+	old := genaiGenerateContentHook
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content) (*genai.GenerateContentResponse, error) {
+		var out genai.GenerateContentResponse
+		_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"AMBIGUOUS_OK"}]}}]}`), &out)
+		return &out, nil
+	}
+	t.Cleanup(func() { genaiGenerateContentHook = old })
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	result, err := cs.Chat("Tell me about Audrey Lesage", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if result.Answer != "AMBIGUOUS_OK" {
+		t.Fatalf("unexpected answer: %#v", result)
+	}
+	if result.MatchedRowID != nil {
+		t.Fatalf("expected no matched row for ambiguous result, got %#v", result)
+	}
+}
+
+func TestChatService_Chat_CachesFileDataByFileVersion(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	mock.ExpectQuery(`(?i)select.*from.*file.*where.*filename.*order.*version.*desc.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "filename", "version"}).
+			AddRow(uint(1), "sheet.xlsx", 2))
+	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*file_id.*and.*version`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "row_data"}).
+			AddRow(uint(42), `{"firstname":"Audrey","lastname":"Lesage"}`))
+	mock.ExpectQuery(`(?i)select.*from.*file.*where.*filename.*order.*version.*desc.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "filename", "version"}).
+			AddRow(uint(1), "sheet.xlsx", 2))
+
+	old := genaiGenerateContentHook
+	callCount := 0
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content) (*genai.GenerateContentResponse, error) {
+		callCount++
+		var out genai.GenerateContentResponse
+		_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"CACHE_OK"}]}}]}`), &out)
+		return &out, nil
+	}
+	t.Cleanup(func() { genaiGenerateContentHook = old })
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	for i := 0; i < 2; i++ {
+		result, err := cs.Chat("Tell me about Audrey Lesage", nil, "sheet.xlsx", nil)
+		if err != nil {
+			t.Fatalf("unexpected err on run %d: %v", i, err)
+		}
+		if result.Answer != "CACHE_OK" {
+			t.Fatalf("unexpected answer on run %d: %#v", i, result)
+		}
+	}
+	if callCount != 2 {
+		t.Fatalf("expected 2 gemini calls, got %d", callCount)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
 	}
 }
 

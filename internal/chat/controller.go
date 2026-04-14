@@ -30,13 +30,18 @@ func (cc *ChatController) Chat(c *gin.Context) {
 		return
 	}
 
-	answer, err := cc.ChatService.Chat(question, audioFile, filename, communities)
+	result, err := cc.ChatService.Chat(question, audioFile, filename, communities)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"answer": answer})
+	response := gin.H{"answer": result.Answer}
+	if result.MatchedRowID != nil {
+		response["matched_row_id"] = *result.MatchedRowID
+	}
+
+	c.JSON(http.StatusOK, response)
 }
 
 func (cc *ChatController) Describe(c *gin.Context) {

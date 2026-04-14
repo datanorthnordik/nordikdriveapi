@@ -1,5 +1,10 @@
 package chat
 
+type ChatResult struct {
+	Answer       string `json:"answer"`
+	MatchedRowID *int   `json:"matched_row_id,omitempty"`
+}
+
 type ttsJSON struct {
 	Text   string `json:"text"`
 	Answer string `json:"answer"`
