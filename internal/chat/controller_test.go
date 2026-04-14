@@ -93,7 +93,6 @@ func TestChatController_Chat_Success200(t *testing.T) {
 	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*file_id.*and.*version`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
 			AddRow(uint(1), uint(1), 2, `{"First Nation/Community":"B","x":1}`))
-
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
 	cc := NewChatController(cs)
 
@@ -119,6 +118,57 @@ func TestChatController_Chat_Success200(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", res.Code, res.Body.String())
 	}
 	if !strings.Contains(res.Body.String(), `"answer":"OK"`) {
+		t.Fatalf("unexpected body: %s", res.Body.String())
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatController_Chat_Success200_WithMatchedRowID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db, mock, cleanup := newMockDBChat(t)
+	defer cleanup()
+
+	oldGen := genaiGenerateContentHook
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content) (*genai.GenerateContentResponse, error) {
+		var out genai.GenerateContentResponse
+		_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"answer\":\"PERSON_OK\",\"matched_row_ref\":\"R1\"}"}]}}]}`), &out)
+		return &out, nil
+	}
+	t.Cleanup(func() { genaiGenerateContentHook = oldGen })
+
+	mock.ExpectQuery(`(?i)select.*from.*file.*where.*filename.*order.*version.*desc.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "filename", "version"}).
+			AddRow(uint(1), "sheet.xlsx", 2))
+
+	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*file_id.*and.*version`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
+			AddRow(uint(42), uint(1), 2, `{"firstname":"Audrey","lastname":"Lesage"}`))
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	cc := NewChatController(cs)
+
+	r := gin.New()
+	r.POST("/chat", cc.Chat)
+
+	body := &bytes.Buffer{}
+	w := multipart.NewWriter(body)
+	_ = w.WriteField("question", "Tell me about Audry Lesage")
+	_ = w.WriteField("filename", "sheet.xlsx")
+	_ = w.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/chat", body)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	res := httptest.NewRecorder()
+
+	r.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), `"answer":"PERSON_OK"`) || !strings.Contains(res.Body.String(), `"matched_row_id":42`) {
 		t.Fatalf("unexpected body: %s", res.Body.String())
 	}
 
@@ -287,4 +337,3 @@ func TestChatController_Describe_ServiceError500_RowNotFound(t *testing.T) {
 		t.Fatalf("unmet expectations: %v", err)
 	}
 }
-
