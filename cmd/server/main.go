@@ -12,6 +12,7 @@ import (
 	"nordik-drive-api/internal/file"
 	"nordik-drive-api/internal/formsubmission"
 	"nordik-drive-api/internal/jobs"
+	"nordik-drive-api/internal/logocontent"
 	"nordik-drive-api/internal/logs"
 	"nordik-drive-api/internal/lookup"
 	"nordik-drive-api/internal/mailer"
@@ -79,6 +80,9 @@ func main() {
 
 	lookupService := &lookup.LookupService{DB: db}
 	lookup.RegisterRoutes(r, lookupService)
+
+	logoContentService := logocontent.NewLogoContentService(db)
+	logocontent.RegisterRoutes(r, logoContentService)
 
 	// Create client with ADC (production)
 	ctx := context.Background()
