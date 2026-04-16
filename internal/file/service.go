@@ -31,6 +31,11 @@ type FileService struct {
 	Mailer mailer.EmailSender
 }
 
+const (
+	defaultExcelImportShortDatePattern = "yyyy-mm-dd"
+	excelShortDatePatternEnv          = "EXCEL_SHORT_DATE_PATTERN"
+)
+
 var (
 	uploadToGCSHook   = util.UploadPhotoToGCS
 	moveGCSFolderHook = util.MoveGCSFolder
@@ -153,7 +158,12 @@ func parseExcelReader(file multipart.File) ([]string, [][]string, error) {
 		return nil, nil, fmt.Errorf("failed to read excel file: %w", err)
 	}
 
-	f, err := excelize.OpenReader(bytes.NewReader(buf.Bytes()))
+	// Force Excel's locale-sensitive short-date cells (for example built-in
+	// numFmt 14 => mm-dd-yy) into a stable import format so centuries don't get
+	// collapsed during upload.
+	f, err := excelize.OpenReader(bytes.NewReader(buf.Bytes()), excelize.Options{
+		ShortDatePattern: excelImportShortDatePattern(),
+	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse excel file: %w", err)
 	}
@@ -204,6 +214,14 @@ func parseExcelReader(file multipart.File) ([]string, [][]string, error) {
 	}
 
 	return headers, dataRows, nil
+}
+
+func excelImportShortDatePattern() string {
+	pattern := strings.TrimSpace(os.Getenv(excelShortDatePatternEnv))
+	if pattern == "" {
+		return defaultExcelImportShortDatePattern
+	}
+	return pattern
 }
 
 func (fs *FileService) ReplaceFiles(uploadedFile *multipart.FileHeader, fileID uint, userID uint) error {

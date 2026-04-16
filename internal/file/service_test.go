@@ -191,6 +191,35 @@ func xlsxBytesWithStyles(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
+func xlsxBytesWithShortDateCell(t *testing.T) []byte {
+	t.Helper()
+
+	f := excelize.NewFile()
+	sheet := f.GetSheetName(0)
+
+	_ = f.SetCellValue(sheet, "A1", "BuiltInDate")
+	_ = f.SetCellValue(sheet, "B1", "TextDate")
+
+	// Excel serial 988 formatted with built-in short date (numFmt 14) is the
+	// same case that previously imported as "09-14-02".
+	_ = f.SetCellValue(sheet, "A2", 988)
+	_ = f.SetCellValue(sheet, "B2", "1898-08-06")
+
+	styleID, err := f.NewStyle(&excelize.Style{NumFmt: 14})
+	if err != nil {
+		t.Fatalf("NewStyle: %v", err)
+	}
+	if err := f.SetCellStyle(sheet, "A2", "A2", styleID); err != nil {
+		t.Fatalf("SetCellStyle: %v", err)
+	}
+
+	buf, err := f.WriteToBuffer()
+	if err != nil {
+		t.Fatalf("WriteToBuffer: %v", err)
+	}
+	return buf.Bytes()
+}
+
 // -----------------------------------------------------------------------------
 // Fake GCS server helper (covers GetPhotoBytes/GetDocBytes/OpenMediaHandle/readFromGCS)
 // -----------------------------------------------------------------------------
@@ -355,6 +384,18 @@ func TestNormalizeColorHex_AllBranches(t *testing.T) {
 	}
 }
 
+func TestExcelImportShortDatePattern_DefaultAndEnvOverride(t *testing.T) {
+	t.Setenv(excelShortDatePatternEnv, "")
+	if got := excelImportShortDatePattern(); got != defaultExcelImportShortDatePattern {
+		t.Fatalf("default pattern = %q, want %q", got, defaultExcelImportShortDatePattern)
+	}
+
+	t.Setenv(excelShortDatePatternEnv, "yyyy/mm/dd")
+	if got := excelImportShortDatePattern(); got != "yyyy/mm/dd" {
+		t.Fatalf("env override pattern = %q, want %q", got, "yyyy/mm/dd")
+	}
+}
+
 func TestParseStatuses_AllBranches(t *testing.T) {
 	if got := parseStatuses("   "); got != nil {
 		t.Fatalf("expected nil, got %#v", got)
@@ -470,6 +511,29 @@ func TestParseExcelReader_InvalidAndOK_WithColorAppend(t *testing.T) {
 	}
 }
 
+func TestParseExcelReader_NormalizesBuiltInShortDates_AndKeepsTextDates(t *testing.T) {
+	fh := fileHeaderFromBytes(t, "file", "dates.xlsx", xlsxBytesWithShortDateCell(t))
+	f, _ := fh.Open()
+	defer f.Close()
+
+	headers, data, err := parseExcelReader(f)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(headers) != 2 || headers[0] != "BuiltInDate" || headers[1] != "TextDate" {
+		t.Fatalf("unexpected headers: %#v", headers)
+	}
+	if len(data) != 1 {
+		t.Fatalf("expected 1 data row, got %d", len(data))
+	}
+	if data[0][0] != "1902-09-14" {
+		t.Fatalf("expected normalized short date, got %q", data[0][0])
+	}
+	if data[0][1] != "1898-08-06" {
+		t.Fatalf("expected text date to stay as-is, got %q", data[0][1])
+	}
+}
+
 // -----------------------------------------------------------------------------
 // SaveFilesMultipart
 // -----------------------------------------------------------------------------
@@ -567,6 +631,43 @@ func TestFileService_SaveFilesMultipart_AllBranches(t *testing.T) {
 	_ = json.Unmarshal(rows[0].RowData, &m)
 	if m["c3"] != "" || m["c1"] != "a" || m["c2"] != "b" {
 		t.Fatalf("unexpected row map: %#v", m)
+	}
+}
+
+func TestFileService_SaveFilesMultipart_StoresExcelShortDatesAsISO(t *testing.T) {
+	db := newTestDB(t)
+	svc := &FileService{DB: db}
+
+	fh := fileHeaderFromBytes(t, "file", "dates.xlsx", xlsxBytesWithShortDateCell(t))
+	out, err := svc.SaveFilesMultipart([]*multipart.FileHeader{fh}, FileUploadInput{
+		FileNames:       []string{"dates-file"},
+		Private:         []bool{false},
+		CommunityFilter: []bool{true},
+	}, 7)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected 1 saved file, got %d", len(out))
+	}
+
+	var rows []FileData
+	if err := db.Where("file_id = ?", out[0].ID).Order("id ASC").Find(&rows).Error; err != nil {
+		t.Fatalf("fetch data: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 stored row, got %d", len(rows))
+	}
+
+	var row map[string]string
+	if err := json.Unmarshal(rows[0].RowData, &row); err != nil {
+		t.Fatalf("unmarshal row: %v", err)
+	}
+	if row["BuiltInDate"] != "1902-09-14" {
+		t.Fatalf("expected uploaded date to be stored as ISO, got %q", row["BuiltInDate"])
+	}
+	if row["TextDate"] != "1898-08-06" {
+		t.Fatalf("expected text date to stay as-is, got %q", row["TextDate"])
 	}
 }
 
