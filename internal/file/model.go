@@ -23,30 +23,32 @@ type File struct {
 }
 
 type FileVersion struct {
-	ID         uint      `gorm:"primaryKey;autoIncrement" jsoxn:"id"`
-	FileID     uint      `gorm:"not null;index" json:"file_id"`
-	Filename   string    `gorm:"size:255;not null" json:"filename"`
-	InsertedBy uint      `gorm:"not null;index" json:"inserted_by"`
-	CreatedAt  time.Time `gorm:"autoCreateTime" json:"created_at"`
-	Private    bool      `gorm:"default:false" json:"private"`
-	IsDelete   bool      `gorm:"default:false" json:"is_delete"`
-	Size       float64   `gorm:"not null" json:"size"`
-	Version    int       `gorm:"not null;default:1" json:"version"`
-	Rows       int       `gorm:"not null" json:"rows"`
+	ID           uint           `gorm:"primaryKey;autoIncrement" jsoxn:"id"`
+	FileID       uint           `gorm:"not null;index" json:"file_id"`
+	Filename     string         `gorm:"size:255;not null" json:"filename"`
+	InsertedBy   uint           `gorm:"not null;index" json:"inserted_by"`
+	CreatedAt    time.Time      `gorm:"autoCreateTime" json:"created_at"`
+	Private      bool           `gorm:"default:false" json:"private"`
+	IsDelete     bool           `gorm:"default:false" json:"is_delete"`
+	Size         float64        `gorm:"not null" json:"size"`
+	Version      int            `gorm:"not null;default:1" json:"version"`
+	Rows         int            `gorm:"not null" json:"rows"`
+	ColumnsOrder datatypes.JSON `gorm:"type:jsonb" json:"columns_order"`
 }
 
 type FileVersionWithUser struct {
-	ID        uint      `json:"id"`
-	FileID    uint      `json:"file_id"`
-	FileName  string    `json:"filename" gorm:"column:filename"`
-	Firstname string    `json:"firstname" gorm:"column:firstname"`
-	Lastname  string    `json:"lastname" gorm:"column:lastname"`
-	CreatedAt time.Time `json:"created_at"`
-	Private   bool      `json:"private"`
-	IsDelete  bool      `json:"is_delete"`
-	Size      float64   `json:"size"`
-	Version   int       `json:"version"`
-	Rows      int       `json:"rows"`
+	ID           uint           `json:"id"`
+	FileID       uint           `json:"file_id"`
+	FileName     string         `json:"filename" gorm:"column:filename"`
+	Firstname    string         `json:"firstname" gorm:"column:firstname"`
+	Lastname     string         `json:"lastname" gorm:"column:lastname"`
+	CreatedAt    time.Time      `json:"created_at"`
+	Private      bool           `json:"private"`
+	IsDelete     bool           `json:"is_delete"`
+	Size         float64        `json:"size"`
+	Version      int            `json:"version"`
+	Rows         int            `json:"rows"`
+	ColumnsOrder datatypes.JSON `json:"columns_order" gorm:"column:columns_order"`
 }
 
 type FileData struct {

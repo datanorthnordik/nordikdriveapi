@@ -33,7 +33,7 @@ type FileService struct {
 
 const (
 	defaultExcelImportShortDatePattern = "yyyy-mm-dd"
-	excelShortDatePatternEnv          = "EXCEL_SHORT_DATE_PATTERN"
+	excelShortDatePatternEnv           = "EXCEL_SHORT_DATE_PATTERN"
 )
 
 var (
@@ -84,7 +84,11 @@ func (fs *FileService) SaveFilesMultipart(uploadedFiles []*multipart.FileHeader,
 		}
 
 		// Save File entry with column order
-		headersJSON, _ := json.Marshal(headers)
+		headersJSON, err := marshalColumnsOrder(headers)
+		if err != nil {
+			return nil, err
+		}
+
 		newFile := File{
 			Filename:        filename,
 			InsertedBy:      userID,
@@ -103,15 +107,16 @@ func (fs *FileService) SaveFilesMultipart(uploadedFiles []*multipart.FileHeader,
 
 		// Save FileVersion entry
 		fileVersion := FileVersion{
-			FileID:     newFile.ID,
-			Filename:   filename,
-			InsertedBy: userID,
-			CreatedAt:  time.Now(),
-			Private:    private,
-			Version:    1,
-			IsDelete:   false,
-			Rows:       len(dataRows),
-			Size:       float64(fileHeader.Size) / 1024.0,
+			FileID:       newFile.ID,
+			Filename:     filename,
+			InsertedBy:   userID,
+			CreatedAt:    time.Now(),
+			Private:      private,
+			Version:      1,
+			IsDelete:     false,
+			Rows:         len(dataRows),
+			Size:         float64(fileHeader.Size) / 1024.0,
+			ColumnsOrder: headersJSON,
 		}
 		if err := fs.DB.Create(&fileVersion).Error; err != nil {
 			return nil, err
@@ -224,6 +229,46 @@ func excelImportShortDatePattern() string {
 	return pattern
 }
 
+func marshalColumnsOrder(headers []string) (datatypes.JSON, error) {
+	headersJSON, err := json.Marshal(headers)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal columns order: %w", err)
+	}
+	return datatypes.JSON(headersJSON), nil
+}
+
+func unmarshalColumnsOrder(columnsOrder datatypes.JSON) ([]string, error) {
+	if len(bytes.TrimSpace(columnsOrder)) == 0 {
+		return nil, nil
+	}
+
+	var parsed []string
+	if err := json.Unmarshal(columnsOrder, &parsed); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal columns order: %w", err)
+	}
+	return parsed, nil
+}
+
+func (fs *FileService) getColumnsOrderForVersion(file File, version int) ([]string, error) {
+	columnsOrderJSON := file.ColumnsOrder
+
+	if version != file.Version {
+		var fileVersion FileVersion
+		err := fs.DB.
+			Select("columns_order").
+			Where("file_id = ? AND version = ?", file.ID, version).
+			First(&fileVersion).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+		if err == nil && len(bytes.TrimSpace(fileVersion.ColumnsOrder)) > 0 {
+			columnsOrderJSON = fileVersion.ColumnsOrder
+		}
+	}
+
+	return unmarshalColumnsOrder(columnsOrderJSON)
+}
+
 func (fs *FileService) ReplaceFiles(uploadedFile *multipart.FileHeader, fileID uint, userID uint) error {
 	var existing File
 	if err := fs.DB.First(&existing, fileID).Error; err != nil {
@@ -252,6 +297,11 @@ func (fs *FileService) ReplaceFiles(uploadedFile *multipart.FileHeader, fileID u
 		return err
 	}
 
+	headersJSON, err := marshalColumnsOrder(headers)
+	if err != nil {
+		return err
+	}
+
 	sizeInBytes := uploadedFile.Size
 	sizeInKB := float64(sizeInBytes) / 1024.0
 	newVersion := existing.Version + 1
@@ -260,6 +310,7 @@ func (fs *FileService) ReplaceFiles(uploadedFile *multipart.FileHeader, fileID u
 	existing.Version = newVersion
 	existing.Rows = len(dataRows)
 	existing.Size = sizeInKB
+	existing.ColumnsOrder = headersJSON
 
 	if err := fs.DB.Save(&existing).Error; err != nil {
 		return err
@@ -267,15 +318,16 @@ func (fs *FileService) ReplaceFiles(uploadedFile *multipart.FileHeader, fileID u
 
 	// 5. Insert into FileVersion table
 	fileVersion := FileVersion{
-		FileID:     existing.ID,
-		Filename:   existing.Filename,
-		InsertedBy: userID,
-		CreatedAt:  time.Now(),
-		Private:    existing.Private,
-		Version:    newVersion,
-		IsDelete:   false,
-		Rows:       len(dataRows),
-		Size:       sizeInKB,
+		FileID:       existing.ID,
+		Filename:     existing.Filename,
+		InsertedBy:   userID,
+		CreatedAt:    time.Now(),
+		Private:      existing.Private,
+		Version:      newVersion,
+		IsDelete:     false,
+		Rows:         len(dataRows),
+		Size:         sizeInKB,
+		ColumnsOrder: headersJSON,
 	}
 	if err := fs.DB.Create(&fileVersion).Error; err != nil {
 		return err
@@ -363,12 +415,6 @@ func (fs *FileService) GetFileData(filename string, version int) ([]FileData, er
 		return nil, err
 	}
 
-	// Unmarshal the column order
-	var columnsOrder []string
-	if err := json.Unmarshal(file.ColumnsOrder, &columnsOrder); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal columns order: %w", err)
-	}
-
 	var fileData []FileData
 	if err := fs.DB.Where("file_id = ? AND version = ?", file.ID, version).
 		Order("id ASC"). // preserve row insertion order
@@ -376,8 +422,17 @@ func (fs *FileService) GetFileData(filename string, version int) ([]FileData, er
 		return nil, err
 	}
 
+	columnsOrder, err := fs.getColumnsOrderForVersion(file, version)
+	if err != nil {
+		return nil, err
+	}
+
 	// Reorder each row's JSON according to ColumnsOrder
 	for i := range fileData {
+		if len(columnsOrder) == 0 {
+			continue
+		}
+
 		var rowMap map[string]interface{}
 		if err := json.Unmarshal(fileData[i].RowData, &rowMap); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal row: %w", err)
@@ -532,7 +587,8 @@ func (fs *FileService) GetFileHistory(fileId string) ([]FileVersionWithUser, err
 		Select(`file_version.id, file_version.file_id, file_version.filename, 
 		        users.firstname AS firstname, users.lastname AS lastname,
 		        file_version.created_at, file_version.private, file_version.is_delete,
-		        file_version.size, file_version.version, file_version.rows`).
+		        file_version.size, file_version.version, file_version.rows,
+		        file_version.columns_order`).
 		Joins("JOIN users ON users.id = file_version.inserted_by").
 		Where("file_version.file_id = ?", fileId).
 		Order("file_version.version DESC").
@@ -562,25 +618,27 @@ func (fs *FileService) RevertFile(filename string, version int, userID uint) err
 
 	// update file table to new version
 	if err := fs.DB.Model(&file).Updates(File{
-		Version: newVersion,
-		Rows:    targetVersion.Rows,
-		Size:    targetVersion.Size,
-		Private: targetVersion.Private,
+		Version:      newVersion,
+		Rows:         targetVersion.Rows,
+		Size:         targetVersion.Size,
+		Private:      targetVersion.Private,
+		ColumnsOrder: targetVersion.ColumnsOrder,
 	}).Error; err != nil {
 		return err
 	}
 
 	// insert new row in file_version
 	newFileVersion := FileVersion{
-		FileID:     file.ID,
-		Filename:   filename,
-		InsertedBy: userID,
-		CreatedAt:  time.Now(),
-		Private:    targetVersion.Private,
-		Version:    newVersion,
-		IsDelete:   false,
-		Rows:       targetVersion.Rows,
-		Size:       targetVersion.Size,
+		FileID:       file.ID,
+		Filename:     filename,
+		InsertedBy:   userID,
+		CreatedAt:    time.Now(),
+		Private:      targetVersion.Private,
+		Version:      newVersion,
+		IsDelete:     false,
+		Rows:         targetVersion.Rows,
+		Size:         targetVersion.Size,
+		ColumnsOrder: targetVersion.ColumnsOrder,
 	}
 	if err := fs.DB.Create(&newFileVersion).Error; err != nil {
 		return err

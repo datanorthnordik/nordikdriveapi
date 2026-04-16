@@ -618,6 +618,9 @@ func TestFileService_SaveFilesMultipart_AllBranches(t *testing.T) {
 	if len(vers) != 1 || vers[0].Version != 1 {
 		t.Fatalf("unexpected versions: %#v", vers)
 	}
+	if string(vers[0].ColumnsOrder) != `["c1","c2","c3"]` {
+		t.Fatalf("expected file version columns order to be stored, got %s", string(vers[0].ColumnsOrder))
+	}
 
 	// verify file_data created and has c3 filled for first row
 	var rows []FileData
@@ -744,7 +747,13 @@ func TestFileService_ReplaceFiles_AllBranches(t *testing.T) {
 	// success
 	db = newTestDB(t)
 	svc = &FileService{DB: db}
-	f = File{Filename: "f1", Version: 1, Private: true, IsDelete: false}
+	f = File{
+		Filename:     "f1",
+		Version:      1,
+		Private:      true,
+		IsDelete:     false,
+		ColumnsOrder: datatypes.JSON([]byte(`["old_col"]`)),
+	}
 	_ = db.Create(&f).Error
 
 	fh = fileHeaderFromBytes(t, "file", "ok.csv", csvBytes([]string{"h1", "h2"}, [][]string{{"v1", ""}}))
@@ -759,11 +768,17 @@ func TestFileService_ReplaceFiles_AllBranches(t *testing.T) {
 	if updated.Version != 2 || updated.Rows != 1 {
 		t.Fatalf("unexpected updated file: %#v", updated)
 	}
+	if string(updated.ColumnsOrder) != `["h1","h2"]` {
+		t.Fatalf("expected updated file columns order, got %s", string(updated.ColumnsOrder))
+	}
 
 	var v []FileVersion
 	_ = db.Where("file_id = ?", f.ID).Find(&v).Error
 	if len(v) != 1 || v[0].Version != 2 || v[0].InsertedBy != 77 {
 		t.Fatalf("unexpected version rows: %#v", v)
+	}
+	if string(v[0].ColumnsOrder) != `["h1","h2"]` {
+		t.Fatalf("expected version columns order, got %s", string(v[0].ColumnsOrder))
 	}
 }
 
@@ -880,9 +895,16 @@ func TestFileService_GetFileData_AllBranches(t *testing.T) {
 		t.Fatalf("expected row unmarshal error, got %v", err)
 	}
 
-	// success reorder + fill missing columns
-	f3 := File{Filename: "f3", IsDelete: false, ColumnsOrder: cols}
+	// success reorder + fill missing columns using the requested version schema
+	currentCols, _ := json.Marshal([]string{"current_only"})
+	f3 := File{Filename: "f3", IsDelete: false, Version: 6, ColumnsOrder: currentCols}
 	_ = db.Create(&f3).Error
+	_ = db.Create(&FileVersion{
+		FileID:       f3.ID,
+		Filename:     "f3",
+		Version:      5,
+		ColumnsOrder: cols,
+	}).Error
 	// row has keys out-of-order + missing "c"
 	_ = db.Create(&FileData{
 		FileID:  f3.ID,
@@ -894,10 +916,12 @@ func TestFileService_GetFileData_AllBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	var ordered map[string]any
-	_ = json.Unmarshal(rows[0].RowData, &ordered)
-	if ordered["b"] != "2" || ordered["a"] != "1" || ordered["c"] != "" {
-		t.Fatalf("unexpected ordered row: %#v", ordered)
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, rows[0].RowData); err != nil {
+		t.Fatalf("compact ordered row: %v", err)
+	}
+	if compact.String() != `{"b":"2","a":"1","c":""}` {
+		t.Fatalf("unexpected ordered row: %s", compact.String())
 	}
 
 	// Find error path: drop file_data table after file exists + columns ok
@@ -1027,10 +1051,21 @@ func TestFileService_AccessCRUD_AndHistory(t *testing.T) {
 	_ = db.Create(&u).Error
 	f = File{Filename: "f2", InsertedBy: uint(u.ID)}
 	_ = db.Create(&f).Error
-	_ = db.Create(&FileVersion{FileID: f.ID, Filename: f.Filename, InsertedBy: uint(u.ID), Version: 1, Rows: 10}).Error
+	cols, _ := json.Marshal([]string{"a", "b"})
+	_ = db.Create(&FileVersion{
+		FileID:       f.ID,
+		Filename:     f.Filename,
+		InsertedBy:   uint(u.ID),
+		Version:      1,
+		Rows:         10,
+		ColumnsOrder: cols,
+	}).Error
 	hist, err := svc.GetFileHistory(fmt.Sprintf("%d", f.ID))
 	if err != nil || len(hist) != 1 {
 		t.Fatalf("expected 1 history row, got %d err=%v", len(hist), err)
+	}
+	if string(hist[0].ColumnsOrder) != `["a","b"]` {
+		t.Fatalf("expected history columns order, got %s", string(hist[0].ColumnsOrder))
 	}
 	_ = db.Migrator().DropTable(&FileVersion{})
 	_, err = svc.GetFileHistory(fmt.Sprintf("%d", f.ID))
@@ -1053,7 +1088,7 @@ func TestFileService_RevertFile_AllBranches(t *testing.T) {
 	}
 
 	// seed file
-	f := File{Filename: "f1", Version: 2, Rows: 2, Size: 1.0}
+	f := File{Filename: "f1", Version: 2, Rows: 2, Size: 1.0, ColumnsOrder: datatypes.JSON([]byte(`["current"]`))}
 	_ = db.Create(&f).Error
 
 	// target version not found
@@ -1062,7 +1097,7 @@ func TestFileService_RevertFile_AllBranches(t *testing.T) {
 	}
 
 	// seed target version + file_data
-	_ = db.Create(&FileVersion{FileID: f.ID, Filename: "f1", Version: 1, Rows: 1, Size: 0.5, Private: false}).Error
+	_ = db.Create(&FileVersion{FileID: f.ID, Filename: "f1", Version: 1, Rows: 1, Size: 0.5, Private: false, ColumnsOrder: datatypes.JSON([]byte(`["a"]`))}).Error
 	_ = db.Create(&FileData{FileID: f.ID, Version: 1, RowData: datatypes.JSON([]byte(`{"a":"1"}`))}).Error
 
 	// update file error: drop file table after reading
@@ -1074,9 +1109,9 @@ func TestFileService_RevertFile_AllBranches(t *testing.T) {
 	// recreate for next errors
 	db = newTestDB(t)
 	svc = &FileService{DB: db}
-	f = File{Filename: "f1", Version: 2, Rows: 2, Size: 1.0}
+	f = File{Filename: "f1", Version: 2, Rows: 2, Size: 1.0, ColumnsOrder: datatypes.JSON([]byte(`["current"]`))}
 	_ = db.Create(&f).Error
-	_ = db.Create(&FileVersion{FileID: f.ID, Filename: "f1", Version: 1, Rows: 1, Size: 0.5, Private: false}).Error
+	_ = db.Create(&FileVersion{FileID: f.ID, Filename: "f1", Version: 1, Rows: 1, Size: 0.5, Private: false, ColumnsOrder: datatypes.JSON([]byte(`["a"]`))}).Error
 	_ = db.Create(&FileData{FileID: f.ID, Version: 1, RowData: datatypes.JSON([]byte(`{"a":"1"}`))}).Error
 
 	// create new file_version error
@@ -1088,9 +1123,9 @@ func TestFileService_RevertFile_AllBranches(t *testing.T) {
 	// find data rows error
 	db = newTestDB(t)
 	svc = &FileService{DB: db}
-	f = File{Filename: "f1", Version: 2, Rows: 2, Size: 1.0}
+	f = File{Filename: "f1", Version: 2, Rows: 2, Size: 1.0, ColumnsOrder: datatypes.JSON([]byte(`["current"]`))}
 	_ = db.Create(&f).Error
-	_ = db.Create(&FileVersion{FileID: f.ID, Filename: "f1", Version: 1, Rows: 1, Size: 0.5, Private: false}).Error
+	_ = db.Create(&FileVersion{FileID: f.ID, Filename: "f1", Version: 1, Rows: 1, Size: 0.5, Private: false, ColumnsOrder: datatypes.JSON([]byte(`["a"]`))}).Error
 	_ = db.Create(&FileData{FileID: f.ID, Version: 1, RowData: datatypes.JSON([]byte(`{"a":"1"}`))}).Error
 	_ = db.Migrator().DropTable(&FileData{})
 	if err := svc.RevertFile("f1", 1, 2); err == nil {
@@ -1100,9 +1135,24 @@ func TestFileService_RevertFile_AllBranches(t *testing.T) {
 	// success
 	db = newTestDB(t)
 	svc = &FileService{DB: db}
-	f = File{Filename: "f2", Version: 2, Rows: 2, Size: 1.0, Private: true}
+	f = File{
+		Filename:     "f2",
+		Version:      2,
+		Rows:         2,
+		Size:         1.0,
+		Private:      true,
+		ColumnsOrder: datatypes.JSON([]byte(`["current"]`)),
+	}
 	_ = db.Create(&f).Error
-	_ = db.Create(&FileVersion{FileID: f.ID, Filename: "f2", Version: 2, Rows: 1, Size: 0.5, Private: true}).Error
+	_ = db.Create(&FileVersion{
+		FileID:       f.ID,
+		Filename:     "f2",
+		Version:      2,
+		Rows:         1,
+		Size:         0.5,
+		Private:      true,
+		ColumnsOrder: datatypes.JSON([]byte(`["a","b"]`)),
+	}).Error
 	_ = db.Create(&FileData{FileID: f.ID, Version: 2, RowData: datatypes.JSON([]byte(`{"a":"1"}`))}).Error
 
 	if err := svc.RevertFile("f2", 2, 99); err != nil {
@@ -1113,10 +1163,20 @@ func TestFileService_RevertFile_AllBranches(t *testing.T) {
 	if updated.Version != 3 || updated.Rows != 1 || updated.Private != true {
 		t.Fatalf("unexpected updated file: %#v", updated)
 	}
+	if string(updated.ColumnsOrder) != `["a","b"]` {
+		t.Fatalf("expected reverted file columns order, got %s", string(updated.ColumnsOrder))
+	}
 	var newRows int64
 	_ = db.Model(&FileData{}).Where("file_id = ? AND version = ?", f.ID, 3).Count(&newRows).Error
 	if newRows != 1 {
 		t.Fatalf("expected copied 1 row, got %d", newRows)
+	}
+	var latestVersion FileVersion
+	if err := db.Where("file_id = ? AND version = ?", f.ID, 3).First(&latestVersion).Error; err != nil {
+		t.Fatalf("expected reverted version row: %v", err)
+	}
+	if string(latestVersion.ColumnsOrder) != `["a","b"]` {
+		t.Fatalf("expected reverted version columns order, got %s", string(latestVersion.ColumnsOrder))
 	}
 }
 
