@@ -363,5 +363,15 @@ CREATE INDEX IF NOT EXISTS idx_file_edit_request_community_gin
 CREATE INDEX IF NOT EXISTS idx_file_edit_request_uploader_community_gin
   ON file_edit_request USING GIN (uploader_community);
 
+CREATE TABLE IF NOT EXISTS file_logo_content (
+    id SERIAL PRIMARY KEY,
+    file_id INT NOT NULL UNIQUE REFERENCES file(id) ON DELETE CASCADE,
+    file_name VARCHAR(255) NOT NULL,
+    logo_url TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 
+CREATE INDEX IF NOT EXISTS idx_file_logo_content_file_id
+    ON file_logo_content (file_id);
 
