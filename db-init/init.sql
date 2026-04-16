@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS file (
     is_delete BOOLEAN DEFAULT FALSE,
     size DECIMAL NOT NULL,
     version INT DEFAULT 1 NOT NULL,
-    rows INT NOT NULL
+    rows INT NOT NULL,
+    columns_order JSONB
 );
 
 CREATE TABLE IF NOT EXISTS file_version (
@@ -53,8 +54,10 @@ CREATE TABLE IF NOT EXISTS file_version (
     is_delete BOOLEAN DEFAULT FALSE,
     size DECIMAL NOT NULL,
     version INT DEFAULT 1 NOT NULL,
-    rows INT NOT NULL
+    rows INT NOT NULL,
+    columns_order JSONB
 );
+
 
 CREATE TABLE IF NOT EXISTS file_data (
     id SERIAL PRIMARY KEY,
