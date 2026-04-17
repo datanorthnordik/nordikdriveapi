@@ -40,6 +40,7 @@ type chatDatasetSchema struct {
 	nameFieldIDs      []string
 	communityFieldIDs []string
 	dateFieldIDs      []string
+	eventFieldIDs     map[string][]string
 }
 
 type rawChatRow struct {
@@ -56,6 +57,7 @@ type chatPlannerOutput struct {
 	TargetFieldID         string              `json:"target_field_id,omitempty"`
 	GroupByFieldID        string              `json:"group_by_field_id,omitempty"`
 	GroupByGranularity    string              `json:"group_by_granularity,omitempty"`
+	IncludeMatchedNames   bool                `json:"include_matched_names,omitempty"`
 	Filters               []chatPlannerFilter `json:"filters,omitempty"`
 	SearchTerms           []string            `json:"search_terms,omitempty"`
 	SortDirection         string              `json:"sort_direction,omitempty"`
@@ -342,6 +344,11 @@ func (cs *ChatService) planChatRequest(
 			ClarificationQuestion: "What would you like to know about the data?",
 		}, question, "", nil
 	}
+	if len(audioBytes) == 0 {
+		if deterministic, ok := deterministicChatPlan(question, dataset, session); ok {
+			return deterministic, question, "deterministic", nil
+		}
+	}
 
 	prompt := buildChatPlannerPrompt(question, dataset, session, useSessionContext)
 	raw, usedModel, err := cs.generateFromPrompt(ctx, prompt, audioBytes, audioMime)
@@ -466,6 +473,112 @@ func parseChatPlannerOutput(raw string, schema *chatDatasetSchema) (chatPlannerO
 	return plan, true
 }
 
+func deterministicChatPlan(question string, dataset *chatDatasetCacheEntry, session *chatSessionState) (chatPlannerOutput, bool) {
+	question = strings.TrimSpace(question)
+	if question == "" {
+		return chatPlannerOutput{}, false
+	}
+
+	qnorm := normalizeSearchText(question)
+	if qnorm == "" {
+		return chatPlannerOutput{}, false
+	}
+
+	useSessionContext := shouldUseSessionContext(question, session)
+	plan := chatPlannerOutput{
+		Limit:               5,
+		UseSessionFocus:     useSessionContext && len(session.FocusRowIDs) > 0 && hasSessionPronoun(" "+qnorm+" "),
+		IncludeMatchedNames: questionRequestsMatchedNames(qnorm),
+	}
+
+	if grouped, ok := deterministicGroupedPlan(question, dataset, plan); ok {
+		return grouped, true
+	}
+	if counted, ok := deterministicCountPlan(question, dataset, plan); ok {
+		return counted, true
+	}
+	if plan.UseSessionFocus {
+		if field := dataset.schema.bestFieldForQuestion(question); field != nil {
+			plan.Intent = "field_lookup"
+			plan.TargetFieldID = field.ID
+			return plan, true
+		}
+	}
+
+	return chatPlannerOutput{}, false
+}
+
+func deterministicGroupedPlan(question string, dataset *chatDatasetCacheEntry, base chatPlannerOutput) (chatPlannerOutput, bool) {
+	qnorm := normalizeSearchText(question)
+	granularity, direction, groupedByDate := detectGroupedCountSpec(qnorm)
+	hasComparison := containsAny(qnorm, "most", "highest", "least", "lowest", "fewest", "smallest number", "largest number", "greatest number", "maximum", "minimum", "max", "min")
+	if !groupedByDate && !hasComparison {
+		return chatPlannerOutput{}, false
+	}
+
+	plan := base
+	plan.Intent = "group_count_extreme"
+	plan.SortDirection = direction
+	plan.Filters = inferQuestionFilters(question, dataset, nil)
+
+	switch {
+	case groupedByDate:
+		field := dataset.schema.bestDateFieldForQuestion(question)
+		if field == nil {
+			return chatPlannerOutput{}, false
+		}
+		plan.TargetFieldID = field.ID
+		plan.GroupByFieldID = field.ID
+		plan.GroupByGranularity = granularity
+		return plan, true
+	case containsAny(qnorm, "community", "reserve", "first nation", "home"):
+		field := dataset.schema.bestCommunityFieldForQuestion(question)
+		if field == nil {
+			return chatPlannerOutput{}, false
+		}
+		plan.TargetFieldID = field.ID
+		plan.GroupByFieldID = field.ID
+		return plan, true
+	case containsAny(qnorm, "school", "institution"):
+		field := dataset.schema.bestSchoolFieldForQuestion(question)
+		if field == nil {
+			return chatPlannerOutput{}, false
+		}
+		plan.TargetFieldID = field.ID
+		plan.GroupByFieldID = field.ID
+		return plan, true
+	default:
+		return chatPlannerOutput{}, false
+	}
+}
+
+func deterministicCountPlan(question string, dataset *chatDatasetCacheEntry, base chatPlannerOutput) (chatPlannerOutput, bool) {
+	qnorm := normalizeSearchText(question)
+	if !isExistenceCountQuestion(qnorm) && !containsAny(qnorm, "how many", "count", "number of", "total") {
+		return chatPlannerOutput{}, false
+	}
+
+	plan := base
+	plan.Intent = "count_rows"
+	plan.Filters = inferQuestionFilters(question, dataset, nil)
+	plan.SearchTerms = inferSearchTerms(question, dataset, plan.Filters)
+	return plan, true
+}
+
+func questionRequestsMatchedNames(questionNorm string) bool {
+	return containsAny(
+		questionNorm,
+		"what are the names",
+		"what were the names",
+		"names of those",
+		"their names",
+		"which children",
+		"who were the children",
+		"who are the children",
+		"who were they",
+	)
+}
+
 func heuristicChatPlan(question string, dataset *chatDatasetCacheEntry, session *chatSessionState) (chatPlannerOutput, bool) {
 	question = strings.TrimSpace(question)
 	if question == "" {
@@ -483,9 +596,10 @@ func heuristicChatPlan(question string, dataset *chatDatasetCacheEntry, session 
 		plan.UseSessionFocus = true
 	}
 
-	if granularity, ok := detectGroupedCountGranularity(qnorm); ok {
+	if granularity, direction, ok := detectGroupedCountSpec(qnorm); ok {
 		plan.Intent = "group_count_extreme"
 		plan.GroupByGranularity = granularity
+		plan.SortDirection = direction
 		if field := dataset.schema.bestDateFieldForQuestion(question); field != nil {
 			plan.GroupByFieldID = field.ID
 			plan.TargetFieldID = field.ID
@@ -728,32 +842,43 @@ func renderDeterministicAnswer(question string, dataset *chatDatasetCacheEntry, 
 		}
 		return fmt.Sprintf("I found %d matching record%s in the available data.", count, pluralSuffix(count)), true
 	case "group_count_extreme":
-		values, maxCount, ok := extractGroupCountSummary(verified)
+		values, maxCount, sortDirection, winnerNames, ok := extractGroupCountSummary(verified)
 		if !ok {
 			return "", false
 		}
 		noun := groupedEventNoun(question)
 		countPhrase := groupedCountPhrase(noun, maxCount)
-		if len(values) == 1 {
-			return fmt.Sprintf("%s had the highest number of %s, with %s.", values[0], noun, countPhrase), true
+		comparisonWord := "highest"
+		if sortDirection == "asc" {
+			comparisonWord = "lowest"
 		}
-		return fmt.Sprintf("%s were tied for the highest number of %s, with %s each.", joinWithAnd(values), noun, countPhrase), true
+		answer := ""
+		if len(values) == 1 {
+			answer = fmt.Sprintf("%s had the %s number of %s, with %s.", values[0], comparisonWord, noun, countPhrase)
+		} else {
+			answer = fmt.Sprintf("%s were tied for the %s number of %s, with %s each.", joinWithAnd(values), comparisonWord, noun, countPhrase)
+		}
+		if len(winnerNames) > 0 && questionRequestsMatchedNames(normalizeSearchText(question)) {
+			answer += " The children were " + joinWithAnd(winnerNames) + "."
+		}
+		return answer, true
 	}
 	return "", false
 }
 
-func extractGroupCountSummary(verified chatVerifiedResult) ([]string, int, bool) {
+func extractGroupCountSummary(verified chatVerifiedResult) ([]string, int, string, []string, bool) {
 	valueMap, ok := verified.Value.(map[string]any)
 	if !ok {
-		return nil, 0, false
+		return nil, 0, "", nil, false
 	}
 	maxCount, ok := valueMap["max_count"].(int)
 	if !ok {
-		return nil, 0, false
+		return nil, 0, "", nil, false
 	}
+	sortDirection, _ := valueMap["sort_direction"].(string)
 	rawValues, ok := valueMap["winning_values"].([]string)
 	if ok && len(rawValues) > 0 {
-		return rawValues, maxCount, true
+		return rawValues, maxCount, sortDirection, extractStringListFromAny(valueMap["winner_names"]), true
 	}
 	if rows := verified.Rows; len(rows) > 0 {
 		values := make([]string, 0, len(rows))
@@ -763,10 +888,34 @@ func extractGroupCountSummary(verified chatVerifiedResult) ([]string, int, bool)
 			}
 		}
 		if len(values) > 0 {
-			return values, maxCount, true
+			return values, maxCount, sortDirection, extractStringListFromAny(valueMap["winner_names"]), true
 		}
 	}
-	return nil, 0, false
+	return nil, 0, "", nil, false
+}
+
+func extractStringListFromAny(value any) []string {
+	switch v := value.(type) {
+	case []string:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			item = strings.TrimSpace(item)
+			if item != "" {
+				out = append(out, item)
+			}
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
+				out = append(out, strings.TrimSpace(text))
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func groupedEventNoun(question string) string {
@@ -900,6 +1049,16 @@ func executeChatPlan(
 		}
 	}
 
+	if eventScope := detectQuestionEventScope(question); shouldApplyEventScope(plan, eventScope) {
+		scoped := applyEventScope(candidates, dataset, eventScope)
+		if len(scoped) == 0 {
+			verified.Status = "not_found"
+			verified.Notes = []string{fmt.Sprintf("No records match the requested %s scope.", eventScope)}
+			return verified
+		}
+		candidates = scoped
+	}
+
 	if strings.TrimSpace(plan.SubjectText) != "" {
 		matches := matchSubjectRows(candidates, plan.SubjectText)
 		if len(matches) == 0 {
@@ -1027,6 +1186,75 @@ func executeChatPlan(
 		verified.Notes = append(verified.Notes, "The question could not be mapped safely.")
 		return verified
 	}
+}
+
+func detectQuestionEventScope(question string) string {
+	qnorm := normalizeSearchText(question)
+	switch {
+	case containsAny(qnorm, "death", "deaths", "die", "died", "dead", "deceased", "cause of death", "death cause"):
+		return "death"
+	case containsAny(qnorm, "birth", "births", "born"):
+		return "birth"
+	case containsAny(qnorm, "burial", "burials", "buried"):
+		return "burial"
+	case containsAny(qnorm, "admission", "admissions", "admitted", "admit"):
+		return "admission"
+	case containsAny(qnorm, "discharge", "discharges", "discharged"):
+		return "discharge"
+	default:
+		return ""
+	}
+}
+
+func shouldApplyEventScope(plan chatPlannerOutput, eventScope string) bool {
+	if eventScope == "" {
+		return false
+	}
+	switch plan.Intent {
+	case "clarify", "describe_subject":
+		return false
+	default:
+		return true
+	}
+}
+
+func applyEventScope(rows []cachedChatRow, dataset *chatDatasetCacheEntry, eventScope string) []cachedChatRow {
+	if dataset == nil || len(rows) == 0 || eventScope == "" {
+		return rows
+	}
+	fieldIDs := dataset.schema.eventFieldIDs[eventScope]
+	if len(fieldIDs) == 0 {
+		return rows
+	}
+
+	filtered := make([]cachedChatRow, 0, len(rows))
+	for _, row := range rows {
+		if rowMatchesEventScope(row, &dataset.schema, eventScope, fieldIDs) {
+			filtered = append(filtered, row)
+		}
+	}
+	return filtered
+}
+
+func rowMatchesEventScope(row cachedChatRow, schema *chatDatasetSchema, eventScope string, fieldIDs []string) bool {
+	for _, fieldID := range fieldIDs {
+		field, ok := schema.resolveField(fieldID)
+		if !ok {
+			continue
+		}
+		raw := strings.TrimSpace(row.valueByField(fieldID, schema))
+		if raw == "" {
+			continue
+		}
+		if eventScope == "death" && field.Kind == chatFieldKindBoolean {
+			if isTruthy(raw) {
+				return true
+			}
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func focusIDsForSession(verified chatVerifiedResult) []int {
@@ -1254,6 +1482,7 @@ func buildGroupCountExtremeVerifiedResult(dataset *chatDatasetCacheEntry, verifi
 
 	counts := map[string]int{}
 	displayValues := map[string]string{}
+	groupRows := map[string][]cachedChatRow{}
 	uncertainRows := 0
 	usableRows := 0
 	for _, row := range rows {
@@ -1264,6 +1493,7 @@ func buildGroupCountExtremeVerifiedResult(dataset *chatDatasetCacheEntry, verifi
 			if displayValues[key] == "" {
 				displayValues[key] = display
 			}
+			groupRows[key] = append(groupRows[key], row)
 			usableRows++
 		case present:
 			uncertainRows++
@@ -1297,13 +1527,16 @@ func buildGroupCountExtremeVerifiedResult(dataset *chatDatasetCacheEntry, verifi
 		if buckets[i].Count == buckets[j].Count {
 			return buckets[i].Display < buckets[j].Display
 		}
+		if plan.SortDirection == "asc" {
+			return buckets[i].Count < buckets[j].Count
+		}
 		return buckets[i].Count > buckets[j].Count
 	})
 
-	maxCount := buckets[0].Count
+	bestCount := buckets[0].Count
 	winners := make([]bucketCount, 0, len(buckets))
 	for _, bucket := range buckets {
-		if bucket.Count != maxCount {
+		if bucket.Count != bestCount {
 			break
 		}
 		winners = append(winners, bucket)
@@ -1315,7 +1548,15 @@ func buildGroupCountExtremeVerifiedResult(dataset *chatDatasetCacheEntry, verifi
 			verified.Notes = append(verified.Notes, "Some matching rows do not identify one exact group, so the exact top result could change.")
 			return verified
 		}
-		if len(buckets) == 1 || maxCount > buckets[1].Count+uncertainRows {
+		safe := false
+		if len(buckets) == 1 {
+			safe = true
+		} else if plan.SortDirection == "asc" {
+			safe = bestCount+uncertainRows < buckets[1].Count
+		} else {
+			safe = bestCount > buckets[1].Count+uncertainRows
+		}
+		if safe {
 			verified.Notes = append(verified.Notes, fmt.Sprintf("%d matching rows were not counted because they do not identify one exact %s.", uncertainRows, groupLabelForNotes(plan.GroupByGranularity)))
 		} else {
 			verified.Status = "cannot_determine_exactly"
@@ -1326,21 +1567,43 @@ func buildGroupCountExtremeVerifiedResult(dataset *chatDatasetCacheEntry, verifi
 
 	winnerRows := make([]map[string]any, 0, len(winners))
 	winnerValues := make([]string, 0, len(winners))
+	winnerNames := make([]string, 0)
+	winnerRowIDs := make([]int, 0)
+	seenNames := map[string]struct{}{}
+	seenRowIDs := map[int]struct{}{}
 	for _, winner := range winners {
 		winnerRows = append(winnerRows, map[string]any{
 			"value": winner.Display,
 			"count": winner.Count,
 		})
 		winnerValues = append(winnerValues, winner.Display)
+		for _, row := range groupRows[winner.Key] {
+			if _, ok := seenRowIDs[row.RowID]; !ok {
+				seenRowIDs[row.RowID] = struct{}{}
+				winnerRowIDs = append(winnerRowIDs, row.RowID)
+			}
+			if name := strings.TrimSpace(row.primaryName()); name != "" {
+				key := normalizeSearchText(name)
+				if _, ok := seenNames[key]; ok {
+					continue
+				}
+				seenNames[key] = struct{}{}
+				winnerNames = append(winnerNames, name)
+			}
+		}
 	}
 
+	sort.Strings(winnerNames)
+	verified.FocusRowIDs = winnerRowIDs
 	verified.Rows = winnerRows
 	verified.Value = map[string]any{
 		"group_by":       firstNonEmpty(plan.GroupByGranularity, "value"),
 		"group_field":    groupField.Label,
 		"winning_values": winnerValues,
-		"max_count":      maxCount,
+		"max_count":      bestCount,
 		"counted_rows":   usableRows,
+		"sort_direction": firstNonEmpty(plan.SortDirection, "desc"),
+		"winner_names":   winnerNames,
 	}
 	return verified
 }
@@ -1984,6 +2247,7 @@ func buildChatSchema(columns []string, rows []rawChatRow) chatDatasetSchema {
 		Fields:        make([]chatSchemaField, 0, len(columns)),
 		fieldByID:     map[string]*chatSchemaField{},
 		fieldByLookup: map[string]*chatSchemaField{},
+		eventFieldIDs: map[string][]string{},
 	}
 
 	usedIDs := map[string]int{}
@@ -2006,6 +2270,9 @@ func buildChatSchema(columns []string, rows []rawChatRow) chatDatasetSchema {
 		}
 		if kind == chatFieldKindDate {
 			schema.dateFieldIDs = append(schema.dateFieldIDs, fieldID)
+		}
+		for _, event := range inferFieldEvents(field) {
+			schema.eventFieldIDs[event] = append(schema.eventFieldIDs[event], fieldID)
 		}
 	}
 
@@ -2197,6 +2464,37 @@ func inferFieldAliases(label string, kind chatFieldKind) []string {
 		out = append(out, alias)
 	}
 	return out
+}
+
+func inferFieldEvents(field chatSchemaField) []string {
+	blob := fieldSearchBlob(&field)
+	events := make([]string, 0, 2)
+	add := func(event string) {
+		for _, existing := range events {
+			if existing == event {
+				return
+			}
+		}
+		events = append(events, event)
+	}
+
+	if containsAny(blob, "death", "deaths", "died", "deceased", "cause of death", "death cause", "death factor", "place of death", "death location") {
+		add("death")
+	}
+	if containsAny(blob, "birth", "births", "born") {
+		add("birth")
+	}
+	if containsAny(blob, "burial", "buried") {
+		add("burial")
+	}
+	if containsAny(blob, "admission", "admissions", "admitted", "admit") {
+		add("admission")
+	}
+	if containsAny(blob, "discharge", "discharges", "discharged") {
+		add("discharge")
+	}
+
+	return events
 }
 
 func buildCachedChatRow(rawRow rawChatRow, schema *chatDatasetSchema) cachedChatRow {
@@ -2400,6 +2698,104 @@ func (schema *chatDatasetSchema) primaryListFieldID() string {
 		return schema.Fields[0].ID
 	}
 	return ""
+}
+
+func (schema *chatDatasetSchema) primaryCommunityField() *chatSchemaField {
+	if len(schema.communityFieldIDs) == 0 {
+		return nil
+	}
+	return schema.fieldByID[schema.communityFieldIDs[0]]
+}
+
+func (schema *chatDatasetSchema) bestCommunityFieldForQuestion(question string) *chatSchemaField {
+	qnorm := normalizeSearchText(question)
+	bestScore := -1
+	var best *chatSchemaField
+
+	for idx := range schema.Fields {
+		field := &schema.Fields[idx]
+		if field.Kind != chatFieldKindCommunity {
+			continue
+		}
+
+		score := 10
+		blob := fieldSearchBlob(field)
+		if containsAny(qnorm, "community", "communities") && containsAny(blob, "community") {
+			score += 40
+		}
+		if containsAny(qnorm, "reserve", "reserves") && containsAny(blob, "reserve") {
+			score += 40
+		}
+		if containsAny(qnorm, "first nation", "first nations") && containsAny(blob, "first nation") {
+			score += 40
+		}
+		if containsAny(qnorm, "home", "homes") && containsAny(blob, "home") {
+			score += 20
+		}
+		for _, alias := range field.Aliases {
+			aliasNorm := normalizeSearchText(alias)
+			if aliasNorm != "" && strings.Contains(qnorm, aliasNorm) {
+				score += len(aliasNorm)
+			}
+		}
+		if score > bestScore {
+			bestScore = score
+			best = field
+		}
+	}
+	if best != nil {
+		return best
+	}
+	return schema.primaryCommunityField()
+}
+
+func (schema *chatDatasetSchema) primarySchoolField() *chatSchemaField {
+	for idx := range schema.Fields {
+		field := &schema.Fields[idx]
+		if !isLocationLikeField(field) {
+			continue
+		}
+		if locationFieldCategory(field) == "school" {
+			return field
+		}
+	}
+	return nil
+}
+
+func (schema *chatDatasetSchema) bestSchoolFieldForQuestion(question string) *chatSchemaField {
+	qnorm := normalizeSearchText(question)
+	bestScore := -1
+	var best *chatSchemaField
+
+	for idx := range schema.Fields {
+		field := &schema.Fields[idx]
+		if !isLocationLikeField(field) || locationFieldCategory(field) != "school" {
+			continue
+		}
+
+		score := 10
+		blob := fieldSearchBlob(field)
+		if containsAny(qnorm, "school", "residential school", "institution") && containsAny(blob, "school", "residential", "institution") {
+			score += 50
+		}
+		if containsAny(qnorm, "location", "place") && containsAny(blob, "location", "place") {
+			score += 10
+		}
+		for _, alias := range field.Aliases {
+			aliasNorm := normalizeSearchText(alias)
+			if aliasNorm != "" && strings.Contains(qnorm, aliasNorm) {
+				score += len(aliasNorm)
+			}
+		}
+		if score > bestScore {
+			bestScore = score
+			best = field
+		}
+	}
+	if best != nil {
+		return best
+	}
+	return schema.primarySchoolField()
 }
 
 func inferQuestionFilters(question string, dataset *chatDatasetCacheEntry, existing []chatPlannerFilter) []chatPlannerFilter {
@@ -2803,12 +3199,19 @@ func containsAny(value string, patterns ...string) bool {
 	return false
 }
 
-func detectGroupedCountGranularity(questionNorm string) (string, bool) {
+func detectGroupedCountSpec(questionNorm string) (string, string, bool) {
 	if questionNorm == "" {
-		return "", false
+		return "", "", false
 	}
 	if containsAny(questionNorm, "earliest", "latest", "first", "last", "oldest", "youngest") {
-		return "", false
+		return "", "", false
+	}
+
+	direction := "desc"
+	if containsAny(questionNorm, "least", "lowest", "fewest", "smallest number") {
+		direction = "asc"
+	} else if !containsAny(questionNorm, "most", "highest", "largest number", "greatest number", "maximum", "max") {
+		return "", "", false
 	}
 
 	granularity := ""
@@ -2820,18 +3223,14 @@ func detectGroupedCountGranularity(questionNorm string) (string, bool) {
 	case containsAny(questionNorm, "day", "days", "date", "dates"):
 		granularity = "day"
 	default:
-		return "", false
-	}
-
-	if !containsAny(questionNorm, "most", "highest number", "largest number", "greatest number", "maximum", "max") {
-		return "", false
+		return "", "", false
 	}
 
 	if !containsAny(questionNorm, "death", "deaths", "died", "birth", "births", "born", "burial", "buried", "admission", "admissions", "admitted", "discharge", "discharges", "occur", "occurred") {
-		return "", false
+		return "", "", false
 	}
 
-	return granularity, true
+	return granularity, direction, true
 }
 
 func shouldUseSessionContext(question string, session *chatSessionState) bool {

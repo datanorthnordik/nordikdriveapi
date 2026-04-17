@@ -315,6 +315,82 @@ func TestTemporalValue_GroupBucketYear(t *testing.T) {
 	}
 }
 
+func TestExecuteChatPlan_GroupCountExtremeByCommunity_UsesDeathScopedRows(t *testing.T) {
+	dataset := buildDatasetForQueryEngineTest(t, []map[string]string{
+		{"NAME": "Alive One", "First Nation/Community": "Community A", "DATE OF DEATH": ""},
+		{"NAME": "Alive Two", "First Nation/Community": "Community A", "DATE OF DEATH": ""},
+		{"NAME": "Deceased A", "First Nation/Community": "Community A", "DATE OF DEATH": "1890-05-06"},
+		{"NAME": "Deceased B1", "First Nation/Community": "Community B", "DATE OF DEATH": "1891-01-04"},
+		{"NAME": "Deceased B2", "First Nation/Community": "Community B", "DATE OF DEATH": "1891-02-10"},
+	})
+
+	question := "What community / reserve had the most deaths? What are the names of those children?"
+	plan, ok := deterministicChatPlan(question, dataset, &chatSessionState{})
+	if !ok {
+		t.Fatal("expected deterministic plan")
+	}
+	if plan.Intent != "group_count_extreme" {
+		t.Fatalf("intent = %q want group_count_extreme", plan.Intent)
+	}
+	if plan.GroupByFieldID == "" {
+		t.Fatalf("expected community group field, got %+v", plan)
+	}
+
+	verified := executeChatPlan(plan, question, dataset, dataset.rows, &chatSessionState{})
+	if verified.Status != "ok" {
+		t.Fatalf("status = %q want ok (notes=%v)", verified.Status, verified.Notes)
+	}
+
+	valueMap, ok := verified.Value.(map[string]any)
+	if !ok {
+		t.Fatalf("expected value map, got %#v", verified.Value)
+	}
+	if winners, ok := valueMap["winning_values"].([]string); !ok || len(winners) != 1 || winners[0] != "Community B" {
+		t.Fatalf("winning_values = %#v want Community B", valueMap["winning_values"])
+	}
+	if winnerNames, ok := valueMap["winner_names"].([]string); !ok || len(winnerNames) != 2 || winnerNames[0] != "Deceased B1" || winnerNames[1] != "Deceased B2" {
+		t.Fatalf("winner_names = %#v want [Deceased B1 Deceased B2]", valueMap["winner_names"])
+	}
+}
+
+func TestChatService_Chat_GroupCountByCommunity_ReturnsDeterministicNamesWithoutLLM(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	mock.ExpectQuery(`(?i)select.*from.*file.*where.*filename.*order.*version.*desc.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "filename", "version", "columns_order"}).
+			AddRow(uint(1), "sheet.xlsx", 2, `["NAME","First Nation/Community","DATE OF DEATH"]`))
+
+	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*file_id.*and.*version`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
+			AddRow(uint(1), uint(1), 2, `{"NAME":"Alive One","First Nation/Community":"Community A","DATE OF DEATH":""}`).
+			AddRow(uint(2), uint(1), 2, `{"NAME":"Alive Two","First Nation/Community":"Community A","DATE OF DEATH":""}`).
+			AddRow(uint(3), uint(1), 2, `{"NAME":"Deceased A","First Nation/Community":"Community A","DATE OF DEATH":"1890-05-06"}`).
+			AddRow(uint(4), uint(1), 2, `{"NAME":"Deceased B1","First Nation/Community":"Community B","DATE OF DEATH":"1891-01-04"}`).
+			AddRow(uint(5), uint(1), 2, `{"NAME":"Deceased B2","First Nation/Community":"Community B","DATE OF DEATH":"1891-02-10"}`))
+
+	old := genaiGenerateContentHook
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content) (*genai.GenerateContentResponse, error) {
+		t.Fatal("LLM should not be called for deterministic grouped community answer")
+		return nil, nil
+	}
+	t.Cleanup(func() { genaiGenerateContentHook = old })
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	result, err := cs.Chat("What community / reserve had the most deaths? What are the names of those children?", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	want := "Community B had the highest number of deaths, with 2 recorded deaths. The children were Deceased B1 and Deceased B2."
+	if result.Answer != want {
+		t.Fatalf("answer = %q want %q", result.Answer, want)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
 func TestChatService_Chat_GroupCountUnsafeFallsBackToExactnessWarning(t *testing.T) {
 	db, mock, cleanup := newMockDBChatSvc(t)
 	defer cleanup()

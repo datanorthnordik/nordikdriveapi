@@ -41,10 +41,9 @@ type ChatService struct {
 }
 
 type chatDatasetCacheEntry struct {
-	rows     []cachedChatRow
-	rowByID  map[int]*cachedChatRow
-	schema   chatDatasetSchema
-	prepared sync.Map
+	rows    []cachedChatRow
+	rowByID map[int]*cachedChatRow
+	schema  chatDatasetSchema
 }
 
 type cachedChatRow struct {
@@ -57,14 +56,14 @@ type cachedChatRow struct {
 	Names      []string
 }
 
-type preparedChatDataset struct {
-	PromptJSON string
-	RowRefToID map[string]int
-}
-
 type chatStructuredResponse struct {
 	Answer        string  `json:"answer"`
 	MatchedRowRef *string `json:"matched_row_ref"`
+}
+
+type preparedChatDataset struct {
+	PromptJSON string
+	RowRefToID map[string]int
 }
 
 const chatStyleInstruction = `
@@ -196,99 +195,101 @@ func (cs *ChatService) generateFromPrompt(
 
 func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, filename string, communities []string) (*ChatResult, error) {
 	return cs.ChatForUser(0, question, audioFile, filename, communities)
-	if false {
-	if cs.DB == nil {
-		return nil, fmt.Errorf("db not initialized")
-	}
-	if cs.Client == nil {
-		return nil, fmt.Errorf("genai client not initialized")
-	}
-
-	// Fetch latest file version
-	var file f.File
-	if err := cs.DB.Select("id, version").Where("filename = ?", filename).Order("version DESC").First(&file).Error; err != nil {
-		return nil, fmt.Errorf("file not found")
-	}
-
-	filtered := normalizeCommunities(communities)
-	prepared, err := cs.legacyGetPreparedChatDataset(file.ID, file.Version, filtered)
-	if err != nil {
-		return nil, err
-	}
-
 	/*
-		You are a helpful assistant answering a community data question for a non-technical user.
+		if false {
+		if cs.DB == nil {
+			return nil, fmt.Errorf("db not initialized")
+		}
+		if cs.Client == nil {
+			return nil, fmt.Errorf("genai client not initialized")
+		}
 
-		Style requirements:
-		- Answer like a human: natural, warm, and conversational.
-		- Prefer short paragraphs over bullet points.
-		- Do NOT use bullet points unless the user explicitly asks for a list.
-		- Do NOT sound robotic or overly formal.
-		- Do NOT mention JSON, database, columns, file name, file version, or any technical details.
-		- If the answer is not present in the provided data, say so clearly and ask 1 short follow-up question if needed.
+		// Fetch latest file version
+		var file f.File
+		if err := cs.DB.Select("id, version").Where("filename = ?", filename).Order("version DESC").First(&file).Error; err != nil {
+			return nil, fmt.Errorf("file not found")
+		}
 
-		Accuracy requirements:
-		- Use ONLY the provided data below. Do not use outside knowledge.
-		- Carefully analyze ALL provided data before answering.
-		- Do not stop after finding the first match.
-		- Always check if multiple equally correct answers exist.
-		- Never return only one answer if multiple valid answers are present.
-		- For questions involving highest, lowest, most, least, first, last, top, or similar comparisons:
-		  verify that no other entries share the same value before answering.
+		filtered := normalizeCommunities(communities)
+		prepared, err := cs.legacyGetPreparedChatDataset(file.ID, file.Version, filtered)
+		if err != nil {
+			return nil, err
+		}
 
-		Before responding:
-		- Internally re-check the data to confirm whether another valid answer exists.
-		- Only respond after confirming that all correct answers are included.
+		// Legacy prompt instructions:
+			You are a helpful assistant answering a community data question for a non-technical user.
 
-		Answer format:
-		- Start with a direct answer in 1–2 sentences.
-		- If multiple answers exist, include ALL of them in the first sentence.
-		- Combine them naturally (example: "1882 and 1995").
-		- Provide as much detail as possible based on the data.
+			Style requirements:
+			- Answer like a human: natural, warm, and conversational.
+			- Prefer short paragraphs over bullet points.
+			- Do NOT use bullet points unless the user explicitly asks for a list.
+			- Do NOT sound robotic or overly formal.
+			- Do NOT mention JSON, database, columns, file name, file version, or any technical details.
+			- If the answer is not present in the provided data, say so clearly and ask 1 short follow-up question if needed.
+
+			Accuracy requirements:
+			- Use ONLY the provided data below. Do not use outside knowledge.
+			- Carefully analyze ALL provided data before answering.
+			- Do not stop after finding the first match.
+			- Always check if multiple equally correct answers exist.
+			- Never return only one answer if multiple valid answers are present.
+			- For questions involving highest, lowest, most, least, first, last, top, or similar comparisons:
+			  verify that no other entries share the same value before answering.
+
+			Before responding:
+			- Internally re-check the data to confirm whether another valid answer exists.
+			- Only respond after confirming that all correct answers are included.
+
+			Answer format:
+			- Start with a direct answer in 1–2 sentences.
+			- If multiple answers exist, include ALL of them in the first sentence.
+			- Combine them naturally (example: "1882 and 1995").
+			- Provide as much detail as possible based on the data.
+		// End legacy prompt instructions.
+
+		prompt := fmt.Sprintf(
+			"%s\n\nStructured output requirements:\n%s\n\nUser question:\n%s\n\nDATA (only source of truth):\n%s",
+			strings.TrimSpace(chatStyleInstruction),
+			strings.TrimSpace(chatStructuredOutputInstruction),
+			strings.TrimSpace(question),
+			prepared.PromptJSON,
+		)
+
+		ctx := context.Background()
+
+		// Optional audio path (kept identical behavior, but now uses the reusable generator)
+		var audioBytes []byte
+		var audioMime string
+		if audioFile != nil {
+			fh, err := openMultipartFileHook(audioFile)
+			if err != nil {
+				return nil, fmt.Errorf("failed to open audio file: %w", err)
+			}
+			defer fh.Close()
+
+			audioBytes, err = readAllHook(fh)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read audio file: %w", err)
+			}
+
+			audioMime = audioFile.Header.Get("Content-Type")
+		}
+
+		answer, usedModel, err := cs.generateFromPrompt(ctx, prompt, audioBytes, audioMime)
+		if err != nil {
+			return nil, fmt.Errorf("generation error (%s): %w", usedModel, err)
+		}
+
+		resolvedAnswer, matchedRowID := resolveChatResponse(answer, prepared.RowRefToID)
+
+		return &ChatResult{
+			Answer:       resolvedAnswer,
+			MatchedRowID: matchedRowID,
+		}, nil
+		}
+
+		return nil, nil
 	*/
-
-	prompt := fmt.Sprintf(
-		"%s\n\nStructured output requirements:\n%s\n\nUser question:\n%s\n\nDATA (only source of truth):\n%s",
-		strings.TrimSpace(chatStyleInstruction),
-		strings.TrimSpace(chatStructuredOutputInstruction),
-		strings.TrimSpace(question),
-		prepared.PromptJSON,
-	)
-
-	ctx := context.Background()
-
-	// Optional audio path (kept identical behavior, but now uses the reusable generator)
-	var audioBytes []byte
-	var audioMime string
-	if audioFile != nil {
-		fh, err := openMultipartFileHook(audioFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open audio file: %w", err)
-		}
-		defer fh.Close()
-
-		audioBytes, err = readAllHook(fh)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read audio file: %w", err)
-		}
-
-		audioMime = audioFile.Header.Get("Content-Type")
-	}
-
-	answer, usedModel, err := cs.generateFromPrompt(ctx, prompt, audioBytes, audioMime)
-	if err != nil {
-		return nil, fmt.Errorf("generation error (%s): %w", usedModel, err)
-	}
-
-	resolvedAnswer, matchedRowID := resolveChatResponse(answer, prepared.RowRefToID)
-
-	return &ChatResult{
-		Answer:       resolvedAnswer,
-		MatchedRowID: matchedRowID,
-	}, nil
-	}
-
-	return nil, nil
 }
 
 func (cs *ChatService) DescribeRow(rowID int) (string, error) {
@@ -366,6 +367,7 @@ func chatDatasetCacheKey(fileID uint, version int) string {
 	return fmt.Sprintf("%d:%d", fileID, version)
 }
 
+/*
 func chatCommunitiesCacheKey(communities []string) string {
 	if len(communities) == 0 {
 		return "__all__"
@@ -516,6 +518,7 @@ func legacyBuildPromptJSONArray(rows []cachedChatRow, indexes []int) (string, ma
 func buildPromptRowRef(position int) string {
 	return fmt.Sprintf("R%d", position)
 }
+*/
 
 func resolveChatResponse(raw string, rowRefToID map[string]int) (string, *int) {
 	raw = strings.TrimSpace(raw)
