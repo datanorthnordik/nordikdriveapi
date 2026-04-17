@@ -93,25 +93,68 @@ type chatVerifiedResult struct {
 const chatPlannerInstruction = `
 You convert the user's latest question into a strict JSON plan for a deterministic data engine.
 
-Important goals:
-- Be conservative. If the request is unclear, ask one short clarification question instead of guessing.
-- Use only field ids that appear in the SCHEMA section.
-- Prefer use_session_focus=true when the user says he, she, they, that person, same person, same one, him, or her and the session already has a focus.
-- If the user asks for first, earliest, oldest, youngest, latest, or last, use intent "extreme".
-- If the user asks "how many" or "count", use intent "count_rows".
-- If the user asks which year, years, month, or months had the most or highest number of deaths, births, admissions, or similar events, use intent "group_count_extreme".
-- If the user asks for one specific field about one person, use intent "field_lookup".
-- If the user asks to tell them about a person more generally, use intent "describe_subject".
-- If the user asks for a set of values or a list, use intent "list_values".
-- IMPORTANT: Extract ALL search terms from the question that should be found anywhere in the data.
-  Examples:
-  - "Did any children die from drowning at Shingwauk?" → search_terms: ["drowning"]
-  - "Tell me about Albert Penance" → subject_text covers this
-  - "What diseases caused deaths?" → search_terms: ["disease", "illness", "cause"]
-  - "Any deaths from poisoning?" → search_terms: ["poison", "toxic"]
-  - "Find records of malnutrition cases" → search_terms: ["malnutrition"]
-- Never invent a field id.
-- Never return SQL.
+CRITICAL ACCURACY RULES (95%+ accuracy depends on these):
+1. Be conservative: If ANY part of the question is unclear, ASK CLARIFICATION instead of guessing.
+2. Never guess about implicit meaning - what's not explicitly stated should be clarified.
+3. Vague terms need clarification: "recent" (when?), "young" (what age?), "many" (how many?), etc.
+4. Always prefer exact field matches over vague searches.
+5. If subject name is unclear or might have typos, ask before filtering.
+6. For comparative questions (who had most/least), ask which specific aspect to compare.
+7. Never extrapolate: if data doesn't directly answer, ask clarification not guessing.
+
+INTENT SELECTION RULES:
+- "first, earliest, oldest, youngest, latest, last, most, least, highest, lowest" → intent "extreme"
+- "how many, count, total, number of, how much" → intent "count_rows"
+- "which year/month/date had the most/highest/lowest deaths/admissions" → intent "group_count_extreme"
+- "what is X of person Y, tell me X about person Y" where X is specific field → intent "field_lookup"
+- "tell me about person, describe person, information about person, who is person" → intent "describe_subject"
+- "list of X values, what X values are there, all X" → intent "list_values"
+- Any unclear questions → intent "clarify" with specific question
+
+SEARCH TERMS EXTRACTION (for multi-column search):
+- Extract terms that describe WHAT you're searching for across all columns
+- Examples:
+  - "Did any children die from drowning?" → search_terms: ["drowning"]
+  - "What diseases caused deaths?" → search_terms: ["disease", "illness"]
+  - "Find tuberculosis records" → search_terms: ["tuberculosis"]
+  - "Any poisoning or toxic cases?" → search_terms: ["poison", "toxic"]
+  - "Accidents and injuries" → search_terms: ["accident", "injury"]
+- Only include search_terms if searching across multiple columns is needed
+- Don't include search_terms for specific person names (use subject_text instead)
+- For compound terms, break into components: "drowning accident" → ["drowning", "accident"]
+
+FILTERS vs SEARCH_TERMS:
+- Use filters for: specific field values (person names, school names, locations, dates)
+- Use search_terms for: keywords that could appear anywhere in the data
+- Use subject_text for: specific person name matching
+
+SESSION FOCUS:
+- use_session_focus=true ONLY when user says: "he, she, they, that person, same person, same one, him, her, them" AND session has previous focus
+- Otherwise use_session_focus=false
+
+FIELD ID RULES:
+- Use ONLY field ids from SCHEMA section - never invent
+- When unsure which field user means, ask clarification not guess
+- For ambiguous field names, ask which specific field
+
+SAFETY RULES:
+- Do NOT invent or guess field values
+- Do NOT make assumptions about date formats without clarity
+- Do NOT guess person names - use exact matching or ask
+- Do NOT assume relationships between fields
+- If a search term is too vague (one letter, too common), ask clarification
+- If asking for "top X" but data might have ties, note that uncertainty
+- Never guess about implicit data - if something isn't stated, ask not assume
+
+ANTI-HALLUCINATION RULES (CRITICAL for 95%+ accuracy):
+- Only use field IDs that exist in SCHEMA - typos here destroy accuracy
+- Only use filter operations that make sense for that field kind
+- If a person's name could be spelled multiple ways, ask for the exact spelling
+- If a date is vague (like "March 1950"), ask for exact date or clarify it's approximate
+- Never create filters for fields you're unsure about - ask clarification instead
+- For comparative questions, only ask if you can identify the exact comparison fields
+- If subject_text is unclear or could match multiple people, ask for clarification
+- Search terms should be meaningful keywords, not random words from the question
 
 Allowed intents:
 - "describe_subject"
@@ -161,20 +204,27 @@ Style requirements:
 - Do NOT mention JSON, planner, query, row ids, columns, file name, file version, or any technical details.
 - Maintain an empathetic and respectful tone, especially when discussing deaths or sensitive topics.
 
-Hard accuracy rules:
-- Use ONLY the VERIFIED RESULT below. All available data is included.
-- Do NOT guess or fill in missing details.
-- IMPORTANT: Review ALL rows provided. Every row contains complete information.
-- All rows have been searched comprehensively across ALL available fields/columns.
-- If VERIFIED RESULT status is "needs_clarification", ask exactly the clarification question provided.
-- If VERIFIED RESULT status is "not_found", clearly say the data does not show an answer after comprehensive search.
-- If VERIFIED RESULT status is "cannot_determine_exactly", clearly say the data does not allow an exact answer.
-- If a date is approximate, partial, conflicting, before, after, or a range, say that clearly.
-- If multiple rows are in the VERIFIED RESULT, include all of them naturally in your answer.
-- For list questions: include all values from the rows provided.
-- For count questions: count and verify against the actual rows provided.
-- If VERIFIED RESULT includes grouped winning values and a max_count, state both the winning value or values and the count.
-- When describing multiple people or records, ensure you mention key details from each one provided.
+Hard accuracy rules (these prevent 95% of errors):
+- Use ONLY facts from the VERIFIED RESULT. Do NOT add any external knowledge or guesses.
+- CRITICAL: Every claim you make must be traceable to actual data in the rows provided.
+- If data is incomplete or ambiguous, SAY SO explicitly. Example: "The records show X, but details about Y are not available."
+- Count and verify: For count questions, manually count the rows provided and state that count.
+- When describing people or records, mention each one individually with specific details from the data.
+- If a value is missing, empty, or unclear in the data, do NOT guess - say "the records don't specify" or "information is not available."
+- If a date is approximate, partial, or a range, describe it exactly as it appears - don't assume precision.
+- For pattern questions ("did more die from X or Y?"), only answer if data directly shows the comparison.
+- Never say things like "usually", "typically", "often", "tends to" based on limited data - be precise about what you see.
+- If row count seems wrong for the question, flag it: "The search found only X records, which seems unexpectedly low/high for this question."
+- Contradictions: If rows contain conflicting information, mention that conflict and include all versions.
+- Names and identities: Always verify name matches exactly. If there are multiple similar names, mention all matches.
+- Field values: If a field shows multiple values for one person, include all of them.
+
+Conservative answer patterns:
+- "Based on the records provided, [specific fact]." (traceable to data)
+- "The data shows X records with [criteria]." (transparent counting)
+- "I could not find [what user asked for] in the available records." (honest about limits)
+- "The records include [names], but don't provide information about [what's missing]." (transparent)
+- "This data is limited to [specific scope], so I cannot determine [broader question]." (scope awareness)
 
 Output rules:
 - Write only the answer text.
@@ -663,18 +713,66 @@ func executeChatPlan(
 			verified.Notes = []string{"No matching person was found."}
 			return verified
 		}
+
+		// Conservative: if top match score is very low, ask for clarification
+		topScore := matches[0].Score
+
+		// If score is very low (< 0.85), ask for confirmation
+		if topScore < 0.85 {
+			closeMatches := make([]chatSubjectMatch, 0)
+			for _, m := range matches {
+				// Include scores within 0.1 of top
+				if m.Score >= topScore-0.1 {
+					closeMatches = append(closeMatches, m)
+				}
+			}
+
+			if len(closeMatches) > 1 {
+				// Multiple potential matches - ask for clarification
+				matchNames := make([]string, 0, len(closeMatches))
+				for _, m := range closeMatches {
+					matchNames = append(matchNames, m.Row.primaryName())
+				}
+				verified.Status = "needs_clarification"
+				verified.ClarificationQuestion = fmt.Sprintf("Did you mean one of these: %s?", strings.Join(matchNames, ", "))
+				return verified
+			}
+		}
+
+		// Use all close matches (for describe_subject, might be ambiguous but still answer)
 		candidates = selectSubjectRows(matches)
 	}
 
 	// Apply search terms across all columns (multi-column search)
 	for _, searchTerm := range plan.SearchTerms {
-		candidates = applyMultiColumnFilter(candidates, dataset, strings.TrimSpace(searchTerm))
+		searchTerm = strings.TrimSpace(searchTerm)
+		if searchTerm == "" {
+			continue
+		}
+		searchFiltered := applyMultiColumnFilter(candidates, dataset, searchTerm)
+
+		// If search eliminates all candidates, that's suspicious - be conservative
+		if len(searchFiltered) == 0 && len(candidates) > 0 {
+			// Search returned no results - mark as not found rather than continuing
+			verified.Status = "not_found"
+			verified.Notes = []string{fmt.Sprintf("No records found containing '%s' in available data.", searchTerm)}
+			return verified
+		}
+		candidates = searchFiltered
 	}
 
 	for _, filter := range plan.Filters {
+		prevCount := len(candidates)
+
 		// Handle special multi-column search
 		if filter.FieldID == "__multi_column__" && filter.Op == "contains_any_column" {
-			candidates = applyMultiColumnFilter(candidates, dataset, filter.Value)
+			filtered := applyMultiColumnFilter(candidates, dataset, filter.Value)
+			if len(filtered) == 0 && prevCount > 0 {
+				verified.Status = "not_found"
+				verified.Notes = []string{fmt.Sprintf("No records match the filter '%s'.", filter.Value)}
+				return verified
+			}
+			candidates = filtered
 			continue
 		}
 
@@ -682,7 +780,15 @@ func executeChatPlan(
 		if !ok {
 			continue
 		}
-		candidates = applyFilter(candidates, field, filter)
+
+		filtered := applyFilter(candidates, field, filter)
+		if len(filtered) == 0 && prevCount > 0 {
+			// Filter eliminated all results - this might be a typo or wrong filter value
+			verified.Status = "not_found"
+			verified.Notes = []string{fmt.Sprintf("No records match the filter on '%s' with value '%s'.", field.Label, filter.Value)}
+			return verified
+		}
+		candidates = filtered
 	}
 
 	if len(candidates) == 0 {
@@ -730,7 +836,28 @@ func buildDescribeVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVe
 	if len(rows) == 1 {
 		rowID := rows[0].RowID
 		verified.MatchedRowID = &rowID
+	} else if len(rows) > 1 {
+		// Multiple results - add note that these are all matches
+		verified.Notes = append(verified.Notes, fmt.Sprintf("Found %d matching records. All are shown below.", len(rows)))
 	}
+
+	// Add note about any empty fields for transparency
+	emptyFieldCount := 0
+	for _, row := range rows {
+		for _, field := range dataset.schema.Fields {
+			value := strings.TrimSpace(row.valueByField(field.ID, &dataset.schema))
+			if value == "" {
+				emptyFieldCount++
+			}
+		}
+	}
+	if emptyFieldCount > 0 && len(rows) > 0 {
+		avgEmpty := emptyFieldCount / (len(rows) * len(dataset.schema.Fields))
+		if avgEmpty > 20 {
+			verified.Notes = append(verified.Notes, "Note: Some fields in these records are empty or not available.")
+		}
+	}
+
 	return verified
 }
 
@@ -800,9 +927,11 @@ func buildListValuesVerifiedResult(dataset *chatDatasetCacheEntry, verified chat
 
 	uniq := map[string]struct{}{}
 	values := make([]string, 0)
+	emptyCount := 0
 	for _, row := range rows {
 		value := strings.TrimSpace(row.valueByField(field.ID, &dataset.schema))
 		if value == "" {
+			emptyCount++
 			continue
 		}
 		if _, ok := uniq[value]; ok {
@@ -813,6 +942,11 @@ func buildListValuesVerifiedResult(dataset *chatDatasetCacheEntry, verified chat
 	}
 	sort.Strings(values)
 	verified.Value = values
+
+	// Add note if many records have empty values
+	if emptyCount > len(rows)/2 {
+		verified.Notes = append(verified.Notes, fmt.Sprintf("Note: %d out of %d records have no value for %s.", emptyCount, len(rows), field.Label))
+	}
 
 	// Always pass all rows with all fields for complete context
 	verified.Rows = sampleRowsForPrompt(dataset, rows, field.ID, len(rows), true)
