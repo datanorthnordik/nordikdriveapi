@@ -106,6 +106,8 @@ INTENT SELECTION RULES:
 - "first, earliest, oldest, youngest, latest, last, most, least, highest, lowest" → intent "extreme"
 - "how many, count, total, number of, how much" → intent "count_rows"
 - "which year/month/date had the most/highest/lowest deaths/admissions" → intent "group_count_extreme"
+- "in what years did [event] occur" → intent "group_count_extreme" with target_field_id = date field, group by year
+- "when did [event] happen" → intent "extreme" to find earliest/latest date
 - "what is X of person Y, tell me X about person Y" where X is specific field → intent "field_lookup"
 - "tell me about person, describe person, information about person, who is person" → intent "describe_subject"
 - "list of X values, what X values are there, all X" → intent "list_values"
@@ -123,10 +125,28 @@ SEARCH TERMS EXTRACTION (for multi-column search):
 - Don't include search_terms for specific person names (use subject_text instead)
 - For compound terms, break into components: "drowning accident" → ["drowning", "accident"]
 
-FILTERS vs SEARCH_TERMS:
-- Use filters for: specific field values (person names, school names, locations, dates)
-- Use search_terms for: keywords that could appear anywhere in the data
+FILTERS vs SEARCH_TERMS (CRITICAL - this causes most failures):
+- Use filters for: specific field values including LOCATION/SCHOOL NAMES
+  - Examples: "Shingwauk", "Walpole Island", "Toronto", school names
+  - Extract location/institution names from phrases like: "at Shingwauk", "in Toronto", "at the school"
+  - Look for field values that match known locations, schools, or communities
+- Use search_terms for: keywords that could appear anywhere (causes of death, conditions, descriptions)
+  - Examples: "drowning", "disease", "tuberculosis", "malnutrition"
+  - Only for things that might appear in text fields, not for place names
 - Use subject_text for: specific person name matching
+
+LOCATION/SCHOOL EXTRACTION (High priority):
+- When question mentions a specific place (Shingwauk, Walpole Island, reserve name, etc.):
+  - Find a filter from SCHEMA fields that might contain locations (kind=location, kind=community, or field about school)
+  - Create a filter: {field_id: "location_field_id", op: "eq", value: "Shingwauk"}
+  - Do NOT include it in search_terms
+- Examples:
+  - "In what years did the highest number of deaths occur at Shingwauk?"
+    → intent: "group_count_extreme", filters: [{field_id: "school", op: "eq", value: "Shingwauk"}]
+  - "Did any children die from drowning at Shingwauk Indian Residential School?"
+    → intent: "count_rows", search_terms: ["drowning"], filters: [{field_id: "school", op: "eq", value: "Shingwauk"}]
+  - "What community had the most deaths?" 
+    → intent: "group_count_extreme" (no specific community filter, group BY community)
 
 SESSION FOCUS:
 - use_session_focus=true ONLY when user says: "he, she, they, that person, same person, same one, him, her, them" AND session has previous focus
@@ -1404,7 +1424,9 @@ func matchSubjectRows(rows []cachedChatRow, subject string) []chatSubjectMatch {
 				bestName = candidateName
 			}
 		}
-		if bestScore >= 0.72 {
+		// Lowered threshold from 0.72 to 0.65 to catch spelling variations, abbreviations, and name aliases
+		// The ambiguity check below will ask for clarification if there are multiple close matches
+		if bestScore >= 0.65 {
 			rowCopy := rows[i]
 			matches = append(matches, chatSubjectMatch{
 				Row:         &rowCopy,
@@ -2072,45 +2094,85 @@ func (dataset *chatDatasetCacheEntry) bestFilterValueForQuestion(field *chatSche
 		return "", false
 	}
 
-	bestNorm := ""
 	bestRaw := ""
+	bestScore := 0.0
 	seen := map[string]struct{}{}
+
+	// First try field examples
 	for _, example := range field.Examples {
 		raw := strings.TrimSpace(example)
 		norm := normalizeSearchText(raw)
-		if len(norm) < 4 {
+		if len(norm) < 3 {
 			continue
 		}
 		seen[norm] = struct{}{}
-		if strings.Contains(questionNorm, norm) && len(norm) > len(bestNorm) {
-			bestNorm = norm
+
+		score := scoreLocationMatch(questionNorm, norm)
+		if score > bestScore {
+			bestScore = score
 			bestRaw = raw
 		}
 	}
-	if bestNorm != "" {
-		return bestRaw, true
-	}
 
+	// Then try dataset values
 	for _, row := range dataset.rows {
 		raw := strings.TrimSpace(row.valueByField(field.ID, &dataset.schema))
 		norm := strings.TrimSpace(row.Normalized[field.ID])
-		if len(norm) < 4 || len(norm) > 60 {
+		if len(norm) < 3 || len(norm) > 80 {
 			continue
 		}
 		if _, ok := seen[norm]; ok {
 			continue
 		}
 		seen[norm] = struct{}{}
-		if strings.Contains(questionNorm, norm) && len(norm) > len(bestNorm) {
-			bestNorm = norm
+
+		score := scoreLocationMatch(questionNorm, norm)
+		if score > bestScore {
+			bestScore = score
 			bestRaw = raw
 		}
 	}
 
-	if bestNorm == "" {
-		return "", false
+	if bestScore > 0.5 {
+		return bestRaw, true
 	}
-	return bestRaw, true
+	return "", false
+}
+
+// scoreLocationMatch checks if a normalized location appears in the question
+// It handles multi-word location names by checking component words
+func scoreLocationMatch(questionNorm string, locationNorm string) float64 {
+	if strings.Contains(questionNorm, locationNorm) {
+		// Exact substring match - highest score
+		return 1.0
+	}
+
+	// Check if any significant word from location matches in question
+	locationWords := strings.Fields(locationNorm)
+	if len(locationWords) == 0 {
+		return 0.0
+	}
+
+	matchedWords := 0
+	for _, word := range locationWords {
+		if len(word) >= 4 && strings.Contains(questionNorm, word) {
+			matchedWords++
+		}
+	}
+
+	// Score based on fraction of words matched
+	// For "Shingwauk Indian Residential School", if "shingwauk" matches, that's 1/4 = 0.25
+	// But that might be enough if it's the most specific word
+	if matchedWords > 0 {
+		score := float64(matchedWords) / float64(len(locationWords))
+		// Boost score for first/primary word (usually the name)
+		if strings.Contains(questionNorm, locationWords[0]) {
+			score += 0.2
+		}
+		return score
+	}
+
+	return 0.0
 }
 
 func (dataset *chatDatasetCacheEntry) rowsByIDs(ids []int, within []cachedChatRow) []cachedChatRow {
@@ -2288,6 +2350,18 @@ func scoreNameMatch(query, candidate string) float64 {
 	if strings.Contains(candidate, query) || strings.Contains(query, candidate) {
 		return 0.96
 	}
+
+	// Check for known name variations (Albert/Bert, Elizabeth/Betsy, etc.)
+	if isNameVariation(query, candidate) {
+		return 0.92
+	}
+
+	// Check if phonetically similar (handles common spelling variations)
+	if soundsLike(query, candidate) {
+		return 0.88
+	}
+
+	// Split by spaces and check token matches
 	queryTokens := strings.Fields(query)
 	candidateTokens := strings.Fields(candidate)
 	overlap := 0
@@ -2303,13 +2377,181 @@ func scoreNameMatch(query, candidate string) float64 {
 	if len(queryTokens) > 0 {
 		tokenScore = float64(overlap) / float64(len(queryTokens))
 	}
+
+	// Levenshtein distance for fuzzy matching
 	dist := levenshteinDistance(query, candidate)
 	maxLen := maxInt(len(query), len(candidate))
 	if maxLen == 0 {
 		return tokenScore
 	}
 	editScore := 1 - (float64(dist) / float64(maxLen))
+
+	// For short names, be less strict about edit distance
+	if maxLen <= 8 {
+		// Names like "Leo" vs "Loe" should match at high score
+		if dist <= 2 {
+			editScore = math.Max(editScore, 0.85)
+		}
+	}
+
 	return math.Max(tokenScore, editScore)
+}
+
+// isNameVariation checks for common name aliases/variations
+func isNameVariation(name1, name2 string) bool {
+	n1 := strings.ToLower(strings.TrimSpace(name1))
+	n2 := strings.ToLower(strings.TrimSpace(name2))
+
+	variations := map[string][]string{
+		// Common name variations
+		"albert":      {"bert", "al"},
+		"bert":        {"albert"},
+		"elizabeth":   {"betsy", "beth", "liz", "betty", "libby"},
+		"betsy":       {"elizabeth", "beth", "betty"},
+		"betty":       {"elizabeth", "betsy", "beth"},
+		"beth":        {"elizabeth", "betsy", "betty"},
+		"william":     {"bill", "will", "liam", "wm"},
+		"bill":        {"william", "will"},
+		"will":        {"william", "bill"},
+		"margaret":    {"maggie", "meg", "marge", "margot"},
+		"maggie":      {"margaret", "meg", "marge"},
+		"meg":         {"margaret", "maggie", "marge"},
+		"john":        {"johnny", "jon", "jack"},
+		"johnny":      {"john", "jon"},
+		"jon":         {"john", "johnny"},
+		"jack":        {"john", "johnny"},
+		"robert":      {"bob", "rob", "robin"},
+		"bob":         {"robert", "rob", "robin"},
+		"rob":         {"robert", "bob"},
+		"robin":       {"robert", "rob", "bob"},
+		"james":       {"jim", "jimmy", "jamie", "jim"},
+		"jim":         {"james", "jimmy", "jamie"},
+		"jimmy":       {"james", "jim", "jamie"},
+		"jamie":       {"james", "jim", "jimmy"},
+		"joseph":      {"joe", "jo", "joey"},
+		"joe":         {"joseph", "joey"},
+		"joey":        {"joseph", "joe"},
+		"thomas":      {"tom", "tommy", "tom"},
+		"tom":         {"thomas", "tommy"},
+		"tommy":       {"thomas", "tom"},
+		"benjamin":    {"ben", "benji", "benny"},
+		"ben":         {"benjamin", "benji"},
+		"benji":       {"benjamin", "ben", "benny"},
+		"christopher": {"chris", "kit", "kip"},
+		"chris":       {"christopher", "kit"},
+		"charles":     {"charlie", "chuck", "chas"},
+		"charlie":     {"charles", "chuck", "chas"},
+		"chuck":       {"charles", "charlie"},
+		"edward":      {"ed", "eddie", "ted"},
+		"ed":          {"edward", "eddie"},
+		"eddie":       {"edward", "ed"},
+		"ted":         {"edward", "ed"},
+		"henry":       {"hank", "harry"},
+		"hank":        {"henry", "harry"},
+		"harry":       {"henry", "hank", "harrison"},
+		"richard":     {"rich", "rick", "dick"},
+		"rick":        {"richard", "rich"},
+		"rich":        {"richard", "rick"},
+		"dick":        {"richard", "rick", "rich"},
+		"lawrence":    {"larry", "laurence", "lars"},
+		"larry":       {"lawrence", "laurence"},
+		"samuel":      {"sam", "sammie", "sammy"},
+		"sam":         {"samuel", "sammie", "sammy"},
+		"sammy":       {"samuel", "sam"},
+		"sampson":     {"sam", "sammy"},
+		"david":       {"dave", "davy"},
+		"dave":        {"david", "davy"},
+		"davy":        {"david", "dave"},
+		"daniel":      {"dan", "danny"},
+		"dan":         {"daniel", "danny"},
+		"danny":       {"daniel", "dan"},
+		"andrew":      {"andy", "andre", "andres"},
+		"andy":        {"andrew", "andre"},
+		"andre":       {"andrew", "andy"},
+		"michael":     {"mike", "mick", "michael"},
+		"mike":        {"michael", "mick"},
+		"mick":        {"michael", "mike"},
+		"paul":        {"paulo", "pablo", "pol"},
+		"stephen":     {"steve", "stephen", "steven"},
+		"steve":       {"stephen", "steven"},
+		"steven":      {"stephen", "steve"},
+		"patrick":     {"pat", "patty", "patrick"},
+		"pat":         {"patrick", "patty"},
+		"patty":       {"patrick", "pat"},
+		"anthony":     {"tony", "ant"},
+		"tony":        {"anthony", "ant"},
+		"ant":         {"anthony", "tony"},
+		"nicholas":    {"nick", "nicky", "col"},
+		"nick":        {"nicholas", "nicky"},
+		"nicky":       {"nicholas", "nick"},
+		"george":      {"geo", "georgia"},
+		"elijah":      {"eli", "lijah"},
+		"eli":         {"elijah", "lijah"},
+		"jeremiah":    {"jerry", "jer"},
+		"jerry":       {"jeremiah", "jer"},
+		"isaiah":      {"isa", "zay"},
+		"isa":         {"isaiah", "zay"},
+	}
+
+	if alts, ok := variations[n1]; ok {
+		for _, alt := range alts {
+			if alt == n2 {
+				return true
+			}
+		}
+	}
+	if alts, ok := variations[n2]; ok {
+		for _, alt := range alts {
+			if alt == n1 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// soundsLike checks for phonetic similarity (handles common spelling variations)
+func soundsLike(name1, name2 string) bool {
+	n1 := strings.ToLower(strings.TrimSpace(name1))
+	n2 := strings.ToLower(strings.TrimSpace(name2))
+
+	// Common phonetic substitutions
+	phonetic1 := phoneticallyNormalize(n1)
+	phonetic2 := phoneticallyNormalize(n2)
+
+	if phonetic1 == phonetic2 && phonetic1 != "" {
+		return true
+	}
+
+	// Check for common letter swaps (Penance vs Pinnance)
+	if levenshteinDistance(n1, n2) <= 2 && len(n1) >= 4 {
+		return true
+	}
+
+	return false
+}
+
+// phoneticallyNormalize applies common phonetic transformations
+func phoneticallyNormalize(s string) string {
+	s = strings.ToLower(s)
+	// Vowel normalization (a, e, i, o, u all similar)
+	s = strings.NewReplacer(
+		"a", "a",
+		"e", "a",
+		"i", "a",
+		"o", "a",
+		"u", "a",
+	).Replace(s)
+	// Common consonant pairs
+	s = strings.NewReplacer(
+		"c", "k",
+		"j", "g",
+		"ph", "f",
+		"qu", "kw",
+		"x", "ks",
+		"z", "s",
+	).Replace(s)
+	return s
 }
 
 func levenshteinDistance(a, b string) int {
