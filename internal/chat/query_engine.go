@@ -57,6 +57,7 @@ type chatPlannerOutput struct {
 	GroupByFieldID        string              `json:"group_by_field_id,omitempty"`
 	GroupByGranularity    string              `json:"group_by_granularity,omitempty"`
 	Filters               []chatPlannerFilter `json:"filters,omitempty"`
+	SearchTerms           []string            `json:"search_terms,omitempty"`
 	SortDirection         string              `json:"sort_direction,omitempty"`
 	Limit                 int                 `json:"limit,omitempty"`
 	ClarificationQuestion string              `json:"clarification_question,omitempty"`
@@ -102,6 +103,13 @@ Important goals:
 - If the user asks for one specific field about one person, use intent "field_lookup".
 - If the user asks to tell them about a person more generally, use intent "describe_subject".
 - If the user asks for a set of values or a list, use intent "list_values".
+- IMPORTANT: Extract ALL search terms from the question that should be found anywhere in the data.
+  Examples:
+  - "Did any children die from drowning at Shingwauk?" → search_terms: ["drowning"]
+  - "Tell me about Albert Penance" → subject_text covers this
+  - "What diseases caused deaths?" → search_terms: ["disease", "illness", "cause"]
+  - "Any deaths from poisoning?" → search_terms: ["poison", "toxic"]
+  - "Find records of malnutrition cases" → search_terms: ["malnutrition"]
 - Never invent a field id.
 - Never return SQL.
 
@@ -132,6 +140,7 @@ Return ONLY one JSON object with this shape:
   "target_field_id": "optional field id from schema",
   "group_by_field_id": "optional field id from schema",
   "group_by_granularity": "optional year, month, or day",
+  "search_terms": ["optional", "keywords", "to find anywhere in data"],
   "filters": [
     {"field_id": "optional field id", "op": "eq", "value": "value", "value2": "optional second value for between"}
   ],
@@ -150,20 +159,27 @@ Style requirements:
 - Do NOT use bullet points unless the user explicitly asks for a list.
 - Do NOT sound robotic or overly formal.
 - Do NOT mention JSON, planner, query, row ids, columns, file name, file version, or any technical details.
+- Maintain an empathetic and respectful tone, especially when discussing deaths or sensitive topics.
 
 Hard accuracy rules:
-- Use ONLY the VERIFIED RESULT below.
+- Use ONLY the VERIFIED RESULT below. All available data is included.
 - Do NOT guess or fill in missing details.
+- IMPORTANT: Review ALL rows provided. Every row contains complete information.
+- All rows have been searched comprehensively across ALL available fields/columns.
 - If VERIFIED RESULT status is "needs_clarification", ask exactly the clarification question provided.
-- If VERIFIED RESULT status is "not_found", clearly say the data does not show an answer.
+- If VERIFIED RESULT status is "not_found", clearly say the data does not show an answer after comprehensive search.
 - If VERIFIED RESULT status is "cannot_determine_exactly", clearly say the data does not allow an exact answer.
 - If a date is approximate, partial, conflicting, before, after, or a range, say that clearly.
-- If multiple rows are in the VERIFIED RESULT, include all of them naturally.
+- If multiple rows are in the VERIFIED RESULT, include all of them naturally in your answer.
+- For list questions: include all values from the rows provided.
+- For count questions: count and verify against the actual rows provided.
 - If VERIFIED RESULT includes grouped winning values and a max_count, state both the winning value or values and the count.
+- When describing multiple people or records, ensure you mention key details from each one provided.
 
 Output rules:
 - Write only the answer text.
 - Start with the direct answer in the first sentence when possible.
+- Provide comprehensive information from ALL rows given to you.
 `
 
 func (cs *ChatService) ChatForUser(userID int64, question string, audioFile *multipart.FileHeader, filename string, communities []string) (*ChatResult, error) {
@@ -342,6 +358,16 @@ func parseChatPlannerOutput(raw string, schema *chatDatasetSchema) (chatPlannerO
 		cleanFilters = append(cleanFilters, filter)
 	}
 	plan.Filters = cleanFilters
+
+	// Normalize search terms
+	cleanSearchTerms := make([]string, 0, len(plan.SearchTerms))
+	for _, term := range plan.SearchTerms {
+		term = strings.TrimSpace(term)
+		if term != "" {
+			cleanSearchTerms = append(cleanSearchTerms, term)
+		}
+	}
+	plan.SearchTerms = cleanSearchTerms
 
 	plan.SortDirection = strings.TrimSpace(strings.ToLower(plan.SortDirection))
 	if plan.SortDirection != "asc" && plan.SortDirection != "desc" {
@@ -541,7 +567,7 @@ func (cs *ChatService) answerFromVerifiedResult(
 func buildVerifiedAnswerPrompt(question string, dataset *chatDatasetCacheEntry, session *chatSessionState, verified chatVerifiedResult) (string, string) {
 	resultJSON, _ := json.MarshalIndent(verified, "", "  ")
 	prompt := fmt.Sprintf(
-		"%s\n\nRECENT CONTEXT:\n%s\n\nUSER QUESTION:\n%s\n\nVERIFIED RESULT (only source of truth):\n%s",
+		"%s\n\nRECENT CONTEXT:\n%s\n\nUSER QUESTION:\n%s\n\nVERIFIED RESULT (only source of truth):\nNote: This includes ALL matching rows with FULL field details.\n%s",
 		strings.TrimSpace(chatVerifiedAnswerInstruction),
 		session.summaryForPrompt(dataset),
 		strings.TrimSpace(question),
@@ -622,7 +648,8 @@ func executeChatPlan(
 	}
 
 	candidates := rows
-	if plan.UseSessionFocus && len(session.FocusRowIDs) > 0 {
+	isFollowUp := plan.UseSessionFocus && len(session.FocusRowIDs) > 0
+	if isFollowUp {
 		focused := dataset.rowsByIDs(session.FocusRowIDs, rows)
 		if len(focused) > 0 {
 			candidates = focused
@@ -639,7 +666,18 @@ func executeChatPlan(
 		candidates = selectSubjectRows(matches)
 	}
 
+	// Apply search terms across all columns (multi-column search)
+	for _, searchTerm := range plan.SearchTerms {
+		candidates = applyMultiColumnFilter(candidates, dataset, strings.TrimSpace(searchTerm))
+	}
+
 	for _, filter := range plan.Filters {
+		// Handle special multi-column search
+		if filter.FieldID == "__multi_column__" && filter.Op == "contains_any_column" {
+			candidates = applyMultiColumnFilter(candidates, dataset, filter.Value)
+			continue
+		}
+
 		field, ok := dataset.schema.resolveField(filter.FieldID)
 		if !ok {
 			continue
@@ -663,20 +701,21 @@ func executeChatPlan(
 
 	switch plan.Intent {
 	case "describe_subject":
-		return buildDescribeVerifiedResult(dataset, verified, candidates)
+		return buildDescribeVerifiedResult(dataset, verified, candidates, isFollowUp)
 	case "field_lookup":
-		return buildFieldLookupVerifiedResult(dataset, verified, candidates)
+		return buildFieldLookupVerifiedResult(dataset, verified, candidates, isFollowUp)
 	case "count_rows":
 		verified.Value = len(candidates)
 		verified.FocusRowIDs = rowIDsFromRows(candidates)
-		verified.Rows = sampleRowsForPrompt(dataset, candidates, "", 5, false)
+		// Always pass all rows with all fields for accurate counting context
+		verified.Rows = sampleRowsForPrompt(dataset, candidates, "", len(candidates), true)
 		return verified
 	case "list_values":
-		return buildListValuesVerifiedResult(dataset, verified, candidates)
+		return buildListValuesVerifiedResult(dataset, verified, candidates, isFollowUp)
 	case "extreme":
-		return buildExtremeVerifiedResult(dataset, verified, candidates, plan.SortDirection)
+		return buildExtremeVerifiedResult(dataset, verified, candidates, plan.SortDirection, isFollowUp)
 	case "group_count_extreme":
-		return buildGroupCountExtremeVerifiedResult(dataset, verified, candidates, plan)
+		return buildGroupCountExtremeVerifiedResult(dataset, verified, candidates, plan, isFollowUp)
 	default:
 		verified.Status = "cannot_determine_exactly"
 		verified.Notes = append(verified.Notes, "The question could not be mapped safely.")
@@ -684,10 +723,10 @@ func executeChatPlan(
 	}
 }
 
-func buildDescribeVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow) chatVerifiedResult {
+func buildDescribeVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow, isFollowUp bool) chatVerifiedResult {
 	verified.FocusRowIDs = rowIDsFromRows(rows)
-	includeAll := len(rows) == 1
-	verified.Rows = sampleRowsForPrompt(dataset, rows, "", 4, includeAll)
+	// Always pass all rows with all fields for complete context
+	verified.Rows = sampleRowsForPrompt(dataset, rows, "", len(rows), true)
 	if len(rows) == 1 {
 		rowID := rows[0].RowID
 		verified.MatchedRowID = &rowID
@@ -695,7 +734,7 @@ func buildDescribeVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVe
 	return verified
 }
 
-func buildFieldLookupVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow) chatVerifiedResult {
+func buildFieldLookupVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow, isFollowUp bool) chatVerifiedResult {
 	if verified.TargetFieldID == "" {
 		verified.Status = "needs_clarification"
 		verified.ClarificationQuestion = "Which detail would you like to know?"
@@ -710,7 +749,8 @@ func buildFieldLookupVerifiedResult(dataset *chatDatasetCacheEntry, verified cha
 		return verified
 	}
 
-	verified.Rows = sampleRowsForPrompt(dataset, rows, field.ID, 6, len(rows) == 1)
+	// Always pass all rows with all fields for complete context
+	verified.Rows = sampleRowsForPrompt(dataset, rows, field.ID, len(rows), true)
 	if len(rows) == 1 {
 		rowID := rows[0].RowID
 		verified.MatchedRowID = &rowID
@@ -744,7 +784,7 @@ func buildFieldLookupVerifiedResult(dataset *chatDatasetCacheEntry, verified cha
 	return verified
 }
 
-func buildListValuesVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow) chatVerifiedResult {
+func buildListValuesVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow, isFollowUp bool) chatVerifiedResult {
 	fieldID := verified.TargetFieldID
 	if fieldID == "" {
 		fieldID = dataset.schema.primaryListFieldID()
@@ -773,12 +813,14 @@ func buildListValuesVerifiedResult(dataset *chatDatasetCacheEntry, verified chat
 	}
 	sort.Strings(values)
 	verified.Value = values
-	verified.Rows = sampleRowsForPrompt(dataset, rows, field.ID, minInt(len(values), 8), false)
+
+	// Always pass all rows with all fields for complete context
+	verified.Rows = sampleRowsForPrompt(dataset, rows, field.ID, len(rows), true)
 	verified.FocusRowIDs = rowIDsFromRows(rows)
 	return verified
 }
 
-func buildExtremeVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow, direction string) chatVerifiedResult {
+func buildExtremeVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow, direction string, isFollowUp bool) chatVerifiedResult {
 	if verified.TargetFieldID == "" {
 		verified.Status = "cannot_determine_exactly"
 		verified.Notes = append(verified.Notes, "The comparison field could not be resolved.")
@@ -835,14 +877,15 @@ func buildExtremeVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVer
 	}
 
 	verified.FocusRowIDs = rowIDsFromRows(rows)
-	verified.Rows = sampleRowsForPrompt(dataset, rows, field.ID, 4, true)
+	// Always pass all rows with all fields for complete context
+	verified.Rows = sampleRowsForPrompt(dataset, rows, field.ID, len(rows), true)
 	if len(rows) == 1 {
 		verified.Value = strings.TrimSpace(rows[0].valueByField(field.ID, &dataset.schema))
 	}
 	return verified
 }
 
-func buildGroupCountExtremeVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow, plan chatPlannerOutput) chatVerifiedResult {
+func buildGroupCountExtremeVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow, plan chatPlannerOutput, isFollowUp bool) chatVerifiedResult {
 	groupFieldID := plan.GroupByFieldID
 	if groupFieldID == "" {
 		groupFieldID = verified.TargetFieldID
@@ -1100,6 +1143,42 @@ func applyFilter(rows []cachedChatRow, field *chatSchemaField, filter chatPlanne
 	return filtered
 }
 
+// applyMultiColumnFilter searches for a keyword across all columns in all rows
+func applyMultiColumnFilter(rows []cachedChatRow, dataset *chatDatasetCacheEntry, keyword string) []cachedChatRow {
+	if keyword == "" {
+		return rows
+	}
+
+	keywordNorm := normalizeSearchText(keyword)
+	if keywordNorm == "" {
+		return rows
+	}
+
+	filtered := make([]cachedChatRow, 0, len(rows))
+
+	for _, row := range rows {
+		// Search across all fields for the keyword
+		found := false
+		for _, field := range dataset.schema.Fields {
+			value := strings.TrimSpace(row.valueByField(field.ID, &dataset.schema))
+			if value == "" {
+				continue
+			}
+			valueNorm := normalizeSearchText(value)
+			if strings.Contains(valueNorm, keywordNorm) {
+				found = true
+				break
+			}
+		}
+
+		if found {
+			filtered = append(filtered, row)
+		}
+	}
+
+	return filtered
+}
+
 func rowMatchesFilter(row cachedChatRow, field *chatSchemaField, filter chatPlannerFilter) bool {
 	raw := row.valueByField(field.ID, nil)
 	switch field.Kind {
@@ -1229,15 +1308,10 @@ func selectSubjectRows(matches []chatSubjectMatch) []cachedChatRow {
 }
 
 func sampleRowsForPrompt(dataset *chatDatasetCacheEntry, rows []cachedChatRow, targetFieldID string, limit int, includeAll bool) []map[string]any {
-	if limit <= 0 {
-		limit = 5
-	}
-	if len(rows) < limit {
-		limit = len(rows)
-	}
-	out := make([]map[string]any, 0, limit)
-	for idx := 0; idx < limit; idx++ {
-		out = append(out, dataset.rowPromptData(rows[idx], targetFieldID, includeAll))
+	// Always include all rows and all fields for complete context
+	out := make([]map[string]any, 0, len(rows))
+	for idx := 0; idx < len(rows); idx++ {
+		out = append(out, dataset.rowPromptData(rows[idx], targetFieldID, true))
 	}
 	return out
 }
@@ -1790,6 +1864,7 @@ func inferQuestionFilters(question string, dataset *chatDatasetCacheEntry, exist
 		seenFields[filter.FieldID] = struct{}{}
 	}
 
+	// Infer location/community/school filters from the question
 	for idx := range dataset.schema.Fields {
 		field := &dataset.schema.Fields[idx]
 		if _, ok := seenFields[field.ID]; ok {
