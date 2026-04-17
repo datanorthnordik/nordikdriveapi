@@ -22,6 +22,7 @@ func (cc *ChatController) Chat(c *gin.Context) {
 	filename := c.PostForm("filename")
 	audioFile, _ := c.FormFile("audio")
 	communities := c.PostFormArray("communities")
+	userID := currentChatUserID(c)
 
 	communities = util.ParseCommaSeparatedCommunities(communities)
 
@@ -30,7 +31,7 @@ func (cc *ChatController) Chat(c *gin.Context) {
 		return
 	}
 
-	result, err := cc.ChatService.Chat(question, audioFile, filename, communities)
+	result, err := cc.ChatService.ChatForUser(userID, question, audioFile, filename, communities)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -42,6 +43,30 @@ func (cc *ChatController) Chat(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, response)
+}
+
+func currentChatUserID(c *gin.Context) int64 {
+	raw, ok := c.Get("userID")
+	if !ok || raw == nil {
+		return 0
+	}
+	switch v := raw.(type) {
+	case int:
+		return int64(v)
+	case int64:
+		return v
+	case uint:
+		return int64(v)
+	case uint64:
+		return int64(v)
+	case float64:
+		return int64(v)
+	case string:
+		if parsed, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+			return parsed
+		}
+	}
+	return 0
 }
 
 func (cc *ChatController) Describe(c *gin.Context) {

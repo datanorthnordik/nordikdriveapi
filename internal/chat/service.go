@@ -37,17 +37,24 @@ type ChatService struct {
 	Location  string
 
 	datasetCache sync.Map
+	sessionCache sync.Map
 }
 
 type chatDatasetCacheEntry struct {
 	rows     []cachedChatRow
+	rowByID  map[int]*cachedChatRow
+	schema   chatDatasetSchema
 	prepared sync.Map
 }
 
 type cachedChatRow struct {
-	RowID     int
-	RowJSON   string
-	Community string
+	RowID      int
+	RowJSON    string
+	Community  string
+	Values     map[string]string
+	Normalized map[string]string
+	Temporal   map[string]temporalValue
+	Names      []string
 }
 
 type preparedChatDataset struct {
@@ -188,6 +195,8 @@ func (cs *ChatService) generateFromPrompt(
 }
 
 func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, filename string, communities []string) (*ChatResult, error) {
+	return cs.ChatForUser(0, question, audioFile, filename, communities)
+	if false {
 	if cs.DB == nil {
 		return nil, fmt.Errorf("db not initialized")
 	}
@@ -202,7 +211,7 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 	}
 
 	filtered := normalizeCommunities(communities)
-	prepared, err := cs.getPreparedChatDataset(file.ID, file.Version, filtered)
+	prepared, err := cs.legacyGetPreparedChatDataset(file.ID, file.Version, filtered)
 	if err != nil {
 		return nil, err
 	}
@@ -277,6 +286,9 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 		Answer:       resolvedAnswer,
 		MatchedRowID: matchedRowID,
 	}, nil
+	}
+
+	return nil, nil
 }
 
 func (cs *ChatService) DescribeRow(rowID int) (string, error) {
@@ -361,8 +373,8 @@ func chatCommunitiesCacheKey(communities []string) string {
 	return strings.Join(communities, "\x1f")
 }
 
-func (cs *ChatService) getPreparedChatDataset(fileID uint, version int, communities []string) (*preparedChatDataset, error) {
-	dataset, err := cs.getOrLoadChatDataset(fileID, version)
+func (cs *ChatService) legacyGetPreparedChatDataset(fileID uint, version int, communities []string) (*preparedChatDataset, error) {
+	dataset, err := cs.legacyGetOrLoadChatDataset(fileID, version)
 	if err != nil {
 		return nil, err
 	}
@@ -374,7 +386,7 @@ func (cs *ChatService) getPreparedChatDataset(fileID uint, version int, communit
 		}
 	}
 
-	prepared, err := buildPreparedChatDataset(dataset.rows, communities)
+	prepared, err := legacyBuildPreparedChatDataset(dataset.rows, communities)
 	if err != nil {
 		return nil, err
 	}
@@ -387,7 +399,7 @@ func (cs *ChatService) getPreparedChatDataset(fileID uint, version int, communit
 	return prepared, nil
 }
 
-func (cs *ChatService) getOrLoadChatDataset(fileID uint, version int) (*chatDatasetCacheEntry, error) {
+func (cs *ChatService) legacyGetOrLoadChatDataset(fileID uint, version int) (*chatDatasetCacheEntry, error) {
 	cacheKey := chatDatasetCacheKey(fileID, version)
 	if cached, ok := cs.datasetCache.Load(cacheKey); ok {
 		if entry, ok := cached.(*chatDatasetCacheEntry); ok {
@@ -405,7 +417,7 @@ func (cs *ChatService) getOrLoadChatDataset(fileID uint, version int) (*chatData
 
 	rows := make([]cachedChatRow, 0, len(rawRows))
 	for _, rawRow := range rawRows {
-		rows = append(rows, buildCachedChatRow(rawRow))
+		rows = append(rows, legacyBuildCachedChatRow(rawRow))
 	}
 
 	entry := &chatDatasetCacheEntry{rows: rows}
@@ -417,7 +429,7 @@ func (cs *ChatService) getOrLoadChatDataset(fileID uint, version int) (*chatData
 	return entry, nil
 }
 
-func buildCachedChatRow(rawRow f.FileData) cachedChatRow {
+func legacyBuildCachedChatRow(rawRow f.FileData) cachedChatRow {
 	row := cachedChatRow{
 		RowID:   int(rawRow.ID),
 		RowJSON: string(rawRow.RowData),
@@ -444,7 +456,7 @@ func extractCommunityValue(rowMap map[string]interface{}) string {
 	return strings.TrimSpace(valStr)
 }
 
-func buildPreparedChatDataset(rows []cachedChatRow, communities []string) (*preparedChatDataset, error) {
+func legacyBuildPreparedChatDataset(rows []cachedChatRow, communities []string) (*preparedChatDataset, error) {
 	selectedIndexes := make([]int, 0, len(rows))
 	if len(communities) == 0 {
 		for idx := range rows {
@@ -462,7 +474,7 @@ func buildPreparedChatDataset(rows []cachedChatRow, communities []string) (*prep
 		}
 	}
 
-	promptJSON, rowRefToID, err := buildPromptJSONArray(rows, selectedIndexes)
+	promptJSON, rowRefToID, err := legacyBuildPromptJSONArray(rows, selectedIndexes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal file data: %w", err)
 	}
@@ -473,7 +485,7 @@ func buildPreparedChatDataset(rows []cachedChatRow, communities []string) (*prep
 	}, nil
 }
 
-func buildPromptJSONArray(rows []cachedChatRow, indexes []int) (string, map[string]int, error) {
+func legacyBuildPromptJSONArray(rows []cachedChatRow, indexes []int) (string, map[string]int, error) {
 	if len(indexes) == 0 {
 		return "[]", map[string]int{}, nil
 	}

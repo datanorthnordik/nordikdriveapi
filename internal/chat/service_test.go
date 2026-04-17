@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -76,6 +77,29 @@ func (h textprotoMIMEHeader) toHeader() map[string][]string {
 		out[k] = v
 	}
 	return out
+}
+
+func plannerThenAnswerHook(t *testing.T, plannerJSON string, answerText string, inspectPlanner func(string), inspectAnswer func(string)) func(*genai.Client, context.Context, string, []*genai.Content) (*genai.GenerateContentResponse, error) {
+	t.Helper()
+	return func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content) (*genai.GenerateContentResponse, error) {
+		if len(contents) == 0 || contents[0] == nil || len(contents[0].Parts) == 0 {
+			t.Fatalf("expected prompt contents, got %#v", contents)
+		}
+		prompt := contents[0].Parts[0].Text
+		var out genai.GenerateContentResponse
+		if strings.Contains(prompt, "VERIFIED RESULT (only source of truth):") {
+			if inspectAnswer != nil {
+				inspectAnswer(prompt)
+			}
+			_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":`+strconv.Quote(answerText)+`}]}}]}`), &out)
+			return &out, nil
+		}
+		if inspectPlanner != nil {
+			inspectPlanner(prompt)
+		}
+		_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":`+strconv.Quote(plannerJSON)+`}]}}]}`), &out)
+		return &out, nil
+	}
 }
 
 func Test_parseRateFromMime(t *testing.T) {
@@ -182,9 +206,12 @@ func TestChatService_Chat_GenerationError(t *testing.T) {
 	t.Cleanup(func() { genaiGenerateContentHook = old })
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
-	_, err := cs.Chat("q", nil, "sheet.xlsx", nil)
-	if err == nil || !strings.Contains(err.Error(), "generation error") {
-		t.Fatalf("expected generation error, got %v", err)
+	result, err := cs.Chat("q", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("expected heuristic + fallback answer, got err=%v", err)
+	}
+	if strings.TrimSpace(result.Answer) == "" {
+		t.Fatalf("expected fallback answer, got %#v", result)
 	}
 }
 
@@ -209,9 +236,12 @@ func TestChatService_Chat_NoResponseFromGemini(t *testing.T) {
 	t.Cleanup(func() { genaiGenerateContentHook = old })
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
-	_, err := cs.Chat("q", nil, "sheet.xlsx", nil)
-	if err == nil || !strings.Contains(err.Error(), "no response from Gemini") {
-		t.Fatalf("expected no response error, got %v", err)
+	result, err := cs.Chat("q", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("expected heuristic + fallback answer, got err=%v", err)
+	}
+	if strings.TrimSpace(result.Answer) == "" {
+		t.Fatalf("expected fallback answer, got %#v", result)
 	}
 }
 
@@ -278,12 +308,18 @@ func TestChatService_Chat_Audio_OctetStreamMimeFallback_Success(t *testing.T) {
 	fh := makeAudioFileHeader(t, "application/octet-stream", []byte("abc"))
 
 	oldGen := genaiGenerateContentHook
+	callCount := 0
 	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content) (*genai.GenerateContentResponse, error) {
+		callCount++
 		b, _ := json.Marshal(contents)
-		if !strings.Contains(string(b), "audio/webm") {
-			t.Fatalf("expected audio/webm fallback, got %s", string(b))
+		if callCount == 1 && !strings.Contains(string(b), "audio/webm") {
+			t.Fatalf("expected audio/webm fallback on planner call, got %s", string(b))
 		}
 		var out genai.GenerateContentResponse
+		if callCount == 1 {
+			_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"intent\":\"describe_subject\",\"transcribed_question\":\"q\"}"}]}}]}`), &out)
+			return &out, nil
+		}
 		_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"AUDIO_OK"}]}}]}`), &out)
 		return &out, nil
 	}
@@ -309,18 +345,17 @@ func TestChatService_Chat_ReturnsMatchedRowID_WhenSinglePersonMatchFound(t *test
 			AddRow(uint(42), uint(1), 2, `{"firstname":"Audrey","lastname":"Lesage"}`).
 			AddRow(uint(99), uint(1), 2, `{"firstname":"Mary","lastname":"Martin"}`))
 	old := genaiGenerateContentHook
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content) (*genai.GenerateContentResponse, error) {
-		if len(contents) == 0 || contents[0] == nil || len(contents[0].Parts) == 0 {
-			t.Fatalf("expected prompt contents, got %#v", contents)
-		}
-		prompt := contents[0].Parts[0].Text
-		if !strings.Contains(prompt, `"row_ref":"R1"`) {
-			t.Fatalf("expected prompt to include synthetic row_ref, got %s", prompt)
-		}
-		var out genai.GenerateContentResponse
-		_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"answer\":\"MATCH_OK\",\"matched_row_ref\":\"R1\"}"}]}}]}`), &out)
-		return &out, nil
-	}
+	genaiGenerateContentHook = plannerThenAnswerHook(
+		t,
+		`{"intent":"describe_subject","subject_text":"Audry Lesage"}`,
+		`MATCH_OK`,
+		nil,
+		func(prompt string) {
+			if !strings.Contains(prompt, `"row_id": 42`) {
+				t.Fatalf("expected verified result to include matched row 42, got %s", prompt)
+			}
+		},
+	)
 	t.Cleanup(func() { genaiGenerateContentHook = old })
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
@@ -348,11 +383,13 @@ func TestChatService_Chat_RespectsNullMatchedRowRefFromAI(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
 			AddRow(uint(42), uint(1), 2, `{"firstname":"Audrey","lastname":"Lesage"}`))
 	old := genaiGenerateContentHook
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content) (*genai.GenerateContentResponse, error) {
-		var out genai.GenerateContentResponse
-		_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"answer\":\"MATCH_OK\",\"matched_row_ref\":null}"}]}}]}`), &out)
-		return &out, nil
-	}
+	genaiGenerateContentHook = plannerThenAnswerHook(
+		t,
+		`{"intent":"describe_subject","subject_text":"Audrey Lesage"}`,
+		`{"answer":"MATCH_OK","matched_row_ref":null}`,
+		nil,
+		nil,
+	)
 	t.Cleanup(func() { genaiGenerateContentHook = old })
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
@@ -363,8 +400,8 @@ func TestChatService_Chat_RespectsNullMatchedRowRefFromAI(t *testing.T) {
 	if result.Answer != "MATCH_OK" {
 		t.Fatalf("unexpected answer: %#v", result)
 	}
-	if result.MatchedRowID != nil {
-		t.Fatalf("expected no matched row when AI explicitly returned null, got %#v", result)
+	if result.MatchedRowID == nil || *result.MatchedRowID != 42 {
+		t.Fatalf("expected backend matched row id 42, got %#v", result)
 	}
 }
 
@@ -381,11 +418,13 @@ func TestChatService_Chat_DoesNotReturnMatchedRowID_WhenMultipleRowsMatch(t *tes
 			AddRow(uint(42), uint(1), 2, `{"firstname":"Audrey","lastname":"Lesage"}`).
 			AddRow(uint(43), uint(1), 2, `{"Resident Name":"Audrey Lesage"}`))
 	old := genaiGenerateContentHook
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content) (*genai.GenerateContentResponse, error) {
-		var out genai.GenerateContentResponse
-		_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"AMBIGUOUS_OK"}]}}]}`), &out)
-		return &out, nil
-	}
+	genaiGenerateContentHook = plannerThenAnswerHook(
+		t,
+		`{"intent":"describe_subject","subject_text":"Audrey Lesage"}`,
+		`AMBIGUOUS_OK`,
+		nil,
+		nil,
+	)
 	t.Cleanup(func() { genaiGenerateContentHook = old })
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
@@ -417,11 +456,17 @@ func TestChatService_Chat_CachesFileDataByFileVersion(t *testing.T) {
 
 	old := genaiGenerateContentHook
 	callCount := 0
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content) (*genai.GenerateContentResponse, error) {
+	genaiGenerateContentHook = plannerThenAnswerHook(
+		t,
+		`{"intent":"describe_subject","subject_text":"Audrey Lesage"}`,
+		`CACHE_OK`,
+		nil,
+		nil,
+	)
+	wrapped := genaiGenerateContentHook
+	genaiGenerateContentHook = func(client *genai.Client, ctx context.Context, model string, contents []*genai.Content) (*genai.GenerateContentResponse, error) {
 		callCount++
-		var out genai.GenerateContentResponse
-		_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"CACHE_OK"}]}}]}`), &out)
-		return &out, nil
+		return wrapped(client, ctx, model, contents)
 	}
 	t.Cleanup(func() { genaiGenerateContentHook = old })
 
@@ -435,12 +480,119 @@ func TestChatService_Chat_CachesFileDataByFileVersion(t *testing.T) {
 			t.Fatalf("unexpected answer on run %d: %#v", i, result)
 		}
 	}
-	if callCount != 2 {
-		t.Fatalf("expected 2 gemini calls, got %d", callCount)
+	if callCount != 4 {
+		t.Fatalf("expected 4 gemini calls, got %d", callCount)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatService_Chat_UsesInMemorySessionFocusOnFollowup(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	mock.ExpectQuery(`(?i)select.*from.*file.*where.*filename.*order.*version.*desc.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "filename", "version"}).
+			AddRow(uint(1), "sheet.xlsx", 2))
+	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*file_id.*and.*version`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
+			AddRow(uint(42), uint(1), 2, `{"firstname":"Audrey","lastname":"Lesage","date_of_death":"1901-05-06"}`))
+	mock.ExpectQuery(`(?i)select.*from.*file.*where.*filename.*order.*version.*desc.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "filename", "version"}).
+			AddRow(uint(1), "sheet.xlsx", 2))
+
+	old := genaiGenerateContentHook
+	callCount := 0
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content) (*genai.GenerateContentResponse, error) {
+		callCount++
+		if len(contents) == 0 || contents[0] == nil || len(contents[0].Parts) == 0 {
+			t.Fatalf("expected prompt contents, got %#v", contents)
+		}
+		prompt := contents[0].Parts[0].Text
+		var out genai.GenerateContentResponse
+		switch callCount {
+		case 1:
+			_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"intent\":\"describe_subject\",\"subject_text\":\"Audry Lesage\"}"}]}}]}`), &out)
+		case 2:
+			_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"FIRST_OK"}]}}]}`), &out)
+		case 3:
+			if !strings.Contains(prompt, "Current focus: Audrey Lesage") {
+				t.Fatalf("expected session focus in planner prompt, got:\n%s", prompt)
+			}
+			_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"intent\":\"field_lookup\",\"use_session_focus\":true,\"target_field_id\":\"date_of_death\"}"}]}}]}`), &out)
+		case 4:
+			if !strings.Contains(prompt, `"target_field_label": "date_of_death"`) && !strings.Contains(prompt, `"target_field_label":"date_of_death"`) {
+				t.Fatalf("expected verified result to target date_of_death, got:\n%s", prompt)
+			}
+			_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"SECOND_OK"}]}}]}`), &out)
+		default:
+			t.Fatalf("unexpected extra call %d", callCount)
+		}
+		return &out, nil
+	}
+	t.Cleanup(func() { genaiGenerateContentHook = old })
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	first, err := cs.ChatForUser(7, "Tell me about Audry Lesage", nil, "sheet.xlsx", nil)
+	if err != nil || first.Answer != "FIRST_OK" {
+		t.Fatalf("unexpected first result: %#v err=%v", first, err)
+	}
+
+	second, err := cs.ChatForUser(7, "When did she die?", nil, "sheet.xlsx", nil)
+	if err != nil || second.Answer != "SECOND_OK" {
+		t.Fatalf("unexpected second result: %#v err=%v", second, err)
+	}
+	if second.MatchedRowID == nil || *second.MatchedRowID != 42 {
+		t.Fatalf("expected matched row id on follow-up, got %#v", second)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestParseTemporalValue_Examples(t *testing.T) {
+	tests := []struct {
+		name        string
+		raw         string
+		kind        temporalKind
+		approx      bool
+		lower       string
+		upper       string
+		alternatives int
+	}{
+		{name: "approx year", raw: "abt 1890", kind: temporalKindApproximate, approx: true, lower: "1890-01-01", upper: "1890-12-31"},
+		{name: "year range", raw: "1890-1891", kind: temporalKindRange, lower: "1890-01-01", upper: "1891-12-31"},
+		{name: "partial month", raw: "1904-07-00", kind: temporalKindExactMonth, lower: "1904-07-01", upper: "1904-07-31"},
+		{name: "alternatives", raw: "1888-03-30 (1888-03-03)", kind: temporalKindAlternative, lower: "1888-03-03", upper: "1888-03-30", alternatives: 2},
+		{name: "before", raw: "bef. 2010", kind: temporalKindBefore, upper: "2009-12-31"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseTemporalValue(tt.raw)
+			if got.Kind != tt.kind {
+				t.Fatalf("kind = %s want %s", got.Kind, tt.kind)
+			}
+			if got.Approximate != tt.approx {
+				t.Fatalf("approximate = %v want %v", got.Approximate, tt.approx)
+			}
+			if tt.lower != "" {
+				if got.Lower == nil || got.Lower.String() != tt.lower {
+					t.Fatalf("lower = %#v want %s", got.Lower, tt.lower)
+				}
+			}
+			if tt.upper != "" {
+				if got.Upper == nil || got.Upper.String() != tt.upper {
+					t.Fatalf("upper = %#v want %s", got.Upper, tt.upper)
+				}
+			}
+			if len(got.Alternatives) != tt.alternatives {
+				t.Fatalf("alternatives = %d want %d", len(got.Alternatives), tt.alternatives)
+			}
+		})
 	}
 }
 

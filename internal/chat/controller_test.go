@@ -69,18 +69,20 @@ func TestChatController_Chat_Success200(t *testing.T) {
 	// Stub Gemini
 	oldGen := genaiGenerateContentHook
 	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content) (*genai.GenerateContentResponse, error) {
-		// Inspect the actual prompt text (NOT json.Marshal(contents), which escapes quotes)
 		if len(contents) == 0 || contents[0] == nil || len(contents[0].Parts) == 0 {
 			t.Fatalf("expected contents with prompt text, got: %#v", contents)
 		}
 
 		prompt := contents[0].Parts[0].Text
-		if !strings.Contains(prompt, `"First Nation/Community":"B"`) {
-			t.Fatalf("expected prompt to include filtered row for community B; got prompt:\n%s", prompt)
-		}
-
 		var out genai.GenerateContentResponse
-		_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"OK"}]}}]}`), &out)
+		if strings.Contains(prompt, "VERIFIED RESULT (only source of truth):") {
+			if !strings.Contains(prompt, `"First Nation/Community": "B"`) && !strings.Contains(prompt, `"First Nation/Community":"B"`) {
+				t.Fatalf("expected verified result to include filtered row for community B; got prompt:\n%s", prompt)
+			}
+			_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"OK"}]}}]}`), &out)
+			return &out, nil
+		}
+		_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"intent\":\"describe_subject\"}"}]}}]}`), &out)
 		return &out, nil
 	}
 	t.Cleanup(func() { genaiGenerateContentHook = oldGen })
@@ -133,9 +135,17 @@ func TestChatController_Chat_Success200_WithMatchedRowID(t *testing.T) {
 	defer cleanup()
 
 	oldGen := genaiGenerateContentHook
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content) (*genai.GenerateContentResponse, error) {
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content) (*genai.GenerateContentResponse, error) {
+		if len(contents) == 0 || contents[0] == nil || len(contents[0].Parts) == 0 {
+			t.Fatalf("expected contents with prompt text, got: %#v", contents)
+		}
+		prompt := contents[0].Parts[0].Text
 		var out genai.GenerateContentResponse
-		_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"answer\":\"PERSON_OK\",\"matched_row_ref\":\"R1\"}"}]}}]}`), &out)
+		if strings.Contains(prompt, "VERIFIED RESULT (only source of truth):") {
+			_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"PERSON_OK"}]}}]}`), &out)
+			return &out, nil
+		}
+		_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"intent\":\"describe_subject\",\"subject_text\":\"Audry Lesage\"}"}]}}]}`), &out)
 		return &out, nil
 	}
 	t.Cleanup(func() { genaiGenerateContentHook = oldGen })
