@@ -24,14 +24,14 @@ const (
 )
 
 type temporalValue struct {
-	Raw          string          `json:"raw"`
-	Kind         temporalKind    `json:"kind"`
-	Precision    string          `json:"precision,omitempty"`
-	Approximate  bool            `json:"approximate,omitempty"`
-	Lower        *temporalBound  `json:"lower,omitempty"`
-	Upper        *temporalBound  `json:"upper,omitempty"`
+	Raw          string         `json:"raw"`
+	Kind         temporalKind   `json:"kind"`
+	Precision    string         `json:"precision,omitempty"`
+	Approximate  bool           `json:"approximate,omitempty"`
+	Lower        *temporalBound `json:"lower,omitempty"`
+	Upper        *temporalBound `json:"upper,omitempty"`
 	Alternatives []temporalValue `json:"alternatives,omitempty"`
-	Notes        []string        `json:"notes,omitempty"`
+	Notes        []string       `json:"notes,omitempty"`
 }
 
 type temporalBound struct {

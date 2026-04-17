@@ -49,17 +49,17 @@ type rawChatRow struct {
 }
 
 type chatPlannerOutput struct {
-	TranscribedQuestion   string              `json:"transcribed_question,omitempty"`
-	Intent                string              `json:"intent"`
-	SubjectText           string              `json:"subject_text,omitempty"`
-	UseSessionFocus       bool                `json:"use_session_focus,omitempty"`
-	TargetFieldID         string              `json:"target_field_id,omitempty"`
-	GroupByFieldID        string              `json:"group_by_field_id,omitempty"`
-	GroupByGranularity    string              `json:"group_by_granularity,omitempty"`
-	Filters               []chatPlannerFilter `json:"filters,omitempty"`
-	SortDirection         string              `json:"sort_direction,omitempty"`
-	Limit                 int                 `json:"limit,omitempty"`
-	ClarificationQuestion string              `json:"clarification_question,omitempty"`
+	TranscribedQuestion  string              `json:"transcribed_question,omitempty"`
+	Intent               string              `json:"intent"`
+	SubjectText          string              `json:"subject_text,omitempty"`
+	UseSessionFocus      bool                `json:"use_session_focus,omitempty"`
+	TargetFieldID        string              `json:"target_field_id,omitempty"`
+	GroupByFieldID       string              `json:"group_by_field_id,omitempty"`
+	GroupByGranularity   string              `json:"group_by_granularity,omitempty"`
+	Filters              []chatPlannerFilter `json:"filters,omitempty"`
+	SortDirection        string              `json:"sort_direction,omitempty"`
+	Limit                int                 `json:"limit,omitempty"`
+	ClarificationQuestion string             `json:"clarification_question,omitempty"`
 }
 
 type chatPlannerFilter struct {
@@ -76,17 +76,17 @@ type chatSubjectMatch struct {
 }
 
 type chatVerifiedResult struct {
-	Status                string           `json:"status"`
-	Intent                string           `json:"intent,omitempty"`
-	Question              string           `json:"question,omitempty"`
-	TargetFieldID         string           `json:"target_field_id,omitempty"`
-	TargetFieldLabel      string           `json:"target_field_label,omitempty"`
-	FocusRowIDs           []int            `json:"-"`
-	MatchedRowID          *int             `json:"-"`
-	ClarificationQuestion string           `json:"clarification_question,omitempty"`
-	Notes                 []string         `json:"notes,omitempty"`
-	Rows                  []map[string]any `json:"rows,omitempty"`
-	Value                 any              `json:"value,omitempty"`
+	Status               string           `json:"status"`
+	Intent               string           `json:"intent,omitempty"`
+	Question             string           `json:"question,omitempty"`
+	TargetFieldID        string           `json:"target_field_id,omitempty"`
+	TargetFieldLabel     string           `json:"target_field_label,omitempty"`
+	FocusRowIDs          []int            `json:"-"`
+	MatchedRowID         *int             `json:"-"`
+	ClarificationQuestion string          `json:"clarification_question,omitempty"`
+	Notes                []string         `json:"notes,omitempty"`
+	Rows                 []map[string]any `json:"rows,omitempty"`
+	Value                any              `json:"value,omitempty"`
 }
 
 const chatPlannerInstruction = `
@@ -251,7 +251,7 @@ func (cs *ChatService) planChatRequest(
 	question = strings.TrimSpace(question)
 	if question == "" && len(audioBytes) == 0 {
 		return chatPlannerOutput{
-			Intent:                "clarify",
+			Intent:               "clarify",
 			ClarificationQuestion: "What would you like to know about the data?",
 		}, question, "", nil
 	}
@@ -366,7 +366,7 @@ func heuristicChatPlan(question string, dataset *chatDatasetCacheEntry, session 
 	question = strings.TrimSpace(question)
 	if question == "" {
 		return chatPlannerOutput{
-			Intent:                "clarify",
+			Intent:               "clarify",
 			ClarificationQuestion: "What would you like to know about the data?",
 		}, true
 	}
@@ -946,11 +946,11 @@ func buildGroupCountExtremeVerifiedResult(dataset *chatDatasetCacheEntry, verifi
 
 	verified.Rows = winnerRows
 	verified.Value = map[string]any{
-		"group_by":       firstNonEmpty(plan.GroupByGranularity, "value"),
-		"group_field":    groupField.Label,
+		"group_by":      firstNonEmpty(plan.GroupByGranularity, "value"),
+		"group_field":   groupField.Label,
 		"winning_values": winnerValues,
-		"max_count":      maxCount,
-		"counted_rows":   usableRows,
+		"max_count":     maxCount,
+		"counted_rows":  usableRows,
 	}
 	return verified
 }
