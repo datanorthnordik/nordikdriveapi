@@ -138,9 +138,7 @@ func (s *chatSessionState) registerTurn(question, answer, fieldID string, focusR
 	}
 	s.UpdatedAt = time.Now().UTC()
 	s.LastFieldID = strings.TrimSpace(fieldID)
-	if len(focusRowIDs) > 0 {
-		s.FocusRowIDs = cloneIntSlice(focusRowIDs)
-	}
+	s.FocusRowIDs = cloneIntSlice(focusRowIDs)
 	question = strings.TrimSpace(question)
 	answer = strings.TrimSpace(answer)
 	if question == "" && answer == "" {

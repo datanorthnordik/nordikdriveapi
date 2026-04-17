@@ -88,6 +88,28 @@ func TestHeuristicChatPlan_GroupCountExtremeByYear(t *testing.T) {
 	}
 }
 
+func TestHeuristicChatPlan_ExistenceQuestionExtractsSearchAndFilter(t *testing.T) {
+	dataset := buildDatasetForQueryEngineTest(t, []map[string]string{
+		{"NAME": "Alice", "SCHOOL": "Shingwauk Indian Residential School", "CAUSE OF DEATH": "Drowned in the river"},
+		{"NAME": "Beatrice", "SCHOOL": "Wawanosh", "CAUSE OF DEATH": "Tuberculosis"},
+	})
+
+	question := "Did any children die from drowning at Shingwauk Indian Residential School?"
+	plan, ok := heuristicChatPlan(question, dataset, &chatSessionState{})
+	if !ok {
+		t.Fatal("expected heuristic plan")
+	}
+	if plan.Intent != "count_rows" {
+		t.Fatalf("intent = %q want count_rows", plan.Intent)
+	}
+	if len(plan.SearchTerms) == 0 || plan.SearchTerms[0] != "drowning" {
+		t.Fatalf("expected drowning search term, got %+v", plan.SearchTerms)
+	}
+	if len(plan.Filters) != 1 || plan.Filters[0].Value != "Shingwauk Indian Residential School" {
+		t.Fatalf("expected school filter, got %+v", plan.Filters)
+	}
+}
+
 func TestExecuteChatPlan_GroupCountExtremeRejectsUnsafeTieBreaker(t *testing.T) {
 	dataset := buildDatasetForQueryEngineTest(t, []map[string]string{
 		{"NAME": "Alice", "SCHOOL": "Shingwauk", "DATE OF DEATH": "1890-05-06"},
@@ -111,6 +133,21 @@ func TestExecuteChatPlan_GroupCountExtremeRejectsUnsafeTieBreaker(t *testing.T) 
 	}
 	if len(verified.Notes) == 0 {
 		t.Fatalf("expected explanatory note, got %#v", verified)
+	}
+}
+
+func TestApplyMultiColumnFilter_MatchesStemmedKeywords(t *testing.T) {
+	dataset := buildDatasetForQueryEngineTest(t, []map[string]string{
+		{"NAME": "Alice", "CAUSE OF DEATH": "Drowned while crossing the river"},
+		{"NAME": "Beatrice", "CAUSE OF DEATH": "Tuberculosis"},
+	})
+
+	filtered := applyMultiColumnFilter(dataset.rows, dataset, "drowning")
+	if len(filtered) != 1 {
+		t.Fatalf("expected one fuzzy match, got %d", len(filtered))
+	}
+	if filtered[0].primaryName() != "Alice" {
+		t.Fatalf("expected Alice match, got %+v", filtered)
 	}
 }
 
@@ -151,8 +188,65 @@ func TestChatService_Chat_OverridesClarifyForGroupedDeathYearQuestion(t *testing
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if result.Answer != "GROUPED_OK" {
+	if result.Answer != "1890 had the highest number of deaths, with 2 recorded deaths." {
 		t.Fatalf("unexpected answer: %#v", result)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatService_Chat_DoesNotLeakPriorFocusIntoFreshSearchQuestion(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	mock.ExpectQuery(`(?i)select.*from.*file.*where.*filename.*order.*version.*desc.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "filename", "version", "columns_order"}).
+			AddRow(uint(1), "sheet.xlsx", 2, `["NAME","SCHOOL","CAUSE OF DEATH"]`))
+	mock.ExpectQuery(`(?i)select.*from.*file_data.*where.*file_id.*and.*version`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
+			AddRow(uint(42), uint(1), 2, `{"NAME":"Audrey Lesage","SCHOOL":"Other School","CAUSE OF DEATH":"Tuberculosis"}`).
+			AddRow(uint(43), uint(1), 2, `{"NAME":"Alice","SCHOOL":"Shingwauk Indian Residential School","CAUSE OF DEATH":"Drowned while crossing the river"}`))
+	mock.ExpectQuery(`(?i)select.*from.*file.*where.*filename.*order.*version.*desc.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "filename", "version", "columns_order"}).
+			AddRow(uint(1), "sheet.xlsx", 2, `["NAME","SCHOOL","CAUSE OF DEATH"]`))
+
+	old := genaiGenerateContentHook
+	callCount := 0
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content) (*genai.GenerateContentResponse, error) {
+		callCount++
+		prompt := contents[0].Parts[0].Text
+		var out genai.GenerateContentResponse
+		switch callCount {
+		case 1:
+			_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"intent\":\"describe_subject\",\"subject_text\":\"Audrey Lesage\"}"}]}}]}`), &out)
+		case 2:
+			_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"FIRST_OK"}]}}]}`), &out)
+		case 3:
+			if strings.Contains(prompt, "Current focus: Audrey Lesage") {
+				t.Fatalf("fresh search question should not include prior focus in planner prompt:\n%s", prompt)
+			}
+			_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"intent\":\"count_rows\",\"use_session_focus\":true,\"search_terms\":[\"drowning\"],\"filters\":[{\"field_id\":\"school\",\"op\":\"eq\",\"value\":\"Shingwauk Indian Residential School\"}]}"}]}}]}`), &out)
+		default:
+			t.Fatalf("unexpected extra LLM call %d", callCount)
+		}
+		return &out, nil
+	}
+	t.Cleanup(func() { genaiGenerateContentHook = old })
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	first, err := cs.ChatForUser(9, "Tell me about Audrey Lesage", nil, "sheet.xlsx", nil)
+	if err != nil || first.Answer != "FIRST_OK" {
+		t.Fatalf("unexpected first result: %#v err=%v", first, err)
+	}
+
+	second, err := cs.ChatForUser(9, "Did any children die from drowning at Shingwauk Indian Residential School?", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("unexpected second err: %v", err)
+	}
+	if !strings.Contains(second.Answer, "Yes. I found 1 matching record") {
+		t.Fatalf("expected deterministic yes answer, got %#v", second)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
