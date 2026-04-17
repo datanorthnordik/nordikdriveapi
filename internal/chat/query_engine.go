@@ -295,7 +295,7 @@ func (cs *ChatService) ChatForUser(userID int64, question string, audioFile *mul
 	} else {
 		session.PendingPrompt = ""
 	}
-	session.registerTurn(resolvedQuestion, answer, verified.TargetFieldID, verified.FocusRowIDs)
+	session.registerTurn(resolvedQuestion, answer, verified.TargetFieldID, focusIDsForSession(verified))
 	cs.saveSession(userID, session)
 
 	return &ChatResult{
@@ -335,6 +335,7 @@ func (cs *ChatService) planChatRequest(
 	session *chatSessionState,
 ) (chatPlannerOutput, string, string, error) {
 	question = strings.TrimSpace(question)
+	useSessionContext := shouldUseSessionContext(question, session)
 	if question == "" && len(audioBytes) == 0 {
 		return chatPlannerOutput{
 			Intent:                "clarify",
@@ -342,7 +343,7 @@ func (cs *ChatService) planChatRequest(
 		}, question, "", nil
 	}
 
-	prompt := buildChatPlannerPrompt(question, dataset, session)
+	prompt := buildChatPlannerPrompt(question, dataset, session, useSessionContext)
 	raw, usedModel, err := cs.generateFromPrompt(ctx, prompt, audioBytes, audioMime)
 	if err != nil {
 		if len(audioBytes) == 0 {
@@ -363,6 +364,9 @@ func (cs *ChatService) planChatRequest(
 	if heuristic, ok := heuristicChatPlan(question, dataset, session); ok {
 		plan = mergePlannerWithHeuristic(plan, heuristic)
 	}
+	if !useSessionContext {
+		plan.UseSessionFocus = false
+	}
 
 	resolvedQuestion := strings.TrimSpace(plan.TranscribedQuestion)
 	if resolvedQuestion == "" {
@@ -374,11 +378,15 @@ func (cs *ChatService) planChatRequest(
 	return plan, resolvedQuestion, usedModel, nil
 }
 
-func buildChatPlannerPrompt(question string, dataset *chatDatasetCacheEntry, session *chatSessionState) string {
+func buildChatPlannerPrompt(question string, dataset *chatDatasetCacheEntry, session *chatSessionState, useSessionContext bool) string {
+	sessionSummary := "No active session context for this question."
+	if useSessionContext {
+		sessionSummary = session.summaryForPrompt(dataset)
+	}
 	return fmt.Sprintf(
 		"%s\n\nSESSION CONTEXT:\n%s\n\nSCHEMA:\n%s\n\nLATEST USER QUESTION:\n%s",
 		strings.TrimSpace(chatPlannerInstruction),
-		session.summaryForPrompt(dataset),
+		sessionSummary,
 		dataset.schema.describeForPlanner(),
 		strings.TrimSpace(question),
 	)
@@ -469,8 +477,9 @@ func heuristicChatPlan(question string, dataset *chatDatasetCacheEntry, session 
 
 	qnorm := normalizeSearchText(question)
 	plan := chatPlannerOutput{Limit: 5}
+	useSessionContext := shouldUseSessionContext(question, session)
 
-	if hasSessionPronoun(qnorm) && len(session.FocusRowIDs) > 0 {
+	if useSessionContext && hasSessionPronoun(" "+qnorm+" ") && len(session.FocusRowIDs) > 0 {
 		plan.UseSessionFocus = true
 	}
 
@@ -493,6 +502,8 @@ func heuristicChatPlan(question string, dataset *chatDatasetCacheEntry, session 
 	}
 
 	switch {
+	case isExistenceCountQuestion(qnorm):
+		plan.Intent = "count_rows"
 	case containsAny(qnorm, "how many", "count", "number of"):
 		plan.Intent = "count_rows"
 	case containsAny(qnorm, "earliest", "first ", " first", "oldest"):
@@ -527,6 +538,14 @@ func heuristicChatPlan(question string, dataset *chatDatasetCacheEntry, session 
 		plan.TargetFieldID = session.LastFieldID
 	}
 	plan.Filters = inferQuestionFilters(question, dataset, plan.Filters)
+	if len(plan.SearchTerms) == 0 {
+		if plan.Intent == "count_rows" {
+			plan.SearchTerms = inferSearchTerms(question, dataset, plan.Filters)
+		}
+	}
+	if !useSessionContext {
+		plan.UseSessionFocus = false
+	}
 
 	return plan, true
 }
@@ -567,6 +586,7 @@ func mergePlannerWithHeuristic(primary, heuristic chatPlannerOutput) chatPlanner
 			primary.SortDirection = heuristic.SortDirection
 		}
 		primary.Filters = mergePlannerFilters(primary.Filters, heuristic.Filters)
+		primary.SearchTerms = mergeSearchTerms(primary.SearchTerms, heuristic.SearchTerms)
 	}
 
 	if primary.Limit <= 0 {
@@ -576,6 +596,33 @@ func mergePlannerWithHeuristic(primary, heuristic chatPlannerOutput) chatPlanner
 		primary.Limit = 5
 	}
 	return primary
+}
+
+func mergeSearchTerms(primary, secondary []string) []string {
+	if len(secondary) == 0 {
+		return primary
+	}
+	merged := make([]string, 0, len(primary)+len(secondary))
+	seen := map[string]struct{}{}
+	add := func(term string) {
+		term = strings.TrimSpace(term)
+		key := normalizeSearchText(term)
+		if key == "" {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		merged = append(merged, term)
+	}
+	for _, term := range primary {
+		add(term)
+	}
+	for _, term := range secondary {
+		add(term)
+	}
+	return merged
 }
 
 func mergePlannerFilters(primary, secondary []chatPlannerFilter) []chatPlannerFilter {
@@ -613,6 +660,9 @@ func (cs *ChatService) answerFromVerifiedResult(
 	session *chatSessionState,
 	verified chatVerifiedResult,
 ) (string, error) {
+	if answer, ok := renderDeterministicAnswer(question, dataset, verified); ok {
+		return answer, nil
+	}
 	prompt, fallback := buildVerifiedAnswerPrompt(question, dataset, session, verified)
 	answer, usedModel, err := cs.generateFromPrompt(ctx, prompt, nil, "")
 	if err != nil {
@@ -637,13 +687,137 @@ func (cs *ChatService) answerFromVerifiedResult(
 func buildVerifiedAnswerPrompt(question string, dataset *chatDatasetCacheEntry, session *chatSessionState, verified chatVerifiedResult) (string, string) {
 	resultJSON, _ := json.MarshalIndent(verified, "", "  ")
 	prompt := fmt.Sprintf(
-		"%s\n\nRECENT CONTEXT:\n%s\n\nUSER QUESTION:\n%s\n\nVERIFIED RESULT (only source of truth):\nNote: This includes ALL matching rows with FULL field details.\n%s",
+		"%s\n\nUSER QUESTION:\n%s\n\nVERIFIED RESULT (only source of truth):\n%s",
 		strings.TrimSpace(chatVerifiedAnswerInstruction),
-		session.summaryForPrompt(dataset),
 		strings.TrimSpace(question),
 		string(resultJSON),
 	)
 	return prompt, renderVerifiedResultFallback(verified)
+}
+
+func renderDeterministicAnswer(question string, dataset *chatDatasetCacheEntry, verified chatVerifiedResult) (string, bool) {
+	switch verified.Status {
+	case "not_found":
+		if isExistenceCountQuestion(normalizeSearchText(question)) || verified.Intent == "count_rows" || verified.Intent == "group_count_extreme" {
+			return "No. I couldn't find any matching records in the available data.", true
+		}
+		return "", false
+	case "cannot_determine_exactly":
+		if len(verified.Notes) > 0 {
+			return "I can't determine that exactly from the available data. " + strings.Join(verified.Notes, " "), true
+		}
+		return "I can't determine that exactly from the available data.", true
+	case "needs_clarification":
+		if verified.ClarificationQuestion != "" {
+			return verified.ClarificationQuestion, true
+		}
+		return "Could you clarify what you mean?", true
+	}
+
+	switch verified.Intent {
+	case "count_rows":
+		count, ok := verified.Value.(int)
+		if !ok {
+			return "", false
+		}
+		if isExistenceCountQuestion(normalizeSearchText(question)) {
+			if count == 0 {
+				return "No. I couldn't find any matching records in the available data.", true
+			}
+			return fmt.Sprintf("Yes. I found %d matching record%s in the available data.", count, pluralSuffix(count)), true
+		}
+		return fmt.Sprintf("I found %d matching record%s in the available data.", count, pluralSuffix(count)), true
+	case "group_count_extreme":
+		values, maxCount, ok := extractGroupCountSummary(verified)
+		if !ok {
+			return "", false
+		}
+		noun := groupedEventNoun(question)
+		countPhrase := groupedCountPhrase(noun, maxCount)
+		if len(values) == 1 {
+			return fmt.Sprintf("%s had the highest number of %s, with %s.", values[0], noun, countPhrase), true
+		}
+		return fmt.Sprintf("%s were tied for the highest number of %s, with %s each.", joinWithAnd(values), noun, countPhrase), true
+	}
+	return "", false
+}
+
+func extractGroupCountSummary(verified chatVerifiedResult) ([]string, int, bool) {
+	valueMap, ok := verified.Value.(map[string]any)
+	if !ok {
+		return nil, 0, false
+	}
+	maxCount, ok := valueMap["max_count"].(int)
+	if !ok {
+		return nil, 0, false
+	}
+	rawValues, ok := valueMap["winning_values"].([]string)
+	if ok && len(rawValues) > 0 {
+		return rawValues, maxCount, true
+	}
+	if rows := verified.Rows; len(rows) > 0 {
+		values := make([]string, 0, len(rows))
+		for _, row := range rows {
+			if v, ok := row["value"].(string); ok && strings.TrimSpace(v) != "" {
+				values = append(values, v)
+			}
+		}
+		if len(values) > 0 {
+			return values, maxCount, true
+		}
+	}
+	return nil, 0, false
+}
+
+func groupedEventNoun(question string) string {
+	qnorm := normalizeSearchText(question)
+	switch {
+	case containsAny(qnorm, "death", "deaths", "died"):
+		return "deaths"
+	case containsAny(qnorm, "birth", "births", "born"):
+		return "births"
+	case containsAny(qnorm, "admission", "admissions", "admitted", "admit"):
+		return "admissions"
+	case containsAny(qnorm, "discharge", "discharges", "discharged"):
+		return "discharges"
+	default:
+		return "matching records"
+	}
+}
+
+func groupedCountPhrase(noun string, count int) string {
+	switch noun {
+	case "deaths":
+		return fmt.Sprintf("%d recorded death%s", count, pluralSuffix(count))
+	case "births":
+		return fmt.Sprintf("%d recorded birth%s", count, pluralSuffix(count))
+	case "admissions":
+		return fmt.Sprintf("%d recorded admission%s", count, pluralSuffix(count))
+	case "discharges":
+		return fmt.Sprintf("%d recorded discharge%s", count, pluralSuffix(count))
+	default:
+		return fmt.Sprintf("%d matching record%s", count, pluralSuffix(count))
+	}
+}
+
+func pluralSuffix(count int) string {
+	if count == 1 {
+		return ""
+	}
+	return "s"
+}
+
+func joinWithAnd(values []string) string {
+	switch len(values) {
+	case 0:
+		return ""
+	case 1:
+		return values[0]
+	case 2:
+		return values[0] + " and " + values[1]
+	default:
+		return strings.Join(values[:len(values)-1], ", ") + ", and " + values[len(values)-1]
+	}
 }
 
 func renderVerifiedResultFallback(verified chatVerifiedResult) string {
@@ -847,6 +1021,19 @@ func executeChatPlan(
 		verified.Notes = append(verified.Notes, "The question could not be mapped safely.")
 		return verified
 	}
+}
+
+func focusIDsForSession(verified chatVerifiedResult) []int {
+	if verified.Status != "ok" {
+		return nil
+	}
+	switch verified.Intent {
+	case "describe_subject", "field_lookup", "extreme":
+		if len(verified.FocusRowIDs) > 0 && len(verified.FocusRowIDs) <= 4 {
+			return cloneIntSlice(verified.FocusRowIDs)
+		}
+	}
+	return nil
 }
 
 func buildDescribeVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow, isFollowUp bool) chatVerifiedResult {
@@ -1311,7 +1498,6 @@ func applyMultiColumnFilter(rows []cachedChatRow, dataset *chatDatasetCacheEntry
 	filtered := make([]cachedChatRow, 0, len(rows))
 
 	for _, row := range rows {
-		// Search across all fields for the keyword
 		found := false
 		for _, field := range dataset.schema.Fields {
 			value := strings.TrimSpace(row.valueByField(field.ID, &dataset.schema))
@@ -1319,7 +1505,7 @@ func applyMultiColumnFilter(rows []cachedChatRow, dataset *chatDatasetCacheEntry
 				continue
 			}
 			valueNorm := normalizeSearchText(value)
-			if strings.Contains(valueNorm, keywordNorm) {
+			if valueMatchesSearchTerm(valueNorm, keywordNorm) {
 				found = true
 				break
 			}
@@ -1331,6 +1517,85 @@ func applyMultiColumnFilter(rows []cachedChatRow, dataset *chatDatasetCacheEntry
 	}
 
 	return filtered
+}
+
+func valueMatchesSearchTerm(valueNorm, keywordNorm string) bool {
+	if valueNorm == "" || keywordNorm == "" {
+		return false
+	}
+	if strings.Contains(valueNorm, keywordNorm) || strings.Contains(keywordNorm, valueNorm) {
+		return true
+	}
+
+	valueTokens := strings.Fields(valueNorm)
+	keywordTokens := strings.Fields(keywordNorm)
+	if len(keywordTokens) > 1 {
+		for _, keywordToken := range keywordTokens {
+			matched := false
+			for _, valueToken := range valueTokens {
+				if tokenMatchesSearchTerm(valueToken, keywordToken) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return false
+			}
+		}
+		return true
+	}
+
+	for _, valueToken := range valueTokens {
+		if tokenMatchesSearchTerm(valueToken, keywordNorm) {
+			return true
+		}
+	}
+	return false
+}
+
+func tokenMatchesSearchTerm(valueToken, keywordToken string) bool {
+	valueToken = strings.TrimSpace(valueToken)
+	keywordToken = strings.TrimSpace(keywordToken)
+	if valueToken == "" || keywordToken == "" {
+		return false
+	}
+	if valueToken == keywordToken || strings.Contains(valueToken, keywordToken) || strings.Contains(keywordToken, valueToken) {
+		return true
+	}
+
+	valueRoot := searchTokenRoot(valueToken)
+	keywordRoot := searchTokenRoot(keywordToken)
+	if valueRoot != "" && keywordRoot != "" && (valueRoot == keywordRoot || strings.Contains(valueRoot, keywordRoot) || strings.Contains(keywordRoot, valueRoot)) {
+		return true
+	}
+
+	maxLen := maxInt(len(valueToken), len(keywordToken))
+	if maxLen >= 5 && levenshteinDistance(valueToken, keywordToken) <= 1 {
+		return true
+	}
+	if maxLen >= 7 && valueRoot != "" && keywordRoot != "" && levenshteinDistance(valueRoot, keywordRoot) <= 1 {
+		return true
+	}
+	return false
+}
+
+func searchTokenRoot(token string) string {
+	token = strings.TrimSpace(token)
+	if len(token) <= 4 {
+		return token
+	}
+	suffixes := []string{"ingly", "edly", "ation", "ition", "ments", "ment", "ings", "ness", "tion", "sion", "edly", "edly", "ing", "ers", "ies", "ied", "est", "ous", "ive", "ful", "ed", "es", "s"}
+	root := token
+	for _, suffix := range suffixes {
+		if len(root) > len(suffix)+2 && strings.HasSuffix(root, suffix) {
+			root = strings.TrimSuffix(root, suffix)
+			break
+		}
+	}
+	if strings.HasSuffix(root, "i") && len(root) > 3 {
+		root = strings.TrimSuffix(root, "i") + "y"
+	}
+	return root
 }
 
 func rowMatchesFilter(row cachedChatRow, field *chatSchemaField, filter chatPlannerFilter) bool {
@@ -1464,10 +1729,12 @@ func selectSubjectRows(matches []chatSubjectMatch) []cachedChatRow {
 }
 
 func sampleRowsForPrompt(dataset *chatDatasetCacheEntry, rows []cachedChatRow, targetFieldID string, limit int, includeAll bool) []map[string]any {
-	// Always include all rows and all fields for complete context
-	out := make([]map[string]any, 0, len(rows))
-	for idx := 0; idx < len(rows); idx++ {
-		out = append(out, dataset.rowPromptData(rows[idx], targetFieldID, true))
+	if limit <= 0 || limit > len(rows) {
+		limit = len(rows)
+	}
+	out := make([]map[string]any, 0, limit)
+	for idx := 0; idx < limit; idx++ {
+		out = append(out, dataset.rowPromptData(rows[idx], targetFieldID, includeAll))
 	}
 	return out
 }
@@ -2013,14 +2280,20 @@ func inferQuestionFilters(question string, dataset *chatDatasetCacheEntry, exist
 		return existing
 	}
 
-	filters := make([]chatPlannerFilter, 0, len(existing)+2)
+	filters := make([]chatPlannerFilter, 0, len(existing)+1)
 	filters = append(filters, existing...)
 	seenFields := map[string]struct{}{}
 	for _, filter := range existing {
 		seenFields[filter.FieldID] = struct{}{}
 	}
 
-	// Infer location/community/school filters from the question
+	type inferredFilterCandidate struct {
+		field *chatSchemaField
+		value string
+		score float64
+	}
+	best := inferredFilterCandidate{}
+
 	for idx := range dataset.schema.Fields {
 		field := &dataset.schema.Fields[idx]
 		if _, ok := seenFields[field.ID]; ok {
@@ -2029,14 +2302,19 @@ func inferQuestionFilters(question string, dataset *chatDatasetCacheEntry, exist
 		if !fieldSupportsValueInference(field) {
 			continue
 		}
-		if value, ok := dataset.bestFilterValueForQuestion(field, qnorm); ok {
-			filters = append(filters, chatPlannerFilter{
-				FieldID: field.ID,
-				Op:      "eq",
-				Value:   value,
-			})
-			seenFields[field.ID] = struct{}{}
+		if value, score, ok := dataset.bestFilterValueForQuestion(field, qnorm); ok {
+			score += filterFieldPreference(field, qnorm)
+			if score > best.score {
+				best = inferredFilterCandidate{field: field, value: value, score: score}
+			}
 		}
+	}
+	if best.field != nil {
+		filters = append(filters, chatPlannerFilter{
+			FieldID: best.field.ID,
+			Op:      "eq",
+			Value:   best.value,
+		})
 	}
 
 	return filters
@@ -2054,6 +2332,98 @@ func fieldSupportsValueInference(field *chatSchemaField) bool {
 		return containsAny(blob, "school", "institution", "community", "reserve", "location", "place")
 	default:
 		return false
+	}
+}
+
+func filterFieldPreference(field *chatSchemaField, questionNorm string) float64 {
+	if field == nil {
+		return 0
+	}
+	blob := fieldSearchBlob(field)
+	score := 0.0
+	switch field.Kind {
+	case chatFieldKindLocation:
+		score += 0.10
+	case chatFieldKindCommunity:
+		score += 0.05
+	}
+	if containsAny(questionNorm, "school", "residential school", "institution") && containsAny(blob, "school", "institution", "residential") {
+		score += 0.35
+	}
+	if containsAny(questionNorm, "community", "reserve", "home") && containsAny(blob, "community", "reserve", "home") {
+		score += 0.25
+	}
+	if containsAny(questionNorm, "at ", " in ") && containsAny(blob, "school", "location", "place", "institution") {
+		score += 0.10
+	}
+	return score
+}
+
+func inferSearchTerms(question string, dataset *chatDatasetCacheEntry, filters []chatPlannerFilter) []string {
+	qnorm := normalizeSearchText(question)
+	if qnorm == "" {
+		return nil
+	}
+
+	excluded := map[string]struct{}{}
+	for _, filter := range filters {
+		field, ok := dataset.schema.resolveField(filter.FieldID)
+		if !ok {
+			continue
+		}
+		addNormalizedPhraseTokens(excluded, field.Label)
+		addNormalizedPhraseTokens(excluded, filter.Value)
+		addNormalizedPhraseTokens(excluded, filter.Value2)
+	}
+	for _, field := range dataset.schema.Fields {
+		addNormalizedPhraseTokens(excluded, field.Label)
+		for _, alias := range field.Aliases {
+			addNormalizedPhraseTokens(excluded, alias)
+		}
+	}
+
+	stopWords := map[string]struct{}{
+		"a": {}, "about": {}, "admissions": {}, "admitted": {}, "after": {}, "all": {}, "an": {}, "and": {}, "any": {}, "are": {}, "at": {},
+		"before": {}, "birth": {}, "births": {}, "by": {}, "child": {}, "children": {}, "community": {}, "count": {}, "date": {}, "dates": {},
+		"death": {}, "deaths": {}, "describe": {}, "did": {}, "do": {}, "does": {}, "during": {}, "earliest": {}, "find": {}, "first": {},
+		"for": {}, "from": {}, "had": {}, "has": {}, "have": {}, "highest": {}, "how": {}, "in": {}, "indian": {}, "information": {},
+		"institution": {}, "is": {}, "it": {}, "its": {}, "last": {}, "latest": {}, "least": {}, "list": {}, "many": {}, "month": {}, "months": {},
+		"most": {}, "much": {}, "number": {}, "occur": {}, "occurred": {}, "of": {}, "on": {}, "or": {}, "records": {}, "residential": {},
+		"same": {}, "school": {}, "show": {}, "student": {}, "students": {}, "tell": {}, "that": {}, "the": {}, "their": {}, "there": {},
+		"these": {}, "they": {}, "this": {}, "those": {}, "total": {}, "was": {}, "were": {}, "what": {}, "when": {}, "where": {}, "which": {},
+		"who": {}, "with": {}, "year": {}, "years": {},
+	}
+
+	terms := make([]string, 0, 3)
+	seen := map[string]struct{}{}
+	for _, token := range strings.Fields(qnorm) {
+		if len(token) < 4 {
+			continue
+		}
+		if _, ok := stopWords[token]; ok {
+			continue
+		}
+		if _, ok := excluded[token]; ok {
+			continue
+		}
+		if _, ok := seen[token]; ok {
+			continue
+		}
+		seen[token] = struct{}{}
+		terms = append(terms, token)
+		if len(terms) >= 3 {
+			break
+		}
+	}
+	return terms
+}
+
+func addNormalizedPhraseTokens(dest map[string]struct{}, value string) {
+	for _, token := range strings.Fields(normalizeSearchText(value)) {
+		if token == "" {
+			continue
+		}
+		dest[token] = struct{}{}
 	}
 }
 
@@ -2089,9 +2459,9 @@ func (dataset *chatDatasetCacheEntry) rowsForCommunities(communities []string) [
 	return out
 }
 
-func (dataset *chatDatasetCacheEntry) bestFilterValueForQuestion(field *chatSchemaField, questionNorm string) (string, bool) {
+func (dataset *chatDatasetCacheEntry) bestFilterValueForQuestion(field *chatSchemaField, questionNorm string) (string, float64, bool) {
 	if dataset == nil || field == nil || questionNorm == "" {
-		return "", false
+		return "", 0, false
 	}
 
 	bestRaw := ""
@@ -2134,9 +2504,9 @@ func (dataset *chatDatasetCacheEntry) bestFilterValueForQuestion(field *chatSche
 	}
 
 	if bestScore > 0.5 {
-		return bestRaw, true
+		return bestRaw, bestScore, true
 	}
-	return "", false
+	return "", 0, false
 }
 
 // scoreLocationMatch checks if a normalized location appears in the question
@@ -2336,8 +2706,50 @@ func detectGroupedCountGranularity(questionNorm string) (string, bool) {
 	return granularity, true
 }
 
+func shouldUseSessionContext(question string, session *chatSessionState) bool {
+	if session == nil {
+		return false
+	}
+	qnorm := normalizeSearchText(question)
+	if qnorm == "" {
+		return false
+	}
+	padded := " " + qnorm + " "
+	if hasSessionPronoun(padded) {
+		return len(session.FocusRowIDs) > 0
+	}
+	if containsAny(qnorm, "what about", "how about", "same person", "same one", "same child", "same student", "that person", "that one", "this person", "this one") {
+		return len(session.FocusRowIDs) > 0
+	}
+	if session.PendingPrompt != "" && isLikelyClarificationReply(qnorm) {
+		return true
+	}
+	return false
+}
+
+func isLikelyClarificationReply(questionNorm string) bool {
+	if questionNorm == "" {
+		return false
+	}
+	if containsAny(questionNorm, "did any", "were there any", "are there any", "is there any", "how many", "count", "number of", "in what year", "in what years", "which year", "which years", "tell me", "list ", "show ", "find ", "search ", "who ", "what ", "when ", "where ") {
+		return false
+	}
+	return len(strings.Fields(questionNorm)) <= 8
+}
+
+func isExistenceCountQuestion(questionNorm string) bool {
+	return containsAny(questionNorm,
+		"did any",
+		"were there any",
+		"are there any",
+		"is there any",
+		"was there any",
+		"have any",
+	)
+}
+
 func hasSessionPronoun(questionNorm string) bool {
-	return containsAny(questionNorm, " he ", " she ", " they ", " him ", " her ", " same person", " same one", " that person")
+	return containsAny(questionNorm, " he ", " she ", " they ", " them ", " him ", " her ", " his ", " their ", " same person", " same one", " that person", " that one", " this one", " this person")
 }
 
 func scoreNameMatch(query, candidate string) float64 {
