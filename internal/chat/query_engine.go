@@ -976,6 +976,12 @@ func executeChatPlan(
 		}
 
 		filtered := applyFilter(candidates, field, filter)
+		if (filter.Op == "eq" || filter.Op == "contains") && isLocationLikeField(field) {
+			if preferred := applyPreferredLocationFilter(candidates, dataset, field, filter.Value); len(preferred) > 0 {
+				candidates = preferred
+				continue
+			}
+		}
 		if len(filtered) == 0 && prevCount > 0 {
 			// Filter eliminated all results - this might be a typo or wrong filter value
 			verified.Status = "not_found"
@@ -1652,11 +1658,26 @@ func rowMatchesFilter(row cachedChatRow, field *chatSchemaField, filter chatPlan
 		case "contains":
 			return strings.Contains(normalizeSearchText(raw), normalizeSearchText(filter.Value))
 		}
+	case chatFieldKindCommunity, chatFieldKindLocation:
+		switch filter.Op {
+		case "eq", "contains":
+			return scopedLocationMatch(raw, filter.Value)
+		case "yes":
+			return isTruthy(raw)
+		case "no":
+			return isFalsy(raw)
+		}
 	default:
 		switch filter.Op {
 		case "eq":
+			if isLocationLikeField(field) {
+				return scopedLocationMatch(raw, filter.Value)
+			}
 			return normalizeSearchText(raw) == normalizeSearchText(filter.Value)
 		case "contains":
+			if isLocationLikeField(field) {
+				return scopedLocationMatch(raw, filter.Value)
+			}
 			return strings.Contains(normalizeSearchText(raw), normalizeSearchText(filter.Value))
 		case "yes":
 			return isTruthy(raw)
@@ -1665,6 +1686,103 @@ func rowMatchesFilter(row cachedChatRow, field *chatSchemaField, filter chatPlan
 		}
 	}
 	return false
+}
+
+func scopedLocationMatch(raw, target string) bool {
+	rawNorm := normalizeSearchText(raw)
+	targetNorm := normalizeSearchText(target)
+	if rawNorm == "" || targetNorm == "" {
+		return false
+	}
+	if rawNorm == targetNorm || strings.Contains(rawNorm, targetNorm) || strings.Contains(targetNorm, rawNorm) {
+		return true
+	}
+	score := scoreLocationMatch(targetNorm, rawNorm)
+	if reverse := scoreLocationMatch(rawNorm, targetNorm); reverse > score {
+		score = reverse
+	}
+	return score >= 0.45
+}
+
+func isLocationLikeField(field *chatSchemaField) bool {
+	if field == nil {
+		return false
+	}
+	switch field.Kind {
+	case chatFieldKindCommunity, chatFieldKindLocation:
+		return true
+	default:
+		return fieldSupportsValueInference(field)
+	}
+}
+
+func applyPreferredLocationFilter(rows []cachedChatRow, dataset *chatDatasetCacheEntry, preferredField *chatSchemaField, target string) []cachedChatRow {
+	if dataset == nil || strings.TrimSpace(target) == "" {
+		return nil
+	}
+
+	groups := map[string][]*chatSchemaField{
+		"school":    {},
+		"community": {},
+		"other":     {},
+	}
+	for idx := range dataset.schema.Fields {
+		field := &dataset.schema.Fields[idx]
+		if !isLocationLikeField(field) {
+			continue
+		}
+		groups[locationFieldCategory(field)] = append(groups[locationFieldCategory(field)], field)
+	}
+
+	order := []string{"school", "community", "other"}
+	switch locationFieldCategory(preferredField) {
+	case "community":
+		order = []string{"community", "school", "other"}
+	case "school":
+		order = []string{"school", "community", "other"}
+	}
+
+	for _, category := range order {
+		filtered := applyLocationFields(rows, dataset, groups[category], target)
+		if len(filtered) > 0 {
+			return filtered
+		}
+	}
+	return nil
+}
+
+func applyLocationFields(rows []cachedChatRow, dataset *chatDatasetCacheEntry, fields []*chatSchemaField, target string) []cachedChatRow {
+	if len(fields) == 0 {
+		return nil
+	}
+	filtered := make([]cachedChatRow, 0, len(rows))
+	for _, row := range rows {
+		for _, field := range fields {
+			if field == nil {
+				continue
+			}
+			if scopedLocationMatch(row.valueByField(field.ID, &dataset.schema), target) {
+				filtered = append(filtered, row)
+				break
+			}
+		}
+	}
+	return filtered
+}
+
+func locationFieldCategory(field *chatSchemaField) string {
+	if field == nil {
+		return "other"
+	}
+	blob := fieldSearchBlob(field)
+	switch {
+	case containsAny(blob, "school", "institution", "residential"):
+		return "school"
+	case containsAny(blob, "community", "reserve", "first nation", "home"):
+		return "community"
+	default:
+		return "other"
+	}
 }
 
 func matchSubjectRows(rows []cachedChatRow, subject string) []chatSubjectMatch {
@@ -1922,14 +2040,24 @@ func inferFieldKind(label string, rows []rawChatRow) chatFieldKind {
 		return chatFieldKindBoolean
 	case strings.Contains(lower, "community"), strings.Contains(lower, "reserve"), strings.Contains(lower, "first nation"), strings.Contains(lower, "home"):
 		return chatFieldKindCommunity
+	case strings.Contains(lower, "place of death"),
+		strings.Contains(lower, "location of death"),
+		strings.Contains(lower, "death location"),
+		strings.Contains(lower, "death place"),
+		strings.Contains(lower, "place died"),
+		strings.Contains(lower, "place of burial"),
+		strings.Contains(lower, "burial place"),
+		strings.Contains(lower, "school"),
+		strings.Contains(lower, "institution"),
+		(strings.Contains(lower, "location") && !strings.Contains(lower, "date")),
+		(strings.Contains(lower, "place") && !strings.Contains(lower, "date")):
+		return chatFieldKindLocation
 	case strings.Contains(lower, "name") && !strings.Contains(lower, "parent") && !strings.Contains(lower, "sibling"):
 		return chatFieldKindName
 	case strings.Contains(lower, "date"), strings.Contains(lower, "birth"), strings.Contains(lower, "death"), strings.Contains(lower, "burial"), strings.Contains(lower, "admit"), strings.Contains(lower, "discharge"):
 		return chatFieldKindDate
 	case strings.Contains(lower, "age"), strings.Contains(lower, "number"), lower == "no.", lower == "no":
 		return chatFieldKindNumber
-	case strings.Contains(lower, "place"), strings.Contains(lower, "location"), strings.Contains(lower, "school"):
-		return chatFieldKindLocation
 	}
 
 	sampleCount := 0

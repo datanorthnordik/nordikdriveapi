@@ -151,6 +151,53 @@ func TestApplyMultiColumnFilter_MatchesStemmedKeywords(t *testing.T) {
 	}
 }
 
+func TestScopedLocationMatch_AllowsShortAndLongSchoolNames(t *testing.T) {
+	if !scopedLocationMatch("Shingwauk", "Shingwauk Indian Residential School") {
+		t.Fatal("expected scoped location match to treat Shingwauk as matching the full school name")
+	}
+	if !scopedLocationMatch("Shingwauk Indian Residential School", "Shingwauk") {
+		t.Fatal("expected scoped location match to work in reverse as well")
+	}
+}
+
+func TestInferFieldKind_TreatsPlaceOfDeathAsLocation(t *testing.T) {
+	if kind := inferFieldKind("PLACE OF DEATH", nil); kind != chatFieldKindLocation {
+		t.Fatalf("kind = %q want %q", kind, chatFieldKindLocation)
+	}
+	if kind := inferFieldKind("SCHOOL", nil); kind != chatFieldKindLocation {
+		t.Fatalf("kind = %q want %q", kind, chatFieldKindLocation)
+	}
+}
+
+func TestExecuteChatPlan_LocationFallbackSearchesAcrossSchoolFields(t *testing.T) {
+	dataset := buildDatasetForQueryEngineTest(t, []map[string]string{
+		{"NAME": "Alice", "SCHOOL": "Shingwauk", "PLACE OF DEATH": "Sault Ste. Marie", "DATE OF DEATH": "1890-05-06"},
+		{"NAME": "Beatrice", "SCHOOL": "Shingwauk", "PLACE OF DEATH": "Garden River", "DATE OF DEATH": "1890-06-01"},
+		{"NAME": "Charlotte", "SCHOOL": "Wawanosh", "PLACE OF DEATH": "Shingwauk", "DATE OF DEATH": "1891-01-04"},
+	})
+
+	plan := chatPlannerOutput{
+		Intent:             "group_count_extreme",
+		TargetFieldID:      "date_of_death",
+		GroupByFieldID:     "date_of_death",
+		GroupByGranularity: "year",
+		Filters: []chatPlannerFilter{
+			{FieldID: "place_of_death", Op: "eq", Value: "Shingwauk Indian Residential School"},
+		},
+	}
+
+	verified := executeChatPlan(plan, "In what years did the highest number of deaths occur at Shingwauk?", dataset, dataset.rows, &chatSessionState{})
+	if verified.Status != "ok" {
+		t.Fatalf("status = %q want ok (notes=%v)", verified.Status, verified.Notes)
+	}
+	if len(verified.Rows) != 1 {
+		t.Fatalf("expected one winner row, got %#v", verified.Rows)
+	}
+	if verified.Rows[0]["value"] != "1890" {
+		t.Fatalf("expected 1890 winner, got %#v", verified.Rows)
+	}
+}
+
 func TestChatService_Chat_OverridesClarifyForGroupedDeathYearQuestion(t *testing.T) {
 	db, mock, cleanup := newMockDBChatSvc(t)
 	defer cleanup()
