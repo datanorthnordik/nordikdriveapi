@@ -105,7 +105,10 @@ func ensureNormalizationSchema(db *gorm.DB) error {
 	if db == nil {
 		return fmt.Errorf("db not initialized")
 	}
-	return db.AutoMigrate(&FileDataNormalized{})
+	if !db.Migrator().HasTable(&FileDataNormalized{}) {
+		return fmt.Errorf("file_data_normalized table does not exist")
+	}
+	return nil
 }
 
 func RunNormalizationSync(db *gorm.DB, options NormalizationSyncOptions) (*NormalizationSyncResult, error) {
