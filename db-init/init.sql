@@ -88,7 +88,7 @@ EXECUTE FUNCTION set_file_data_updated_at();
 
 CREATE TABLE IF NOT EXISTS file_data_normalized (
     id SERIAL PRIMARY KEY,
-    source_row_id INT NOT NULL UNIQUE REFERENCES file_data(id) ON DELETE CASCADE,
+    source_row_id INT NOT NULL REFERENCES file_data(id) ON DELETE CASCADE,
     file_id INT NOT NULL REFERENCES file(id) ON DELETE CASCADE,
     version INT NOT NULL,
     row_data_normalized JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -103,7 +103,8 @@ CREATE TABLE IF NOT EXISTS file_data_normalized (
     normalization_version INT NOT NULL DEFAULT 1,
     normalized_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uni_file_data_normalized_source_row_id UNIQUE (source_row_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_file_data_normalized_file_version
