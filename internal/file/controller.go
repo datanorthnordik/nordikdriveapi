@@ -156,10 +156,14 @@ func (fc *FileController) GetFileData(c *gin.Context) {
 
 	fileName := c.Query("filename")
 	versionStr := c.Query("version")
-	version, err := strconv.Atoi(versionStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid version"})
-		return
+	version := 0
+	if strings.TrimSpace(versionStr) != "" {
+		parsedVersion, err := strconv.Atoi(versionStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid version"})
+			return
+		}
+		version = parsedVersion
 	}
 
 	if fileName == "" {
@@ -205,6 +209,156 @@ func (fc *FileController) GetFileData(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, fileData)
+}
+
+func (fc *FileController) GetNormalizedFileData(c *gin.Context) {
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user ID not found"})
+		return
+	}
+
+	userID, ok := userIDVal.(float64)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+
+	fileName := c.Query("filename")
+	versionStr := c.Query("version")
+	version, err := strconv.Atoi(versionStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid version"})
+		return
+	}
+
+	if fileName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file name is required"})
+		return
+	}
+
+	normalizedRows, err := fc.FileService.GetNormalizedFileData(fileName, version)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if normalizedRows == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+		return
+	}
+
+	uid := uint(userID)
+	communitiesVal, exists := c.Get("communities")
+	if !exists {
+		communitiesVal = []string{}
+	}
+
+	communities, ok := communitiesVal.([]string)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid communities"})
+		return
+	}
+
+	log := logs.SystemLog{
+		Level:       "INFO",
+		Service:     "file",
+		UserID:      &uid,
+		Action:      "ACCESS_NORMALIZED_FILE",
+		Message:     fmt.Sprintf("Normalized file accessed : %s", fileName),
+		Communities: communities,
+		Filename:    &fileName,
+	}
+
+	if err := fc.LogService.Log(log, nil); err != nil {
+		fmt.Printf("Failed to insert log: %v\n", err)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"rows": normalizedRows,
+	})
+}
+
+func (fc *FileController) SyncNormalizedFileData(c *gin.Context) {
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user ID not found"})
+		return
+	}
+
+	userID, ok := userIDVal.(float64)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+
+	fileName := c.Query("filename")
+	versionStr := c.Query("version")
+	version := 0
+	if strings.TrimSpace(versionStr) != "" {
+		parsedVersion, err := strconv.Atoi(versionStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid version"})
+			return
+		}
+		version = parsedVersion
+	}
+
+	result, err := fc.FileService.SyncNormalizedFileData(fileName, version)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if result == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+		return
+	}
+
+	uid := uint(userID)
+	communitiesVal, exists := c.Get("communities")
+	if !exists {
+		communitiesVal = []string{}
+	}
+
+	communities, ok := communitiesVal.([]string)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid communities"})
+		return
+	}
+
+	log := logs.SystemLog{
+		Level:       "INFO",
+		Service:     "file",
+		UserID:      &uid,
+		Action:      "SYNC_NORMALIZED_FILE",
+		Message:     fmt.Sprintf("Normalized file synchronized : %s", syncNormalizedLogTarget(fileName, version)),
+		Communities: communities,
+	}
+	if strings.TrimSpace(fileName) != "" {
+		log.Filename = &fileName
+	}
+
+	if err := fc.LogService.Log(log, result); err != nil {
+		fmt.Printf("Failed to insert log: %v\n", err)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Normalized file data synchronized successfully",
+		"result":  result,
+	})
+}
+
+func syncNormalizedLogTarget(fileName string, version int) string {
+	fileName = strings.TrimSpace(fileName)
+	switch {
+	case fileName == "" && version <= 0:
+		return "all active files (latest versions prioritized)"
+	case fileName == "":
+		return fmt.Sprintf("all active files for version %d", version)
+	case version <= 0:
+		return fmt.Sprintf("%s (latest version)", fileName)
+	default:
+		return fmt.Sprintf("%s (version %d)", fileName, version)
+	}
 }
 
 func (fc *FileController) DeleteFile(c *gin.Context) {

@@ -74,6 +74,8 @@ func setupRouterForController(fc *FileController) *gin.Engine {
 		g.GET("", fc.GetAllFiles)
 		g.POST("/upload", fc.UploadFiles)
 		g.GET("/data", fc.GetFileData)
+		g.GET("/data/normalized", fc.GetNormalizedFileData)
+		g.POST("/data/normalized/sync", fc.SyncNormalizedFileData)
 		g.DELETE("", fc.DeleteFile)
 		g.PUT("/reset", fc.ResetFile)
 		g.GET("/access", fc.GetAllAccess)
@@ -175,6 +177,9 @@ type fakeFileService struct {
 	LastRevertVersion  int
 	LastRevertBy       uint
 
+	LastNormalizedSyncFilename string
+	LastNormalizedSyncVersion  int
+
 	LastApproveReqID uint
 	LastApproveBy    uint
 
@@ -189,8 +194,12 @@ type fakeFileService struct {
 	SaveOut []File
 	SaveErr error
 
-	FileDataOut []FileData
-	FileDataErr error
+	FileDataOut       []FileData
+	FileDataErr       error
+	NormalizedDataOut []FileDataNormalized
+	NormalizedDataErr error
+	NormalizedSyncOut *NormalizationSyncResult
+	NormalizedSyncErr error
 
 	DeleteOut File
 	DeleteErr error
@@ -237,6 +246,16 @@ func (f *fakeFileService) GetAllFiles(userID uint, role string) ([]FileWithUser,
 func (f *fakeFileService) GetFileData(filename string, version int) ([]FileData, error) {
 	f.bump("GetFileData")
 	return f.FileDataOut, f.FileDataErr
+}
+func (f *fakeFileService) GetNormalizedFileData(filename string, version int) ([]FileDataNormalized, error) {
+	f.bump("GetNormalizedFileData")
+	return f.NormalizedDataOut, f.NormalizedDataErr
+}
+func (f *fakeFileService) SyncNormalizedFileData(filename string, version int) (*NormalizationSyncResult, error) {
+	f.bump("SyncNormalizedFileData")
+	f.LastNormalizedSyncFilename = filename
+	f.LastNormalizedSyncVersion = version
+	return f.NormalizedSyncOut, f.NormalizedSyncErr
 }
 func (f *fakeFileService) DeleteFile(fileID string) (File, error) {
 	f.bump("DeleteFile")

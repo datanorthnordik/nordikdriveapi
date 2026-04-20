@@ -43,6 +43,17 @@ func NewScheduler(
 		return nil, fmt.Errorf("failed to register form submission review email cron: %w", err)
 	}
 
+	fileDataNormalizationJob := NewFileDataNormalizationJob(db, logger)
+
+	_, err = c.AddFunc("*/10 * * * *", func() {
+		if err := fileDataNormalizationJob.Run(); err != nil && logger != nil {
+			logger.Printf("file data normalization cron failed: %v", err)
+		}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to register file data normalization cron: %w", err)
+	}
+
 	return &Scheduler{cron: c}, nil
 }
 

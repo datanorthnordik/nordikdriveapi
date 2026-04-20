@@ -13,6 +13,8 @@ type FileServicePort interface {
 	GetUserRole(userID uint) (string, error)
 	GetAllFiles(userID uint, role string) ([]FileWithUser, error)
 	GetFileData(filename string, version int) ([]FileData, error)
+	GetNormalizedFileData(filename string, version int) ([]FileDataNormalized, error)
+	SyncNormalizedFileData(filename string, version int) (*NormalizationSyncResult, error)
 
 	DeleteFile(fileID string) (File, error)
 	ResetFile(fileID string) (File, error)

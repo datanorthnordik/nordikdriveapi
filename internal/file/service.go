@@ -140,6 +140,7 @@ func (fs *FileService) SaveFilesMultipart(uploadedFiles []*multipart.FileHeader,
 				RowData:    datatypes.JSON(jsonBytes),
 				InsertedBy: userID,
 				CreatedAt:  time.Now(),
+				UpdatedAt:  time.Now(),
 				Version:    1,
 			}
 
@@ -353,6 +354,7 @@ func (fs *FileService) ReplaceFiles(uploadedFile *multipart.FileHeader, fileID u
 			RowData:    jsonBytes,
 			InsertedBy: userID,
 			CreatedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
 			Version:    newVersion,
 		}
 		if err := fs.DB.Create(&record).Error; err != nil {
@@ -457,6 +459,65 @@ func (fs *FileService) GetFileData(filename string, version int) ([]FileData, er
 	}
 
 	return fileData, nil
+}
+
+func (fs *FileService) GetNormalizedFileData(filename string, version int) ([]FileDataNormalized, error) {
+	if err := ensureNormalizationSchema(fs.DB); err != nil {
+		return nil, err
+	}
+
+	if strings.TrimSpace(filename) == "" {
+		return nil, nil
+	}
+
+	var file File
+	if err := fs.DB.Where("filename = ? AND is_delete = ?", filename, false).First(&file).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	if version <= 0 {
+		version = file.Version
+	}
+
+	var normalizedRows []FileDataNormalized
+	if err := fs.DB.Where("file_id = ? AND version = ?", file.ID, version).
+		Order("source_row_id ASC").
+		Find(&normalizedRows).Error; err != nil {
+		return nil, err
+	}
+
+	return normalizedRows, nil
+}
+
+func (fs *FileService) SyncNormalizedFileData(filename string, version int) (*NormalizationSyncResult, error) {
+	options := NormalizationSyncOptions{
+		BatchSize: defaultNormalizationBatch,
+	}
+
+	if strings.TrimSpace(filename) != "" {
+		var file File
+		if err := fs.DB.Where("filename = ? AND is_delete = ?", filename, false).First(&file).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, nil
+			}
+			return nil, err
+		}
+
+		options.FileID = &file.ID
+		if version <= 0 {
+			version = file.Version
+		}
+	}
+
+	if version > 0 {
+		versionCopy := version
+		options.Version = &versionCopy
+	}
+
+	return RunNormalizationSync(fs.DB, options)
 }
 
 // ...existing code...
@@ -656,6 +717,7 @@ func (fs *FileService) RevertFile(filename string, version int, userID uint) err
 			RowData:    row.RowData,
 			InsertedBy: userID,
 			CreatedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
 			Version:    newVersion,
 		}
 		if err := fs.DB.Create(&newRow).Error; err != nil {
@@ -1098,6 +1160,7 @@ func (fs *FileService) ReviewEditRequest(
 					RowData:    datatypes.JSON(newJSON),
 					InsertedBy: req.UserID,
 					CreatedAt:  time.Now(),
+					UpdatedAt:  time.Now(),
 					Version:    1,
 				}
 
@@ -1179,7 +1242,10 @@ func (fs *FileService) ReviewEditRequest(
 					}
 
 					if err := tx.Model(&fileData).
-						Update("row_data", datatypes.JSON(newJSON)).Error; err != nil {
+						Updates(map[string]interface{}{
+							"row_data":   datatypes.JSON(newJSON),
+							"updated_at": time.Now(),
+						}).Error; err != nil {
 						return fmt.Errorf("failed to update file_data: %v", err)
 					}
 				}

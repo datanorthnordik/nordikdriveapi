@@ -15,6 +15,8 @@ func RegisterRoutes(r *gin.Engine, fileService FileServicePort, logService LogSe
 		userGroup.GET("", fileController.GetAllFiles)
 		userGroup.POST("/upload", fileController.UploadFiles)
 		userGroup.GET("/data", fileController.GetFileData)
+		userGroup.GET("/data/normalized", fileController.GetNormalizedFileData)
+		userGroup.POST("/data/normalized/sync", fileController.SyncNormalizedFileData)
 		userGroup.DELETE("", fileController.DeleteFile)
 		userGroup.PUT("/reset", fileController.ResetFile)
 		userGroup.GET("/access", fileController.GetAllAccess)

@@ -65,15 +65,70 @@ CREATE TABLE IF NOT EXISTS file_data (
     row_data JSONB NOT NULL,
     inserted_by INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     version INT DEFAULT 1 NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS file_access (
+CREATE INDEX IF NOT EXISTS idx_file_data_file_version_updated_at
+    ON file_data(file_id, version, updated_at);
+
+CREATE OR REPLACE FUNCTION set_file_data_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_file_data_set_updated_at ON file_data;
+CREATE TRIGGER trg_file_data_set_updated_at
+BEFORE UPDATE ON file_data
+FOR EACH ROW
+EXECUTE FUNCTION set_file_data_updated_at();
+
+CREATE TABLE IF NOT EXISTS file_data_normalized (
     id SERIAL PRIMARY KEY,
-    user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    source_row_id INT NOT NULL UNIQUE REFERENCES file_data(id) ON DELETE CASCADE,
     file_id INT NOT NULL REFERENCES file(id) ON DELETE CASCADE,
-    CONSTRAINT unique_user_file UNIQUE (user_id, file_id)
-)
+    version INT NOT NULL,
+    row_data_normalized JSONB NOT NULL DEFAULT '{}'::jsonb,
+    search_text TEXT NOT NULL DEFAULT '',
+    canonical_name TEXT NOT NULL DEFAULT '',
+    canonical_community TEXT NOT NULL DEFAULT '',
+    canonical_school TEXT NOT NULL DEFAULT '',
+    status VARCHAR(20) NOT NULL DEFAULT 'ready',
+    error_message TEXT NOT NULL DEFAULT '',
+    source_created_at TIMESTAMP NOT NULL,
+    source_updated_at TIMESTAMP NOT NULL,
+    normalization_version INT NOT NULL DEFAULT 1,
+    normalized_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_data_normalized_file_version
+    ON file_data_normalized(file_id, version);
+
+CREATE INDEX IF NOT EXISTS idx_file_data_normalized_status
+    ON file_data_normalized(status);
+
+CREATE INDEX IF NOT EXISTS idx_file_data_normalized_source_updated
+    ON file_data_normalized(source_updated_at);
+
+CREATE OR REPLACE FUNCTION set_file_data_normalized_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_file_data_normalized_set_updated_at ON file_data_normalized;
+CREATE TRIGGER trg_file_data_normalized_set_updated_at
+BEFORE UPDATE ON file_data_normalized
+FOR EACH ROW
+EXECUTE FUNCTION set_file_data_normalized_updated_at();
+
 
 -- CREATE TABLE IF NOT EXISTS community (
 --     id SERIAL PRIMARY KEY,
