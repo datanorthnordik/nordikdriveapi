@@ -7,21 +7,30 @@ import (
 )
 
 const (
-	chatSessionTTL      = 45 * time.Minute
-	chatSessionMaxTurns = 6
+	chatSessionTTL          = 45 * time.Minute
+	chatSessionMaxTurns     = 6
+	chatClarificationBudget = 2
 )
 
+type chatPendingClarification struct {
+	Prompt           string
+	Attempts         int
+	OriginalQuestion string
+	CandidateRowIDs  []int
+	Plan             chatPlannerOutput
+}
+
 type chatSessionState struct {
-	UserKey       string
-	FileID        uint
-	Filename      string
-	Version       int
-	Communities   []string
-	FocusRowIDs   []int
-	LastFieldID   string
-	PendingPrompt string
-	RecentTurns   []chatSessionTurn
-	UpdatedAt     time.Time
+	UserKey     string
+	FileID      uint
+	Filename    string
+	Version     int
+	Communities []string
+	FocusRowIDs []int
+	LastFieldID string
+	Pending     *chatPendingClarification
+	RecentTurns []chatSessionTurn
+	UpdatedAt   time.Time
 }
 
 type chatSessionTurn struct {
@@ -69,21 +78,34 @@ func cloneTurns(src []chatSessionTurn) []chatSessionTurn {
 	return out
 }
 
+func clonePending(src *chatPendingClarification) *chatPendingClarification {
+	if src == nil {
+		return nil
+	}
+	return &chatPendingClarification{
+		Prompt:           src.Prompt,
+		Attempts:         src.Attempts,
+		OriginalQuestion: src.OriginalQuestion,
+		CandidateRowIDs:  cloneIntSlice(src.CandidateRowIDs),
+		Plan:             src.Plan,
+	}
+}
+
 func cloneSessionState(src *chatSessionState) *chatSessionState {
 	if src == nil {
 		return nil
 	}
 	return &chatSessionState{
-		UserKey:       src.UserKey,
-		FileID:        src.FileID,
-		Filename:      src.Filename,
-		Version:       src.Version,
-		Communities:   cloneStringSlice(src.Communities),
-		FocusRowIDs:   cloneIntSlice(src.FocusRowIDs),
-		LastFieldID:   src.LastFieldID,
-		PendingPrompt: src.PendingPrompt,
-		RecentTurns:   cloneTurns(src.RecentTurns),
-		UpdatedAt:     src.UpdatedAt,
+		UserKey:     src.UserKey,
+		FileID:      src.FileID,
+		Filename:    src.Filename,
+		Version:     src.Version,
+		Communities: cloneStringSlice(src.Communities),
+		FocusRowIDs: cloneIntSlice(src.FocusRowIDs),
+		LastFieldID: src.LastFieldID,
+		Pending:     clonePending(src.Pending),
+		RecentTurns: cloneTurns(src.RecentTurns),
+		UpdatedAt:   src.UpdatedAt,
 	}
 }
 
@@ -139,6 +161,7 @@ func (s *chatSessionState) registerTurn(question, answer, fieldID string, focusR
 	s.UpdatedAt = time.Now().UTC()
 	s.LastFieldID = strings.TrimSpace(fieldID)
 	s.FocusRowIDs = cloneIntSlice(focusRowIDs)
+
 	question = strings.TrimSpace(question)
 	answer = strings.TrimSpace(answer)
 	if question == "" && answer == "" {
@@ -162,7 +185,7 @@ func (s *chatSessionState) summaryForPrompt(dataset *chatDatasetCacheEntry) stri
 	}
 
 	lines := []string{}
-	if len(s.FocusRowIDs) > 0 {
+	if len(s.FocusRowIDs) > 0 && dataset != nil {
 		focusNames := make([]string, 0, len(s.FocusRowIDs))
 		for _, rowID := range s.FocusRowIDs {
 			if row, ok := dataset.rowByID[rowID]; ok {
@@ -180,8 +203,8 @@ func (s *chatSessionState) summaryForPrompt(dataset *chatDatasetCacheEntry) stri
 	if s.LastFieldID != "" {
 		lines = append(lines, "Last field: "+s.LastFieldID)
 	}
-	if s.PendingPrompt != "" {
-		lines = append(lines, "Pending clarification: "+s.PendingPrompt)
+	if s.Pending != nil && s.Pending.Prompt != "" {
+		lines = append(lines, "Pending clarification: "+s.Pending.Prompt)
 	}
 	if len(s.RecentTurns) > 0 {
 		lines = append(lines, "Recent turns:")
