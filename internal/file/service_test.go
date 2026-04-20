@@ -60,6 +60,7 @@ func migrateTestSchema(t *testing.T, db *gorm.DB) {
 		&File{},
 		&FileVersion{},
 		&FileData{},
+		&FileDataNormalized{},
 		&FileAccess{},
 		&FileEditRequest{},
 		&FileEditRequestDetails{},

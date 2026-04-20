@@ -54,10 +54,11 @@ type FileVersionWithUser struct {
 type FileData struct {
 	ID         uint           `gorm:"primaryKey" json:"id"`
 	FileID     uint           `gorm:"not null;index" json:"file_id"`
-	RowData    datatypes.JSON `gorm:"type:json" json:"row_data"`
+	RowData    datatypes.JSON `gorm:"type:jsonb" json:"row_data"`
 	InsertedBy uint           `gorm:"not null" json:"inserted_by"`
-	CreatedAt  time.Time      `json:"created_at"`
-	Version    int            `json:"version"`
+	CreatedAt  time.Time      `gorm:"not null;autoCreateTime" json:"created_at"`
+	UpdatedAt  time.Time      `gorm:"not null;autoUpdateTime" json:"updated_at"`
+	Version    int            `gorm:"not null;default:1" json:"version"`
 }
 
 type FileAccess struct {
