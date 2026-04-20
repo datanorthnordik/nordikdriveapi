@@ -9,28 +9,36 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	dc "nordik-drive-api/internal/dataconfig"
 	f "nordik-drive-api/internal/file"
+
+	"gorm.io/datatypes"
 )
 
-type chatFieldKind string
+type chatFieldRole string
 
 const (
-	chatFieldKindText      chatFieldKind = "text"
-	chatFieldKindName      chatFieldKind = "name"
-	chatFieldKindDate      chatFieldKind = "date"
-	chatFieldKindNumber    chatFieldKind = "number"
-	chatFieldKindBoolean   chatFieldKind = "boolean"
-	chatFieldKindCommunity chatFieldKind = "community"
-	chatFieldKindLocation  chatFieldKind = "location"
+	chatFieldRoleText      chatFieldRole = "text"
+	chatFieldRoleName      chatFieldRole = "name"
+	chatFieldRoleDate      chatFieldRole = "date"
+	chatFieldRoleNumber    chatFieldRole = "number"
+	chatFieldRoleBoolean   chatFieldRole = "boolean"
+	chatFieldRoleCommunity chatFieldRole = "community"
+	chatFieldRoleSchool    chatFieldRole = "school"
+	chatFieldRoleLocation  chatFieldRole = "location"
 )
 
 type chatSchemaField struct {
-	ID       string
-	Label    string
-	Kind     chatFieldKind
-	Aliases  []string
-	Examples []string
+	ID         string
+	Label      string
+	Role       chatFieldRole
+	Aliases    []string
+	Examples   []string
+	Searchable bool
+	Groupable  bool
+	ExactOnly  bool
 }
 
 type chatDatasetSchema struct {
@@ -39,14 +47,34 @@ type chatDatasetSchema struct {
 	fieldByLookup     map[string]*chatSchemaField
 	nameFieldIDs      []string
 	communityFieldIDs []string
+	schoolFieldIDs    []string
+	locationFieldIDs  []string
 	dateFieldIDs      []string
 	eventFieldIDs     map[string][]string
 }
 
-type rawChatRow struct {
-	RowID   int
-	RowJSON string
-	Values  map[string]string
+type chatDatasetCacheEntry struct {
+	FileID   uint
+	Filename string
+	Version  int
+	ConfigAt time.Time
+	rows     []cachedChatRow
+	rowByID  map[int]*cachedChatRow
+	schema   chatDatasetSchema
+}
+
+type cachedChatRow struct {
+	RowID        int
+	RowJSON      string
+	Values       map[string]string
+	Normalized   map[string]string
+	Tokens       map[string][]string
+	SearchTokens []string
+	Names        []string
+	Communities  []string
+	Schools      []string
+	Locations    []string
+	Temporal     map[string]temporalValue
 }
 
 type chatPlannerOutput struct {
@@ -79,137 +107,100 @@ type chatSubjectMatch struct {
 }
 
 type chatVerifiedResult struct {
-	Status                string           `json:"status"`
-	Intent                string           `json:"intent,omitempty"`
-	Question              string           `json:"question,omitempty"`
-	TargetFieldID         string           `json:"target_field_id,omitempty"`
-	TargetFieldLabel      string           `json:"target_field_label,omitempty"`
-	FocusRowIDs           []int            `json:"-"`
-	MatchedRowID          *int             `json:"-"`
-	ClarificationQuestion string           `json:"clarification_question,omitempty"`
-	Notes                 []string         `json:"notes,omitempty"`
-	Rows                  []map[string]any `json:"rows,omitempty"`
-	Value                 any              `json:"value,omitempty"`
+	Status                       string          `json:"status"`
+	Intent                       string          `json:"intent,omitempty"`
+	Question                     string          `json:"question,omitempty"`
+	TargetFieldID                string          `json:"target_field_id,omitempty"`
+	TargetFieldLabel             string          `json:"target_field_label,omitempty"`
+	FocusRowIDs                  []int           `json:"-"`
+	MatchedRowID                 *int            `json:"-"`
+	ClarificationQuestion        string          `json:"clarification_question,omitempty"`
+	ClarificationCandidateRowIDs []int           `json:"-"`
+	Notes                        []string        `json:"notes,omitempty"`
+	SourceRows                   []cachedChatRow `json:"-"`
+	Value                        any             `json:"value,omitempty"`
+}
+
+type chatRowRecord struct {
+	RowID              uint           `gorm:"column:row_id"`
+	RowData            datatypes.JSON `gorm:"column:row_data"`
+	RowUpdatedAt       time.Time      `gorm:"column:row_updated_at"`
+	RowDataNormalized  datatypes.JSON `gorm:"column:row_data_normalized"`
+	SearchText         string         `gorm:"column:search_text"`
+	CanonicalName      string         `gorm:"column:canonical_name"`
+	CanonicalCommunity string         `gorm:"column:canonical_community"`
+	CanonicalSchool    string         `gorm:"column:canonical_school"`
+	Status             string         `gorm:"column:status"`
+	SourceUpdatedAt    *time.Time     `gorm:"column:source_updated_at"`
+}
+
+type chatNormalizedPayload struct {
+	Fields       map[string]chatNormalizedField `json:"fields"`
+	Names        []string                       `json:"names,omitempty"`
+	Communities  []string                       `json:"communities,omitempty"`
+	Schools      []string                       `json:"schools,omitempty"`
+	Locations    []string                       `json:"locations,omitempty"`
+	SearchTokens []string                       `json:"search_tokens,omitempty"`
+}
+
+type chatNormalizedField struct {
+	Raw        string              `json:"raw"`
+	Normalized string              `json:"normalized"`
+	Tokens     []string            `json:"tokens,omitempty"`
+	Role       string              `json:"role"`
+	DateHint   *chatNormalizedDate `json:"date_hint,omitempty"`
+}
+
+type chatNormalizedDate struct {
+	Raw         string `json:"raw"`
+	Kind        string `json:"kind"`
+	LowerYear   *int   `json:"lower_year,omitempty"`
+	UpperYear   *int   `json:"upper_year,omitempty"`
+	Approximate bool   `json:"approximate,omitempty"`
+}
+
+type chatConfigLookup struct {
+	byKey map[string]*chatConfigFieldMeta
+}
+
+type chatConfigFieldMeta struct {
+	Role       chatFieldRole
+	Aliases    []string
+	Searchable *bool
+	Groupable  *bool
+	ExactOnly  *bool
 }
 
 const chatPlannerInstruction = `
 You convert the user's latest question into a strict JSON plan for a deterministic data engine.
 
-CRITICAL ACCURACY RULES (95%+ accuracy depends on these):
-1. Be conservative: If ANY part of the question is unclear, ASK CLARIFICATION instead of guessing.
-2. Never guess about implicit meaning - what's not explicitly stated should be clarified.
-3. Vague terms need clarification: "recent" (when?), "young" (what age?), "many" (how many?), etc.
-4. Always prefer exact field matches over vague searches.
-5. If subject name is unclear or might have typos, ask before filtering.
-6. For comparative questions (who had most/least), ask which specific aspect to compare.
-7. Never extrapolate: if data doesn't directly answer, ask clarification not guessing.
-
-INTENT SELECTION RULES:
-- "first, earliest, oldest, youngest, latest, last, most, least, highest, lowest" → intent "extreme"
-- "how many, count, total, number of, how much" → intent "count_rows"
-- "which year/month/date had the most/highest/lowest deaths/admissions" → intent "group_count_extreme"
-- "in what years did [event] occur" → intent "group_count_extreme" with target_field_id = date field, group by year
-- "when did [event] happen" → intent "extreme" to find earliest/latest date
-- "what is X of person Y, tell me X about person Y" where X is specific field → intent "field_lookup"
-- "tell me about person, describe person, information about person, who is person" → intent "describe_subject"
-- "list of X values, what X values are there, all X" → intent "list_values"
-- Any unclear questions → intent "clarify" with specific question
-
-SEARCH TERMS EXTRACTION (for multi-column search):
-- Extract terms that describe WHAT you're searching for across all columns
-- Examples:
-  - "Did any children die from drowning?" → search_terms: ["drowning"]
-  - "What diseases caused deaths?" → search_terms: ["disease", "illness"]
-  - "Find tuberculosis records" → search_terms: ["tuberculosis"]
-  - "Any poisoning or toxic cases?" → search_terms: ["poison", "toxic"]
-  - "Accidents and injuries" → search_terms: ["accident", "injury"]
-- Only include search_terms if searching across multiple columns is needed
-- Don't include search_terms for specific person names (use subject_text instead)
-- For compound terms, break into components: "drowning accident" → ["drowning", "accident"]
-
-FILTERS vs SEARCH_TERMS (CRITICAL - this causes most failures):
-- Use filters for: specific field values including LOCATION/SCHOOL NAMES
-  - Examples: "Shingwauk", "Walpole Island", "Toronto", school names
-  - Extract location/institution names from phrases like: "at Shingwauk", "in Toronto", "at the school"
-  - Look for field values that match known locations, schools, or communities
-- Use search_terms for: keywords that could appear anywhere (causes of death, conditions, descriptions)
-  - Examples: "drowning", "disease", "tuberculosis", "malnutrition"
-  - Only for things that might appear in text fields, not for place names
-- Use subject_text for: specific person name matching
-
-LOCATION/SCHOOL EXTRACTION (High priority):
-- When question mentions a specific place (Shingwauk, Walpole Island, reserve name, etc.):
-  - Find a filter from SCHEMA fields that might contain locations (kind=location, kind=community, or field about school)
-  - Create a filter: {field_id: "location_field_id", op: "eq", value: "Shingwauk"}
-  - Do NOT include it in search_terms
-- Examples:
-  - "In what years did the highest number of deaths occur at Shingwauk?"
-    → intent: "group_count_extreme", filters: [{field_id: "school", op: "eq", value: "Shingwauk"}]
-  - "Did any children die from drowning at Shingwauk Indian Residential School?"
-    → intent: "count_rows", search_terms: ["drowning"], filters: [{field_id: "school", op: "eq", value: "Shingwauk"}]
-  - "What community had the most deaths?" 
-    → intent: "group_count_extreme" (no specific community filter, group BY community)
-
-SESSION FOCUS:
-- use_session_focus=true ONLY when user says: "he, she, they, that person, same person, same one, him, her, them" AND session has previous focus
-- Otherwise use_session_focus=false
-
-FIELD ID RULES:
-- Use ONLY field ids from SCHEMA section - never invent
-- When unsure which field user means, ask clarification not guess
-- For ambiguous field names, ask which specific field
-
-SAFETY RULES:
-- Do NOT invent or guess field values
-- Do NOT make assumptions about date formats without clarity
-- Do NOT guess person names - use exact matching or ask
-- Do NOT assume relationships between fields
-- If a search term is too vague (one letter, too common), ask clarification
-- If asking for "top X" but data might have ties, note that uncertainty
-- Never guess about implicit data - if something isn't stated, ask not assume
-
-ANTI-HALLUCINATION RULES (CRITICAL for 95%+ accuracy):
-- Only use field IDs that exist in SCHEMA - typos here destroy accuracy
-- Only use filter operations that make sense for that field kind
-- If a person's name could be spelled multiple ways, ask for the exact spelling
-- If a date is vague (like "March 1950"), ask for exact date or clarify it's approximate
-- Never create filters for fields you're unsure about - ask clarification instead
-- For comparative questions, only ask if you can identify the exact comparison fields
-- If subject_text is unclear or could match multiple people, ask for clarification
-- Search terms should be meaningful keywords, not random words from the question
-
-Allowed intents:
-- "describe_subject"
-- "field_lookup"
-- "count_rows"
-- "list_values"
-- "extreme"
-- "group_count_extreme"
-- "clarify"
-
-Allowed filter ops:
-- "eq"
-- "contains"
-- "before"
-- "after"
-- "between"
-- "yes"
-- "no"
+Rules:
+- Use ONLY field ids from SCHEMA.
+- If the user asks about a specific person, put that in subject_text.
+- Use use_session_focus=true only for clear follow-up wording like he, she, they, him, her, that person, same one.
+- Use count_rows for yes/no or how many questions.
+- Use group_count_extreme for most/least/highest/lowest by year/community/school/location.
+- Use field_lookup for one specific detail about one person.
+- Use describe_subject for general information about one person.
+- Use list_values when the user wants names or a list.
+- Use extreme for earliest/latest/first/last questions.
+- If anything important is unclear, return intent clarify with one short question.
+- Never invent field ids or filter values.
 
 Return ONLY one JSON object with this shape:
 {
   "transcribed_question": "filled only if audio was provided and you had to infer speech",
-  "intent": "describe_subject",
-  "subject_text": "optional person name or subject phrase from the user",
+  "intent": "count_rows",
+  "subject_text": "optional person name or subject phrase",
   "use_session_focus": false,
-  "target_field_id": "optional field id from schema",
-  "group_by_field_id": "optional field id from schema",
+  "target_field_id": "optional schema field id",
+  "group_by_field_id": "optional schema field id",
   "group_by_granularity": "optional year, month, or day",
-  "search_terms": ["optional", "keywords", "to find anywhere in data"],
+  "search_terms": ["optional", "keywords"],
   "filters": [
-    {"field_id": "optional field id", "op": "eq", "value": "value", "value2": "optional second value for between"}
+    {"field_id": "optional schema field id", "op": "eq", "value": "value", "value2": "optional"}
   ],
-  "sort_direction": "asc or desc for intent extreme",
+  "sort_direction": "asc or desc",
   "limit": 5,
   "clarification_question": "filled only when intent is clarify"
 }
@@ -226,44 +217,31 @@ Style requirements:
 - Do NOT mention JSON, planner, query, row ids, columns, file name, file version, or any technical details.
 - Maintain an empathetic and respectful tone, especially when discussing deaths or sensitive topics.
 
-Hard accuracy rules (these prevent 95% of errors):
-- Use ONLY facts from the VERIFIED RESULT. Do NOT add any external knowledge or guesses.
-- CRITICAL: Every claim you make must be traceable to actual data in the rows provided.
-- If data is incomplete or ambiguous, SAY SO explicitly. Example: "The records show X, but details about Y are not available."
-- Count and verify: For count questions, manually count the rows provided and state that count.
-- When describing people or records, mention each one individually with specific details from the data.
-- If a value is missing, empty, or unclear in the data, do NOT guess - say "the records don't specify" or "information is not available."
-- If a date is approximate, partial, or a range, describe it exactly as it appears - don't assume precision.
-- For pattern questions ("did more die from X or Y?"), only answer if data directly shows the comparison.
-- Never say things like "usually", "typically", "often", "tends to" based on limited data - be precise about what you see.
-- If row count seems wrong for the question, flag it: "The search found only X records, which seems unexpectedly low/high for this question."
-- Contradictions: If rows contain conflicting information, mention that conflict and include all versions.
-- Names and identities: Always verify name matches exactly. If there are multiple similar names, mention all matches.
-- Field values: If a field shows multiple values for one person, include all of them.
-
-Conservative answer patterns:
-- "Based on the records provided, [specific fact]." (traceable to data)
-- "The data shows X records with [criteria]." (transparent counting)
-- "I could not find [what user asked for] in the available records." (honest about limits)
-- "The records include [names], but don't provide information about [what's missing]." (transparent)
-- "This data is limited to [specific scope], so I cannot determine [broader question]." (scope awareness)
+Hard accuracy rules:
+- Use ONLY facts from the VERIFIED RESULT. Do NOT add outside knowledge or guesses.
+- Every claim must be traceable to the VERIFIED RESULT.
+- If status is "needs_clarification", ask exactly the clarification question and nothing more.
+- If status is "not_found", clearly say the records do not show a matching answer.
+- If status is "cannot_determine_exactly", clearly say the answer cannot be determined exactly and use the notes if provided.
+- If a value is missing or empty, say the records do not specify it.
+- If dates are approximate, partial, or ranges, describe them exactly as provided.
+- If multiple answers exist, include all of them in the first sentence.
 
 Output rules:
 - Write only the answer text.
 - Start with the direct answer in the first sentence when possible.
-- Provide comprehensive information from ALL rows given to you.
 `
 
 func (cs *ChatService) ChatForUser(userID int64, question string, audioFile *multipart.FileHeader, filename string, communities []string) (*ChatResult, error) {
 	if cs.DB == nil {
 		return nil, fmt.Errorf("db not initialized")
 	}
-	if cs.Client == nil {
-		return nil, fmt.Errorf("genai client not initialized")
-	}
 
 	var file f.File
-	if err := cs.DB.Select("id, filename, version, columns_order").Where("filename = ?", filename).Order("version DESC").First(&file).Error; err != nil {
+	if err := cs.DB.Select("id, filename, version, columns_order").
+		Where("filename = ?", filename).
+		Order("version DESC").
+		First(&file).Error; err != nil {
 		return nil, fmt.Errorf("file not found")
 	}
 
@@ -272,6 +250,7 @@ func (cs *ChatService) ChatForUser(userID int64, question string, audioFile *mul
 	if err != nil {
 		return nil, err
 	}
+
 	rows := dataset.rowsForCommunities(filteredCommunities)
 	session := cs.loadSession(userID, file.ID, filename, file.Version, filteredCommunities)
 
@@ -281,29 +260,119 @@ func (cs *ChatService) ChatForUser(userID int64, question string, audioFile *mul
 	}
 
 	ctx := context.Background()
-	plan, resolvedQuestion, _, planErr := cs.planChatRequest(ctx, question, audioBytes, audioMime, dataset, session)
-	if planErr != nil {
-		return nil, planErr
+
+	if verified, handled := cs.resolvePendingCandidateClarification(question, dataset, rows, session); handled {
+		answer, err := cs.answerFromVerifiedResult(ctx, question, dataset, verified)
+		if err != nil {
+			answer = renderVerifiedAnswer(question, dataset, verified)
+		}
+		updateSessionAfterResult(session, question, answer, chatPlannerOutput{}, verified)
+		cs.saveSession(userID, session)
+		return &ChatResult{Answer: answer, MatchedRowID: verified.MatchedRowID}, nil
 	}
 
-	verified := executeChatPlan(plan, resolvedQuestion, dataset, rows, session)
-	answer, err := cs.answerFromVerifiedResult(ctx, resolvedQuestion, dataset, session, verified)
+	plan, resolvedQuestion, err := cs.planChatRequest(ctx, question, audioBytes, audioMime, dataset, session)
 	if err != nil {
 		return nil, err
 	}
 
-	if verified.Status == "needs_clarification" {
-		session.PendingPrompt = verified.ClarificationQuestion
-	} else {
-		session.PendingPrompt = ""
+	if plan.Intent == "clarify" && session.Pending != nil && isLikelyClarificationReply(normalizeSearchText(question)) && session.Pending.Attempts >= chatClarificationBudget {
+		verified := chatVerifiedResult{
+			Status:   "cannot_determine_exactly",
+			Intent:   plan.Intent,
+			Question: resolvedQuestion,
+			Notes:    []string{"I still can't determine one exact interpretation from the available data."},
+		}
+		answer := renderVerifiedAnswer(question, dataset, verified)
+		updateSessionAfterResult(session, question, answer, plan, verified)
+		cs.saveSession(userID, session)
+		return &ChatResult{Answer: answer}, nil
 	}
-	session.registerTurn(resolvedQuestion, answer, verified.TargetFieldID, focusIDsForSession(verified))
+
+	verified := executeChatPlan(plan, resolvedQuestion, dataset, rows, session)
+	answer, err := cs.answerFromVerifiedResult(ctx, resolvedQuestion, dataset, verified)
+	if err != nil {
+		answer = renderVerifiedAnswer(resolvedQuestion, dataset, verified)
+	}
+
+	updateSessionAfterResult(session, resolvedQuestion, answer, plan, verified)
 	cs.saveSession(userID, session)
 
 	return &ChatResult{
 		Answer:       answer,
 		MatchedRowID: verified.MatchedRowID,
 	}, nil
+}
+
+func updateSessionAfterResult(session *chatSessionState, question, answer string, plan chatPlannerOutput, verified chatVerifiedResult) {
+	if session == nil {
+		return
+	}
+	if verified.Status == "needs_clarification" {
+		attempts := 1
+		originalQuestion := question
+		if session.Pending != nil && isLikelyClarificationReply(normalizeSearchText(question)) {
+			attempts = session.Pending.Attempts + 1
+			if strings.TrimSpace(session.Pending.OriginalQuestion) != "" {
+				originalQuestion = session.Pending.OriginalQuestion
+			}
+		}
+		session.Pending = &chatPendingClarification{
+			Prompt:           verified.ClarificationQuestion,
+			Attempts:         attempts,
+			OriginalQuestion: originalQuestion,
+			CandidateRowIDs:  cloneIntSlice(verified.ClarificationCandidateRowIDs),
+			Plan:             plan,
+		}
+	} else {
+		session.Pending = nil
+	}
+	session.registerTurn(question, answer, verified.TargetFieldID, focusIDsForSession(verified))
+}
+
+func (cs *ChatService) resolvePendingCandidateClarification(
+	question string,
+	dataset *chatDatasetCacheEntry,
+	rows []cachedChatRow,
+	session *chatSessionState,
+) (chatVerifiedResult, bool) {
+	if session == nil || session.Pending == nil || len(session.Pending.CandidateRowIDs) == 0 {
+		return chatVerifiedResult{}, false
+	}
+	if !isLikelyClarificationReply(normalizeSearchText(question)) {
+		return chatVerifiedResult{}, false
+	}
+
+	candidates := dataset.rowsByIDs(session.Pending.CandidateRowIDs, rows)
+	if len(candidates) == 0 {
+		return chatVerifiedResult{}, false
+	}
+
+	refined := refineClarificationRows(candidates, dataset, question)
+	if len(refined) == 1 {
+		plan := session.Pending.Plan
+		plan.SubjectText = ""
+		plan.UseSessionFocus = false
+		verified := executeChatPlan(plan, strings.TrimSpace(session.Pending.OriginalQuestion+" "+question), dataset, refined, session)
+		return verified, true
+	}
+
+	if len(refined) > 1 && session.Pending.Attempts < chatClarificationBudget {
+		return chatVerifiedResult{
+			Status:                       "needs_clarification",
+			Intent:                       session.Pending.Plan.Intent,
+			Question:                     question,
+			ClarificationQuestion:        buildRowClarificationQuestion(refined, dataset),
+			ClarificationCandidateRowIDs: rowIDsFromRows(refined),
+		}, true
+	}
+
+	return chatVerifiedResult{
+		Status:   "cannot_determine_exactly",
+		Intent:   session.Pending.Plan.Intent,
+		Question: question,
+		Notes:    []string{"I still can't narrow that down to one exact record."},
+	}, true
 }
 
 func loadOptionalAudio(audioFile *multipart.FileHeader) ([]byte, string, error) {
@@ -335,59 +404,65 @@ func (cs *ChatService) planChatRequest(
 	audioMime string,
 	dataset *chatDatasetCacheEntry,
 	session *chatSessionState,
-) (chatPlannerOutput, string, string, error) {
+) (chatPlannerOutput, string, error) {
 	question = strings.TrimSpace(question)
-	useSessionContext := shouldUseSessionContext(question, session)
+	if session != nil && session.Pending != nil && len(session.Pending.CandidateRowIDs) == 0 && isLikelyClarificationReply(normalizeSearchText(question)) {
+		question = strings.TrimSpace(session.Pending.OriginalQuestion + " " + question)
+	}
+
 	if question == "" && len(audioBytes) == 0 {
 		return chatPlannerOutput{
 			Intent:                "clarify",
 			ClarificationQuestion: "What would you like to know about the data?",
-		}, question, "", nil
+			Limit:                 5,
+		}, question, nil
 	}
+
 	if len(audioBytes) == 0 {
 		if deterministic, ok := deterministicChatPlan(question, dataset, session); ok {
-			return deterministic, question, "deterministic", nil
+			return deterministic, question, nil
 		}
 	}
 
-	prompt := buildChatPlannerPrompt(question, dataset, session, useSessionContext)
+	if cs.Client == nil {
+		return chatPlannerOutput{
+			Intent:                "clarify",
+			ClarificationQuestion: "Could you rephrase that a little more specifically?",
+			Limit:                 5,
+		}, question, nil
+	}
+
+	prompt := buildChatPlannerPrompt(question, dataset, session)
 	raw, usedModel, err := cs.generateFromPrompt(ctx, prompt, audioBytes, audioMime)
 	if err != nil {
-		if len(audioBytes) == 0 {
-			if fallback, ok := heuristicChatPlan(question, dataset, session); ok {
-				return fallback, question, "", nil
-			}
-		}
-		return chatPlannerOutput{}, question, usedModel, fmt.Errorf("generation error (%s): %w", usedModel, err)
+		return chatPlannerOutput{}, question, fmt.Errorf("generation error (%s): %w", usedModel, err)
 	}
 
 	plan, ok := parseChatPlannerOutput(raw, &dataset.schema)
 	if !ok {
-		if fallback, ok := heuristicChatPlan(question, dataset, session); ok {
-			return fallback, question, usedModel, nil
-		}
-		return chatPlannerOutput{}, question, usedModel, fmt.Errorf("generation error (%s): failed to parse planner output", usedModel)
-	}
-	if heuristic, ok := heuristicChatPlan(question, dataset, session); ok {
-		plan = mergePlannerWithHeuristic(plan, heuristic)
-	}
-	if !useSessionContext {
-		plan.UseSessionFocus = false
+		return chatPlannerOutput{
+			Intent:                "clarify",
+			ClarificationQuestion: "Could you rephrase that a little more specifically?",
+			Limit:                 5,
+		}, question, nil
 	}
 
 	resolvedQuestion := strings.TrimSpace(plan.TranscribedQuestion)
 	if resolvedQuestion == "" {
 		resolvedQuestion = question
 	}
-	if resolvedQuestion == "" {
-		resolvedQuestion = strings.TrimSpace(plan.SubjectText)
+	if !shouldUseSessionContext(resolvedQuestion, session) {
+		plan.UseSessionFocus = false
 	}
-	return plan, resolvedQuestion, usedModel, nil
+	if deterministic, ok := deterministicChatPlan(resolvedQuestion, dataset, session); ok {
+		plan = mergePlannerWithDeterministic(plan, deterministic)
+	}
+	return plan, resolvedQuestion, nil
 }
 
-func buildChatPlannerPrompt(question string, dataset *chatDatasetCacheEntry, session *chatSessionState, useSessionContext bool) string {
+func buildChatPlannerPrompt(question string, dataset *chatDatasetCacheEntry, session *chatSessionState) string {
 	sessionSummary := "No active session context for this question."
-	if useSessionContext {
+	if shouldUseSessionContext(question, session) {
 		sessionSummary = session.summaryForPrompt(dataset)
 	}
 	return fmt.Sprintf(
@@ -409,6 +484,7 @@ func parseChatPlannerOutput(raw string, schema *chatDatasetSchema) (chatPlannerO
 	if err := json.Unmarshal([]byte(jsonText), &plan); err != nil {
 		return chatPlannerOutput{}, false
 	}
+
 	plan.Intent = strings.TrimSpace(strings.ToLower(plan.Intent))
 	switch plan.Intent {
 	case "describe_subject", "field_lookup", "count_rows", "list_values", "extreme", "group_count_extreme", "clarify":
@@ -437,23 +513,19 @@ func parseChatPlannerOutput(raw string, schema *chatDatasetSchema) (chatPlannerO
 		filter.Op = strings.TrimSpace(strings.ToLower(filter.Op))
 		switch filter.Op {
 		case "eq", "contains", "before", "after", "between", "yes", "no":
-		default:
-			continue
+			cleanFilters = append(cleanFilters, filter)
 		}
-		cleanFilters = append(cleanFilters, filter)
 	}
 	plan.Filters = cleanFilters
 
-	// Normalize search terms
-	cleanSearchTerms := make([]string, 0, len(plan.SearchTerms))
+	searchTerms := make([]string, 0, len(plan.SearchTerms))
 	for _, term := range plan.SearchTerms {
 		term = strings.TrimSpace(term)
 		if term != "" {
-			cleanSearchTerms = append(cleanSearchTerms, term)
+			searchTerms = append(searchTerms, term)
 		}
 	}
-	plan.SearchTerms = cleanSearchTerms
-
+	plan.SearchTerms = searchTerms
 	plan.SortDirection = strings.TrimSpace(strings.ToLower(plan.SortDirection))
 	if plan.SortDirection != "asc" && plan.SortDirection != "desc" {
 		plan.SortDirection = ""
@@ -471,6 +543,101 @@ func parseChatPlannerOutput(raw string, schema *chatDatasetSchema) (chatPlannerO
 		return chatPlannerOutput{}, false
 	}
 	return plan, true
+}
+
+func mergePlannerWithDeterministic(planned, deterministic chatPlannerOutput) chatPlannerOutput {
+	if planned.Intent == "clarify" && deterministic.Intent != "" {
+		return deterministic
+	}
+	if deterministic.Intent == "" {
+		return planned
+	}
+	if planned.Intent == "" {
+		return deterministic
+	}
+	if planned.TargetFieldID == "" {
+		planned.TargetFieldID = deterministic.TargetFieldID
+	}
+	if planned.GroupByFieldID == "" {
+		planned.GroupByFieldID = deterministic.GroupByFieldID
+	}
+	if planned.GroupByGranularity == "" {
+		planned.GroupByGranularity = deterministic.GroupByGranularity
+	}
+	if planned.SortDirection == "" {
+		planned.SortDirection = deterministic.SortDirection
+	}
+	if len(planned.Filters) == 0 {
+		planned.Filters = deterministic.Filters
+	}
+	if len(planned.SearchTerms) == 0 {
+		planned.SearchTerms = deterministic.SearchTerms
+	}
+	if strings.TrimSpace(planned.SubjectText) == "" {
+		planned.SubjectText = deterministic.SubjectText
+	}
+	if !planned.UseSessionFocus {
+		planned.UseSessionFocus = deterministic.UseSessionFocus
+	}
+	planned.IncludeMatchedNames = planned.IncludeMatchedNames || deterministic.IncludeMatchedNames
+	if planned.Limit <= 0 {
+		planned.Limit = deterministic.Limit
+	}
+	return planned
+}
+
+func (cs *ChatService) answerFromVerifiedResult(
+	ctx context.Context,
+	question string,
+	dataset *chatDatasetCacheEntry,
+	verified chatVerifiedResult,
+) (string, error) {
+	if cs.Client == nil {
+		return "", fmt.Errorf("genai client not initialized")
+	}
+	payload, err := json.MarshalIndent(buildVerifiedAnswerPayload(dataset, verified), "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	prompt := fmt.Sprintf(
+		"%s\n\n%s\n\nUser question:\n%s\n\nVERIFIED RESULT (only source of truth):\n%s",
+		strings.TrimSpace(chatStyleInstruction),
+		strings.TrimSpace(chatVerifiedAnswerInstruction),
+		strings.TrimSpace(question),
+		string(payload),
+	)
+
+	answer, _, err := cs.generateFromPrompt(ctx, prompt, nil, "")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(answer), nil
+}
+
+func buildVerifiedAnswerPayload(dataset *chatDatasetCacheEntry, verified chatVerifiedResult) map[string]any {
+	payload := map[string]any{
+		"status":             verified.Status,
+		"intent":             verified.Intent,
+		"question":           verified.Question,
+		"target_field_id":    verified.TargetFieldID,
+		"target_field_label": verified.TargetFieldLabel,
+		"value":              verified.Value,
+		"notes":              verified.Notes,
+	}
+	if verified.ClarificationQuestion != "" {
+		payload["clarification_question"] = verified.ClarificationQuestion
+	}
+	if len(verified.SourceRows) > 0 {
+		rows := make([]map[string]any, 0, minInt(len(verified.SourceRows), 8))
+		limit := minInt(len(verified.SourceRows), 8)
+		includeAllFields := limit <= 4
+		for idx := 0; idx < limit; idx++ {
+			rows = append(rows, dataset.rowPromptData(verified.SourceRows[idx], verified.TargetFieldID, includeAllFields))
+		}
+		payload["rows"] = rows
+	}
+	return payload
 }
 
 func deterministicChatPlan(question string, dataset *chatDatasetCacheEntry, session *chatSessionState) (chatPlannerOutput, bool) {
@@ -497,12 +664,17 @@ func deterministicChatPlan(question string, dataset *chatDatasetCacheEntry, sess
 	if counted, ok := deterministicCountPlan(question, dataset, plan); ok {
 		return counted, true
 	}
-	if plan.UseSessionFocus {
-		if field := dataset.schema.bestFieldForQuestion(question); field != nil {
-			plan.Intent = "field_lookup"
-			plan.TargetFieldID = field.ID
-			return plan, true
-		}
+	if listed, ok := deterministicListPlan(question, dataset, plan); ok {
+		return listed, true
+	}
+	if fieldLookup, ok := deterministicFieldLookupPlan(question, dataset, session, plan); ok {
+		return fieldLookup, true
+	}
+	if described, ok := deterministicDescribePlan(question, dataset, session, plan); ok {
+		return described, true
+	}
+	if extreme, ok := deterministicExtremePlan(question, dataset, plan); ok {
+		return extreme, true
 	}
 
 	return chatPlannerOutput{}, false
@@ -520,36 +692,34 @@ func deterministicGroupedPlan(question string, dataset *chatDatasetCacheEntry, b
 	plan.Intent = "group_count_extreme"
 	plan.SortDirection = direction
 	plan.Filters = inferQuestionFilters(question, dataset, nil)
+	plan.SearchTerms = inferSearchTerms(question, dataset, plan.Filters)
 
-	switch {
-	case groupedByDate:
-		field := dataset.schema.bestDateFieldForQuestion(question)
-		if field == nil {
-			return chatPlannerOutput{}, false
+	if groupedByDate {
+		if field := dataset.schema.bestDateFieldForQuestion(question); field != nil {
+			plan.TargetFieldID = field.ID
+			plan.GroupByFieldID = field.ID
+			plan.GroupByGranularity = granularity
+			return plan, true
 		}
-		plan.TargetFieldID = field.ID
-		plan.GroupByFieldID = field.ID
-		plan.GroupByGranularity = granularity
-		return plan, true
-	case containsAny(qnorm, "community", "reserve", "first nation", "home"):
-		field := dataset.schema.bestCommunityFieldForQuestion(question)
-		if field == nil {
-			return chatPlannerOutput{}, false
-		}
-		plan.TargetFieldID = field.ID
-		plan.GroupByFieldID = field.ID
-		return plan, true
-	case containsAny(qnorm, "school", "institution"):
-		field := dataset.schema.bestSchoolFieldForQuestion(question)
-		if field == nil {
-			return chatPlannerOutput{}, false
-		}
-		plan.TargetFieldID = field.ID
-		plan.GroupByFieldID = field.ID
-		return plan, true
-	default:
 		return chatPlannerOutput{}, false
 	}
+
+	switch {
+	case containsAny(qnorm, "community", "communities", "reserve", "reserves", "first nation", "first nations", "home", "homes"):
+		if field := dataset.schema.bestCommunityFieldForQuestion(question); field != nil {
+			plan.TargetFieldID = field.ID
+			plan.GroupByFieldID = field.ID
+			return plan, true
+		}
+	case containsAny(qnorm, "school", "schools", "institution", "institutions"):
+		if field := dataset.schema.bestSchoolFieldForQuestion(question); field != nil {
+			plan.TargetFieldID = field.ID
+			plan.GroupByFieldID = field.ID
+			return plan, true
+		}
+	}
+
+	return chatPlannerOutput{}, false
 }
 
 func deterministicCountPlan(question string, dataset *chatDatasetCacheEntry, base chatPlannerOutput) (chatPlannerOutput, bool) {
@@ -565,454 +735,104 @@ func deterministicCountPlan(question string, dataset *chatDatasetCacheEntry, bas
 	return plan, true
 }
 
-func questionRequestsMatchedNames(questionNorm string) bool {
-	return containsAny(
-		questionNorm,
-		"what are the names",
-		"what were the names",
-		"names of those",
-		"their names",
-		"which children",
-		"who were the children",
-		"who are the children",
-		"who were they",
-	)
-}
-
-func heuristicChatPlan(question string, dataset *chatDatasetCacheEntry, session *chatSessionState) (chatPlannerOutput, bool) {
-	question = strings.TrimSpace(question)
-	if question == "" {
-		return chatPlannerOutput{
-			Intent:                "clarify",
-			ClarificationQuestion: "What would you like to know about the data?",
-		}, true
-	}
-
+func deterministicListPlan(question string, dataset *chatDatasetCacheEntry, base chatPlannerOutput) (chatPlannerOutput, bool) {
 	qnorm := normalizeSearchText(question)
-	plan := chatPlannerOutput{Limit: 5}
-	useSessionContext := shouldUseSessionContext(question, session)
-
-	if useSessionContext && hasSessionPronoun(" "+qnorm+" ") && len(session.FocusRowIDs) > 0 {
-		plan.UseSessionFocus = true
+	if !containsAny(qnorm, "list", "show me", "show all", "what are the names", "what were the names", "which children", "who were the children", "who are the children") {
+		return chatPlannerOutput{}, false
 	}
 
-	if granularity, direction, ok := detectGroupedCountSpec(qnorm); ok {
-		plan.Intent = "group_count_extreme"
-		plan.GroupByGranularity = granularity
-		plan.SortDirection = direction
-		if field := dataset.schema.bestDateFieldForQuestion(question); field != nil {
-			plan.GroupByFieldID = field.ID
-			plan.TargetFieldID = field.ID
-		} else if field := dataset.schema.defaultExtremeField(qnorm); field != nil {
-			plan.GroupByFieldID = field.ID
-			plan.TargetFieldID = field.ID
-		}
-		plan.Filters = inferQuestionFilters(question, dataset, nil)
-		return plan, true
+	plan := base
+	plan.Intent = "list_values"
+	plan.Filters = inferQuestionFilters(question, dataset, nil)
+	plan.SearchTerms = inferSearchTerms(question, dataset, plan.Filters)
+	if containsAny(qnorm, "names", "children", "students", "who ") && len(dataset.schema.nameFieldIDs) > 0 {
+		plan.TargetFieldID = dataset.schema.nameFieldIDs[0]
 	}
-
-	if field := dataset.schema.bestFieldForQuestion(question); field != nil {
-		plan.TargetFieldID = field.ID
-	}
-
-	switch {
-	case isExistenceCountQuestion(qnorm):
-		plan.Intent = "count_rows"
-	case containsAny(qnorm, "how many", "count", "number of"):
-		plan.Intent = "count_rows"
-	case containsAny(qnorm, "earliest", "first ", " first", "oldest"):
-		plan.Intent = "extreme"
-		plan.SortDirection = "asc"
-	case containsAny(qnorm, "latest", "last ", " last", "youngest"):
-		plan.Intent = "extreme"
-		plan.SortDirection = "desc"
-	case containsAny(qnorm, "list ", "show all", "which ", "who "):
-		if plan.TargetFieldID != "" {
-			plan.Intent = "list_values"
-		}
-	case plan.TargetFieldID != "":
-		plan.Intent = "field_lookup"
-	}
-	if plan.Intent == "" {
-		plan.Intent = "describe_subject"
-	}
-
-	if !plan.UseSessionFocus {
-		if match := dataset.bestSubjectFromQuestion(question); strings.TrimSpace(match) != "" {
-			plan.SubjectText = match
-		}
-	}
-
-	if plan.Intent == "extreme" && plan.TargetFieldID == "" {
-		if field := dataset.schema.defaultExtremeField(qnorm); field != nil {
-			plan.TargetFieldID = field.ID
-		}
-	}
-	if plan.Intent == "field_lookup" && plan.TargetFieldID == "" && session.LastFieldID != "" {
-		plan.TargetFieldID = session.LastFieldID
-	}
-	plan.Filters = inferQuestionFilters(question, dataset, plan.Filters)
-	if len(plan.SearchTerms) == 0 {
-		if plan.Intent == "count_rows" {
-			plan.SearchTerms = inferSearchTerms(question, dataset, plan.Filters)
-		}
-	}
-	if !useSessionContext {
-		plan.UseSessionFocus = false
-	}
-
 	return plan, true
 }
 
-func mergePlannerWithHeuristic(primary, heuristic chatPlannerOutput) chatPlannerOutput {
-	if heuristic.Intent == "group_count_extreme" {
-		primary.Intent = heuristic.Intent
-		if primary.GroupByFieldID == "" {
-			primary.GroupByFieldID = heuristic.GroupByFieldID
-		}
-		if primary.GroupByGranularity == "" {
-			primary.GroupByGranularity = heuristic.GroupByGranularity
-		}
-		if primary.TargetFieldID == "" {
-			primary.TargetFieldID = heuristic.TargetFieldID
-		}
-	}
-
-	if primary.Intent == "clarify" && heuristic.Intent != "" && heuristic.Intent != "clarify" && heuristic.Intent != "describe_subject" {
-		primary = heuristic
-	} else {
-		if primary.TargetFieldID == "" {
-			primary.TargetFieldID = heuristic.TargetFieldID
-		}
-		if primary.GroupByFieldID == "" {
-			primary.GroupByFieldID = heuristic.GroupByFieldID
-		}
-		if primary.GroupByGranularity == "" {
-			primary.GroupByGranularity = heuristic.GroupByGranularity
-		}
-		if primary.SubjectText == "" {
-			primary.SubjectText = heuristic.SubjectText
-		}
-		if !primary.UseSessionFocus {
-			primary.UseSessionFocus = heuristic.UseSessionFocus
-		}
-		if primary.SortDirection == "" {
-			primary.SortDirection = heuristic.SortDirection
-		}
-		primary.Filters = mergePlannerFilters(primary.Filters, heuristic.Filters)
-		primary.SearchTerms = mergeSearchTerms(primary.SearchTerms, heuristic.SearchTerms)
-	}
-
-	if primary.Limit <= 0 {
-		primary.Limit = heuristic.Limit
-	}
-	if primary.Limit <= 0 {
-		primary.Limit = 5
-	}
-	return primary
-}
-
-func mergeSearchTerms(primary, secondary []string) []string {
-	if len(secondary) == 0 {
-		return primary
-	}
-	merged := make([]string, 0, len(primary)+len(secondary))
-	seen := map[string]struct{}{}
-	add := func(term string) {
-		term = strings.TrimSpace(term)
-		key := normalizeSearchText(term)
-		if key == "" {
-			return
-		}
-		if _, ok := seen[key]; ok {
-			return
-		}
-		seen[key] = struct{}{}
-		merged = append(merged, term)
-	}
-	for _, term := range primary {
-		add(term)
-	}
-	for _, term := range secondary {
-		add(term)
-	}
-	return merged
-}
-
-func mergePlannerFilters(primary, secondary []chatPlannerFilter) []chatPlannerFilter {
-	if len(secondary) == 0 {
-		return primary
-	}
-	merged := make([]chatPlannerFilter, 0, len(primary)+len(secondary))
-	seen := map[string]struct{}{}
-	add := func(filter chatPlannerFilter) {
-		key := strings.Join([]string{
-			filter.FieldID,
-			strings.ToLower(strings.TrimSpace(filter.Op)),
-			normalizeSearchText(filter.Value),
-			normalizeSearchText(filter.Value2),
-		}, "\x1f")
-		if _, ok := seen[key]; ok {
-			return
-		}
-		seen[key] = struct{}{}
-		merged = append(merged, filter)
-	}
-	for _, filter := range primary {
-		add(filter)
-	}
-	for _, filter := range secondary {
-		add(filter)
-	}
-	return merged
-}
-
-func (cs *ChatService) answerFromVerifiedResult(
-	ctx context.Context,
-	question string,
-	dataset *chatDatasetCacheEntry,
-	session *chatSessionState,
-	verified chatVerifiedResult,
-) (string, error) {
-	if answer, ok := renderDeterministicAnswer(question, dataset, verified); ok {
-		return answer, nil
-	}
-	prompt, fallback := buildVerifiedAnswerPrompt(question, dataset, session, verified)
-	answer, usedModel, err := cs.generateFromPrompt(ctx, prompt, nil, "")
-	if err != nil {
-		if fallback != "" {
-			return fallback, nil
-		}
-		return "", fmt.Errorf("generation error (%s): %w", usedModel, err)
-	}
-	answer = strings.TrimSpace(answer)
-	if structured, ok := parseStructuredChatResponse(answer); ok {
-		answer = strings.TrimSpace(structured.Answer)
-	}
-	if answer == "" {
-		if fallback != "" {
-			return fallback, nil
-		}
-		return "", fmt.Errorf("generation error (%s): empty final answer", usedModel)
-	}
-	return answer, nil
-}
-
-func buildVerifiedAnswerPrompt(question string, dataset *chatDatasetCacheEntry, session *chatSessionState, verified chatVerifiedResult) (string, string) {
-	resultJSON, _ := json.MarshalIndent(verified, "", "  ")
-	prompt := fmt.Sprintf(
-		"%s\n\nUSER QUESTION:\n%s\n\nVERIFIED RESULT (only source of truth):\n%s",
-		strings.TrimSpace(chatVerifiedAnswerInstruction),
-		strings.TrimSpace(question),
-		string(resultJSON),
-	)
-	return prompt, renderVerifiedResultFallback(verified)
-}
-
-func renderDeterministicAnswer(question string, dataset *chatDatasetCacheEntry, verified chatVerifiedResult) (string, bool) {
-	switch verified.Status {
-	case "not_found":
-		if isExistenceCountQuestion(normalizeSearchText(question)) || verified.Intent == "count_rows" || verified.Intent == "group_count_extreme" {
-			return "No. I couldn't find any matching records in the available data.", true
-		}
-		return "", false
-	case "cannot_determine_exactly":
-		if len(verified.Notes) > 0 {
-			return "I can't determine that exactly from the available data. " + strings.Join(verified.Notes, " "), true
-		}
-		return "I can't determine that exactly from the available data.", true
-	case "needs_clarification":
-		if verified.ClarificationQuestion != "" {
-			return verified.ClarificationQuestion, true
-		}
-		return "Could you clarify what you mean?", true
-	}
-
-	switch verified.Intent {
-	case "count_rows":
-		count, ok := verified.Value.(int)
-		if !ok {
-			return "", false
-		}
-		if isExistenceCountQuestion(normalizeSearchText(question)) {
-			if count == 0 {
-				return "No. I couldn't find any matching records in the available data.", true
-			}
-			return fmt.Sprintf("Yes. I found %d matching record%s in the available data.", count, pluralSuffix(count)), true
-		}
-		return fmt.Sprintf("I found %d matching record%s in the available data.", count, pluralSuffix(count)), true
-	case "group_count_extreme":
-		values, maxCount, sortDirection, winnerNames, ok := extractGroupCountSummary(verified)
-		if !ok {
-			return "", false
-		}
-		noun := groupedEventNoun(question)
-		countPhrase := groupedCountPhrase(noun, maxCount)
-		comparisonWord := "highest"
-		if sortDirection == "asc" {
-			comparisonWord = "lowest"
-		}
-		answer := ""
-		if len(values) == 1 {
-			answer = fmt.Sprintf("%s had the %s number of %s, with %s.", values[0], comparisonWord, noun, countPhrase)
-		} else {
-			answer = fmt.Sprintf("%s were tied for the %s number of %s, with %s each.", joinWithAnd(values), comparisonWord, noun, countPhrase)
-		}
-		if len(winnerNames) > 0 && questionRequestsMatchedNames(normalizeSearchText(question)) {
-			answer += " The children were " + joinWithAnd(winnerNames) + "."
-		}
-		return answer, true
-	}
-	return "", false
-}
-
-func extractGroupCountSummary(verified chatVerifiedResult) ([]string, int, string, []string, bool) {
-	valueMap, ok := verified.Value.(map[string]any)
-	if !ok {
-		return nil, 0, "", nil, false
-	}
-	maxCount, ok := valueMap["max_count"].(int)
-	if !ok {
-		return nil, 0, "", nil, false
-	}
-	sortDirection, _ := valueMap["sort_direction"].(string)
-	rawValues, ok := valueMap["winning_values"].([]string)
-	if ok && len(rawValues) > 0 {
-		return rawValues, maxCount, sortDirection, extractStringListFromAny(valueMap["winner_names"]), true
-	}
-	if rows := verified.Rows; len(rows) > 0 {
-		values := make([]string, 0, len(rows))
-		for _, row := range rows {
-			if v, ok := row["value"].(string); ok && strings.TrimSpace(v) != "" {
-				values = append(values, v)
-			}
-		}
-		if len(values) > 0 {
-			return values, maxCount, sortDirection, extractStringListFromAny(valueMap["winner_names"]), true
-		}
-	}
-	return nil, 0, "", nil, false
-}
-
-func extractStringListFromAny(value any) []string {
-	switch v := value.(type) {
-	case []string:
-		out := make([]string, 0, len(v))
-		for _, item := range v {
-			item = strings.TrimSpace(item)
-			if item != "" {
-				out = append(out, item)
-			}
-		}
-		return out
-	case []any:
-		out := make([]string, 0, len(v))
-		for _, item := range v {
-			if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
-				out = append(out, strings.TrimSpace(text))
-			}
-		}
-		return out
-	default:
-		return nil
-	}
-}
-
-func groupedEventNoun(question string) string {
+func deterministicFieldLookupPlan(question string, dataset *chatDatasetCacheEntry, session *chatSessionState, base chatPlannerOutput) (chatPlannerOutput, bool) {
 	qnorm := normalizeSearchText(question)
-	switch {
-	case containsAny(qnorm, "death", "deaths", "died"):
-		return "deaths"
-	case containsAny(qnorm, "birth", "births", "born"):
-		return "births"
-	case containsAny(qnorm, "admission", "admissions", "admitted", "admit"):
-		return "admissions"
-	case containsAny(qnorm, "discharge", "discharges", "discharged"):
-		return "discharges"
-	default:
-		return "matching records"
+	field := dataset.schema.bestFieldForQuestion(question)
+	if field == nil {
+		return chatPlannerOutput{}, false
 	}
+
+	if base.UseSessionFocus && len(session.FocusRowIDs) > 0 {
+		return chatPlannerOutput{
+			Intent:              "field_lookup",
+			TargetFieldID:       field.ID,
+			UseSessionFocus:     true,
+			IncludeMatchedNames: base.IncludeMatchedNames,
+			Limit:               5,
+		}, true
+	}
+
+	if containsAny(qnorm, "what is", "what was", "when did", "where did", "how did", "which", "who was", "who is") {
+		subject := dataset.bestSubjectFromQuestion(question)
+		if subject == "" {
+			subject = extractSubjectCandidate(question)
+		}
+		if subject != "" {
+			plan := base
+			plan.Intent = "field_lookup"
+			plan.TargetFieldID = field.ID
+			plan.SubjectText = subject
+			plan.Filters = inferQuestionFilters(question, dataset, nil)
+			return plan, true
+		}
+	}
+
+	return chatPlannerOutput{}, false
 }
 
-func groupedCountPhrase(noun string, count int) string {
-	switch noun {
-	case "deaths":
-		return fmt.Sprintf("%d recorded death%s", count, pluralSuffix(count))
-	case "births":
-		return fmt.Sprintf("%d recorded birth%s", count, pluralSuffix(count))
-	case "admissions":
-		return fmt.Sprintf("%d recorded admission%s", count, pluralSuffix(count))
-	case "discharges":
-		return fmt.Sprintf("%d recorded discharge%s", count, pluralSuffix(count))
-	default:
-		return fmt.Sprintf("%d matching record%s", count, pluralSuffix(count))
+func deterministicDescribePlan(question string, dataset *chatDatasetCacheEntry, session *chatSessionState, base chatPlannerOutput) (chatPlannerOutput, bool) {
+	qnorm := normalizeSearchText(question)
+	if !(containsAny(qnorm, "tell me about", "describe", "information about", "who is", "who was") || (base.UseSessionFocus && len(session.FocusRowIDs) > 0)) {
+		return chatPlannerOutput{}, false
 	}
+
+	subject := ""
+	if !base.UseSessionFocus {
+		subject = dataset.bestSubjectFromQuestion(question)
+		if subject == "" {
+			subject = extractSubjectCandidate(question)
+		}
+	}
+
+	plan := base
+	plan.Intent = "describe_subject"
+	plan.SubjectText = subject
+	plan.Filters = inferQuestionFilters(question, dataset, nil)
+	return plan, true
 }
 
-func pluralSuffix(count int) string {
-	if count == 1 {
-		return ""
+func deterministicExtremePlan(question string, dataset *chatDatasetCacheEntry, base chatPlannerOutput) (chatPlannerOutput, bool) {
+	qnorm := normalizeSearchText(question)
+	if !containsAny(qnorm, "earliest", "latest", "first", "last", "oldest", "youngest") {
+		return chatPlannerOutput{}, false
 	}
-	return "s"
-}
 
-func joinWithAnd(values []string) string {
-	switch len(values) {
-	case 0:
-		return ""
-	case 1:
-		return values[0]
-	case 2:
-		return values[0] + " and " + values[1]
-	default:
-		return strings.Join(values[:len(values)-1], ", ") + ", and " + values[len(values)-1]
+	field := dataset.schema.bestDateFieldForQuestion(question)
+	if field == nil {
+		field = dataset.schema.defaultExtremeField(qnorm)
 	}
-}
+	if field == nil {
+		return chatPlannerOutput{}, false
+	}
 
-func renderVerifiedResultFallback(verified chatVerifiedResult) string {
-	switch verified.Status {
-	case "needs_clarification":
-		if verified.ClarificationQuestion != "" {
-			return verified.ClarificationQuestion
-		}
-		return "Could you clarify what you mean?"
-	case "not_found":
-		return "I couldn't find that in the data."
-	case "cannot_determine_exactly":
-		if len(verified.Notes) > 0 {
-			return "I can't determine that exactly from the data. " + strings.Join(verified.Notes, " ")
-		}
-		return "I can't determine that exactly from the data."
-	case "ok":
-		if str, ok := verified.Value.(string); ok && strings.TrimSpace(str) != "" {
-			return strings.TrimSpace(str)
-		}
-		if i, ok := verified.Value.(int); ok {
-			return strconv.Itoa(i)
-		}
-		if m, ok := verified.Value.(map[string]any); ok {
-			values, _ := m["winning_values"].([]string)
-			maxCount, _ := m["max_count"].(int)
-			if len(values) > 0 && maxCount > 0 {
-				if len(values) == 1 {
-					return fmt.Sprintf("%s had the highest count, with %d matching records.", values[0], maxCount)
-				}
-				return fmt.Sprintf("%s had the joint highest count, with %d matching records each.", strings.Join(values, ", "), maxCount)
-			}
-		}
-		if len(verified.Rows) > 0 {
-			names := make([]string, 0, len(verified.Rows))
-			for _, row := range verified.Rows {
-				if name, ok := row["name"].(string); ok && strings.TrimSpace(name) != "" {
-					names = append(names, name)
-				}
-			}
-			if len(names) > 0 {
-				return strings.Join(names, ", ")
-			}
-		}
+	direction := "asc"
+	if containsAny(qnorm, "latest", "last", "youngest") {
+		direction = "desc"
 	}
-	return "I couldn't find a clear answer in the data."
+
+	plan := base
+	plan.Intent = "extreme"
+	plan.TargetFieldID = field.ID
+	plan.SortDirection = direction
+	plan.Filters = inferQuestionFilters(question, dataset, nil)
+	plan.SearchTerms = inferSearchTerms(question, dataset, plan.Filters)
+	return plan, true
 }
 
 func executeChatPlan(
@@ -1033,7 +853,6 @@ func executeChatPlan(
 		verified.Notes = []string{"No rows match the current community filter."}
 		return verified
 	}
-
 	if plan.Intent == "clarify" {
 		verified.Status = "needs_clarification"
 		verified.ClarificationQuestion = strings.TrimSpace(plan.ClarificationQuestion)
@@ -1041,10 +860,8 @@ func executeChatPlan(
 	}
 
 	candidates := rows
-	isFollowUp := plan.UseSessionFocus && len(session.FocusRowIDs) > 0
-	if isFollowUp {
-		focused := dataset.rowsByIDs(session.FocusRowIDs, rows)
-		if len(focused) > 0 {
+	if plan.UseSessionFocus && len(session.FocusRowIDs) > 0 {
+		if focused := dataset.rowsByIDs(session.FocusRowIDs, rows); len(focused) > 0 {
 			candidates = focused
 		}
 	}
@@ -1066,74 +883,35 @@ func executeChatPlan(
 			verified.Notes = []string{"No matching person was found."}
 			return verified
 		}
-
-		// Conservative: if top match score is very low, ask for clarification
-		topScore := matches[0].Score
-
-		// If score is very low (< 0.85), ask for confirmation
-		if topScore < 0.85 {
-			closeMatches := make([]chatSubjectMatch, 0)
-			for _, m := range matches {
-				// Include scores within 0.1 of top
-				if m.Score >= topScore-0.1 {
-					closeMatches = append(closeMatches, m)
-				}
-			}
-
-			if len(closeMatches) > 1 {
-				// Multiple potential matches - ask for clarification
-				matchNames := make([]string, 0, len(closeMatches))
-				for _, m := range closeMatches {
-					matchNames = append(matchNames, m.Row.primaryName())
-				}
-				verified.Status = "needs_clarification"
-				verified.ClarificationQuestion = fmt.Sprintf("Did you mean one of these: %s?", strings.Join(matchNames, ", "))
-				return verified
-			}
+		selected := selectSubjectRows(matches)
+		if len(selected) > 1 && (plan.Intent == "describe_subject" || plan.Intent == "field_lookup") {
+			verified.Status = "needs_clarification"
+			verified.ClarificationQuestion = buildRowClarificationQuestion(selected, dataset)
+			verified.ClarificationCandidateRowIDs = rowIDsFromRows(selected)
+			return verified
 		}
-
-		// Use all close matches (for describe_subject, might be ambiguous but still answer)
-		candidates = selectSubjectRows(matches)
+		candidates = selected
 	}
 
-	// Apply search terms across all columns (multi-column search)
 	for _, searchTerm := range plan.SearchTerms {
 		searchTerm = strings.TrimSpace(searchTerm)
 		if searchTerm == "" {
 			continue
 		}
-		searchFiltered := applyMultiColumnFilter(candidates, dataset, searchTerm)
-
-		// If search eliminates all candidates, that's suspicious - be conservative
-		if len(searchFiltered) == 0 && len(candidates) > 0 {
-			// Search returned no results - mark as not found rather than continuing
+		filtered := applyMultiColumnFilter(candidates, dataset, searchTerm)
+		if len(filtered) == 0 && len(candidates) > 0 {
 			verified.Status = "not_found"
-			verified.Notes = []string{fmt.Sprintf("No records found containing '%s' in available data.", searchTerm)}
+			verified.Notes = []string{fmt.Sprintf("No records found containing '%s' in the available data.", searchTerm)}
 			return verified
 		}
-		candidates = searchFiltered
+		candidates = filtered
 	}
 
 	for _, filter := range plan.Filters {
-		prevCount := len(candidates)
-
-		// Handle special multi-column search
-		if filter.FieldID == "__multi_column__" && filter.Op == "contains_any_column" {
-			filtered := applyMultiColumnFilter(candidates, dataset, filter.Value)
-			if len(filtered) == 0 && prevCount > 0 {
-				verified.Status = "not_found"
-				verified.Notes = []string{fmt.Sprintf("No records match the filter '%s'.", filter.Value)}
-				return verified
-			}
-			candidates = filtered
-			continue
-		}
-
 		field, ok := dataset.schema.resolveField(filter.FieldID)
 		if !ok {
 			continue
 		}
-
 		filtered := applyFilter(candidates, field, filter)
 		if (filter.Op == "eq" || filter.Op == "contains") && isLocationLikeField(field) {
 			if preferred := applyPreferredLocationFilter(candidates, dataset, field, filter.Value); len(preferred) > 0 {
@@ -1141,10 +919,9 @@ func executeChatPlan(
 				continue
 			}
 		}
-		if len(filtered) == 0 && prevCount > 0 {
-			// Filter eliminated all results - this might be a typo or wrong filter value
+		if len(filtered) == 0 {
 			verified.Status = "not_found"
-			verified.Notes = []string{fmt.Sprintf("No records match the filter on '%s' with value '%s'.", field.Label, filter.Value)}
+			verified.Notes = []string{fmt.Sprintf("No records match the filter on '%s'.", field.Label)}
 			return verified
 		}
 		candidates = filtered
@@ -1152,10 +929,6 @@ func executeChatPlan(
 
 	if len(candidates) == 0 {
 		verified.Status = "not_found"
-		verified.TargetFieldID = plan.TargetFieldID
-		if field, ok := dataset.schema.resolveField(plan.TargetFieldID); ok {
-			verified.TargetFieldLabel = field.Label
-		}
 		return verified
 	}
 
@@ -1166,21 +939,20 @@ func executeChatPlan(
 
 	switch plan.Intent {
 	case "describe_subject":
-		return buildDescribeVerifiedResult(dataset, verified, candidates, isFollowUp)
+		return buildDescribeVerifiedResult(dataset, verified, candidates)
 	case "field_lookup":
-		return buildFieldLookupVerifiedResult(dataset, verified, candidates, isFollowUp)
+		return buildFieldLookupVerifiedResult(dataset, verified, candidates)
 	case "count_rows":
 		verified.Value = len(candidates)
 		verified.FocusRowIDs = rowIDsFromRows(candidates)
-		// Always pass all rows with all fields for accurate counting context
-		verified.Rows = sampleRowsForPrompt(dataset, candidates, "", len(candidates), true)
+		verified.SourceRows = cloneRows(candidates)
 		return verified
 	case "list_values":
-		return buildListValuesVerifiedResult(dataset, verified, candidates, isFollowUp)
+		return buildListValuesVerifiedResult(dataset, verified, candidates)
 	case "extreme":
-		return buildExtremeVerifiedResult(dataset, verified, candidates, plan.SortDirection, isFollowUp)
+		return buildExtremeVerifiedResult(dataset, verified, candidates, plan.SortDirection)
 	case "group_count_extreme":
-		return buildGroupCountExtremeVerifiedResult(dataset, verified, candidates, plan, isFollowUp)
+		return buildGroupCountExtremeVerifiedResult(dataset, verified, candidates, plan)
 	default:
 		verified.Status = "cannot_determine_exactly"
 		verified.Notes = append(verified.Notes, "The question could not be mapped safely.")
@@ -1188,171 +960,52 @@ func executeChatPlan(
 	}
 }
 
-func detectQuestionEventScope(question string) string {
-	qnorm := normalizeSearchText(question)
-	switch {
-	case containsAny(qnorm, "death", "deaths", "die", "died", "dead", "deceased", "cause of death", "death cause"):
-		return "death"
-	case containsAny(qnorm, "birth", "births", "born"):
-		return "birth"
-	case containsAny(qnorm, "burial", "burials", "buried"):
-		return "burial"
-	case containsAny(qnorm, "admission", "admissions", "admitted", "admit"):
-		return "admission"
-	case containsAny(qnorm, "discharge", "discharges", "discharged"):
-		return "discharge"
-	default:
-		return ""
-	}
-}
-
-func shouldApplyEventScope(plan chatPlannerOutput, eventScope string) bool {
-	if eventScope == "" {
-		return false
-	}
-	switch plan.Intent {
-	case "clarify", "describe_subject":
-		return false
-	default:
-		return true
-	}
-}
-
-func applyEventScope(rows []cachedChatRow, dataset *chatDatasetCacheEntry, eventScope string) []cachedChatRow {
-	if dataset == nil || len(rows) == 0 || eventScope == "" {
-		return rows
-	}
-	fieldIDs := dataset.schema.eventFieldIDs[eventScope]
-	if len(fieldIDs) == 0 {
-		return rows
+func buildDescribeVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow) chatVerifiedResult {
+	if len(rows) != 1 {
+		verified.Status = "needs_clarification"
+		verified.ClarificationQuestion = buildRowClarificationQuestion(rows, dataset)
+		verified.ClarificationCandidateRowIDs = rowIDsFromRows(rows)
+		return verified
 	}
 
-	filtered := make([]cachedChatRow, 0, len(rows))
-	for _, row := range rows {
-		if rowMatchesEventScope(row, &dataset.schema, eventScope, fieldIDs) {
-			filtered = append(filtered, row)
-		}
-	}
-	return filtered
-}
-
-func rowMatchesEventScope(row cachedChatRow, schema *chatDatasetSchema, eventScope string, fieldIDs []string) bool {
-	for _, fieldID := range fieldIDs {
-		field, ok := schema.resolveField(fieldID)
-		if !ok {
-			continue
-		}
-		raw := strings.TrimSpace(row.valueByField(fieldID, schema))
-		if raw == "" {
-			continue
-		}
-		if eventScope == "death" && field.Kind == chatFieldKindBoolean {
-			if isTruthy(raw) {
-				return true
-			}
-			continue
-		}
-		return true
-	}
-	return false
-}
-
-func focusIDsForSession(verified chatVerifiedResult) []int {
-	if verified.Status != "ok" {
-		return nil
-	}
-	switch verified.Intent {
-	case "describe_subject", "field_lookup", "extreme":
-		if len(verified.FocusRowIDs) > 0 && len(verified.FocusRowIDs) <= 4 {
-			return cloneIntSlice(verified.FocusRowIDs)
-		}
-	}
-	return nil
-}
-
-func buildDescribeVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow, isFollowUp bool) chatVerifiedResult {
+	rowID := rows[0].RowID
+	verified.MatchedRowID = &rowID
 	verified.FocusRowIDs = rowIDsFromRows(rows)
-	// Always pass all rows with all fields for complete context
-	verified.Rows = sampleRowsForPrompt(dataset, rows, "", len(rows), true)
-	if len(rows) == 1 {
-		rowID := rows[0].RowID
-		verified.MatchedRowID = &rowID
-	} else if len(rows) > 1 {
-		// Multiple results - add note that these are all matches
-		verified.Notes = append(verified.Notes, fmt.Sprintf("Found %d matching records. All are shown below.", len(rows)))
-	}
-
-	// Add note about any empty fields for transparency
-	emptyFieldCount := 0
-	for _, row := range rows {
-		for _, field := range dataset.schema.Fields {
-			value := strings.TrimSpace(row.valueByField(field.ID, &dataset.schema))
-			if value == "" {
-				emptyFieldCount++
-			}
-		}
-	}
-	if emptyFieldCount > 0 && len(rows) > 0 {
-		avgEmpty := emptyFieldCount / (len(rows) * len(dataset.schema.Fields))
-		if avgEmpty > 20 {
-			verified.Notes = append(verified.Notes, "Note: Some fields in these records are empty or not available.")
-		}
-	}
-
+	verified.SourceRows = cloneRows(rows)
 	return verified
 }
 
-func buildFieldLookupVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow, isFollowUp bool) chatVerifiedResult {
+func buildFieldLookupVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow) chatVerifiedResult {
 	if verified.TargetFieldID == "" {
 		verified.Status = "needs_clarification"
 		verified.ClarificationQuestion = "Which detail would you like to know?"
 		return verified
 	}
 
-	verified.FocusRowIDs = rowIDsFromRows(rows)
 	field, ok := dataset.schema.resolveField(verified.TargetFieldID)
 	if !ok {
 		verified.Status = "cannot_determine_exactly"
 		verified.Notes = append(verified.Notes, "The requested field could not be resolved.")
 		return verified
 	}
+	verified.TargetFieldLabel = field.Label
 
-	// Always pass all rows with all fields for complete context
-	verified.Rows = sampleRowsForPrompt(dataset, rows, field.ID, len(rows), true)
-	if len(rows) == 1 {
-		rowID := rows[0].RowID
-		verified.MatchedRowID = &rowID
-		value := strings.TrimSpace(rows[0].valueByField(field.ID, &dataset.schema))
-		if value != "" {
-			verified.Value = value
-		}
+	if len(rows) != 1 {
+		verified.Status = "needs_clarification"
+		verified.ClarificationQuestion = buildRowClarificationQuestion(rows, dataset)
+		verified.ClarificationCandidateRowIDs = rowIDsFromRows(rows)
 		return verified
 	}
 
-	values := map[string]struct{}{}
-	allSame := true
-	firstValue := ""
-	for _, row := range rows {
-		v := strings.TrimSpace(row.valueByField(field.ID, &dataset.schema))
-		if v == "" {
-			continue
-		}
-		values[v] = struct{}{}
-		if firstValue == "" {
-			firstValue = v
-			continue
-		}
-		if v != firstValue {
-			allSame = false
-		}
-	}
-	if allSame && len(values) == 1 {
-		verified.Value = firstValue
-	}
+	rowID := rows[0].RowID
+	verified.MatchedRowID = &rowID
+	verified.FocusRowIDs = rowIDsFromRows(rows)
+	verified.SourceRows = cloneRows(rows)
+	verified.Value = strings.TrimSpace(rows[0].valueByField(field.ID, &dataset.schema))
 	return verified
 }
 
-func buildListValuesVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow, isFollowUp bool) chatVerifiedResult {
+func buildListValuesVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow) chatVerifiedResult {
 	fieldID := verified.TargetFieldID
 	if fieldID == "" {
 		fieldID = dataset.schema.primaryListFieldID()
@@ -1363,39 +1016,32 @@ func buildListValuesVerifiedResult(dataset *chatDatasetCacheEntry, verified chat
 		verified.Notes = append(verified.Notes, "The list field could not be resolved.")
 		return verified
 	}
-	verified.TargetFieldID = field.ID
-	verified.TargetFieldLabel = field.Label
 
-	uniq := map[string]struct{}{}
 	values := make([]string, 0)
-	emptyCount := 0
+	seen := map[string]struct{}{}
 	for _, row := range rows {
 		value := strings.TrimSpace(row.valueByField(field.ID, &dataset.schema))
 		if value == "" {
-			emptyCount++
 			continue
 		}
-		if _, ok := uniq[value]; ok {
+		key := normalizeSearchText(value)
+		if _, ok := seen[key]; ok {
 			continue
 		}
-		uniq[value] = struct{}{}
+		seen[key] = struct{}{}
 		values = append(values, value)
 	}
 	sort.Strings(values)
-	verified.Value = values
 
-	// Add note if many records have empty values
-	if emptyCount > len(rows)/2 {
-		verified.Notes = append(verified.Notes, fmt.Sprintf("Note: %d out of %d records have no value for %s.", emptyCount, len(rows), field.Label))
-	}
-
-	// Always pass all rows with all fields for complete context
-	verified.Rows = sampleRowsForPrompt(dataset, rows, field.ID, len(rows), true)
+	verified.TargetFieldID = field.ID
+	verified.TargetFieldLabel = field.Label
 	verified.FocusRowIDs = rowIDsFromRows(rows)
+	verified.SourceRows = cloneRows(rows)
+	verified.Value = values
 	return verified
 }
 
-func buildExtremeVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow, direction string, isFollowUp bool) chatVerifiedResult {
+func buildExtremeVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow, direction string) chatVerifiedResult {
 	if verified.TargetFieldID == "" {
 		verified.Status = "cannot_determine_exactly"
 		verified.Notes = append(verified.Notes, "The comparison field could not be resolved.")
@@ -1408,85 +1054,75 @@ func buildExtremeVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVer
 		return verified
 	}
 
-	switch field.Kind {
-	case chatFieldKindDate:
-		winner, tied, note := determineExtremeDate(rows, field.ID)
+	var selected []cachedChatRow
+	switch field.Role {
+	case chatFieldRoleDate:
+		var winner *cachedChatRow
+		var tied []cachedChatRow
+		var note string
+		if direction == "desc" {
+			winner, tied, note = determineLatestDate(rows, field.ID)
+		} else {
+			winner, tied, note = determineEarliestDate(rows, field.ID)
+		}
 		if note != "" {
 			verified.Status = "cannot_determine_exactly"
 			verified.Notes = append(verified.Notes, note)
 			return verified
 		}
-		if winner == nil && len(tied) == 0 {
-			verified.Status = "not_found"
-			return verified
-		}
-		if direction == "desc" {
-			if winner, tied, note = determineLatestDate(rows, field.ID); note != "" {
-				verified.Status = "cannot_determine_exactly"
-				verified.Notes = append(verified.Notes, note)
-				return verified
-			}
-		}
 		if winner != nil {
-			rows = []cachedChatRow{*winner}
+			selected = []cachedChatRow{*winner}
 			rowID := winner.RowID
 			verified.MatchedRowID = &rowID
 		} else {
-			rows = tied
+			selected = tied
 		}
-	case chatFieldKindNumber:
-		winnerRows := determineExtremeNumber(rows, field.ID, direction)
-		if len(winnerRows) == 0 {
-			verified.Status = "not_found"
-			return verified
-		}
-		rows = winnerRows
-		if len(rows) == 1 {
-			rowID := rows[0].RowID
-			verified.MatchedRowID = &rowID
-		}
+	case chatFieldRoleNumber:
+		selected = determineExtremeNumber(rows, field.ID, direction)
 	default:
 		verified.Status = "cannot_determine_exactly"
-		verified.Notes = append(verified.Notes, "That kind of comparison is not supported exactly yet.")
+		verified.Notes = append(verified.Notes, "That comparison is not supported exactly yet.")
 		return verified
 	}
 
-	verified.FocusRowIDs = rowIDsFromRows(rows)
-	// Always pass all rows with all fields for complete context
-	verified.Rows = sampleRowsForPrompt(dataset, rows, field.ID, len(rows), true)
-	if len(rows) == 1 {
-		verified.Value = strings.TrimSpace(rows[0].valueByField(field.ID, &dataset.schema))
+	if len(selected) == 0 {
+		verified.Status = "not_found"
+		return verified
+	}
+
+	verified.FocusRowIDs = rowIDsFromRows(selected)
+	verified.SourceRows = cloneRows(selected)
+	if len(selected) == 1 {
+		verified.Value = strings.TrimSpace(selected[0].valueByField(field.ID, &dataset.schema))
 	}
 	return verified
 }
 
-func buildGroupCountExtremeVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow, plan chatPlannerOutput, isFollowUp bool) chatVerifiedResult {
+func buildGroupCountExtremeVerifiedResult(dataset *chatDatasetCacheEntry, verified chatVerifiedResult, rows []cachedChatRow, plan chatPlannerOutput) chatVerifiedResult {
 	groupFieldID := plan.GroupByFieldID
 	if groupFieldID == "" {
 		groupFieldID = verified.TargetFieldID
 	}
-	if groupFieldID == "" {
-		verified.Status = "cannot_determine_exactly"
-		verified.Notes = append(verified.Notes, "The grouped comparison field could not be resolved.")
-		return verified
-	}
-
-	groupField, ok := dataset.schema.resolveField(groupFieldID)
+	field, ok := dataset.schema.resolveField(groupFieldID)
 	if !ok {
 		verified.Status = "cannot_determine_exactly"
 		verified.Notes = append(verified.Notes, "The grouped comparison field could not be resolved.")
 		return verified
 	}
-	verified.TargetFieldID = groupField.ID
-	verified.TargetFieldLabel = groupField.Label
+
+	type bucketCount struct {
+		Key     string
+		Display string
+		Count   int
+	}
 
 	counts := map[string]int{}
 	displayValues := map[string]string{}
 	groupRows := map[string][]cachedChatRow{}
 	uncertainRows := 0
-	usableRows := 0
+
 	for _, row := range rows {
-		key, display, exact, present := extractGroupCountKey(row, groupField, plan.GroupByGranularity, &dataset.schema)
+		key, display, exact, present := extractGroupCountKey(row, field, plan.GroupByGranularity, &dataset.schema)
 		switch {
 		case exact:
 			counts[key]++
@@ -1494,7 +1130,6 @@ func buildGroupCountExtremeVerifiedResult(dataset *chatDatasetCacheEntry, verifi
 				displayValues[key] = display
 			}
 			groupRows[key] = append(groupRows[key], row)
-			usableRows++
 		case present:
 			uncertainRows++
 		}
@@ -1510,11 +1145,6 @@ func buildGroupCountExtremeVerifiedResult(dataset *chatDatasetCacheEntry, verifi
 		return verified
 	}
 
-	type bucketCount struct {
-		Key     string
-		Display string
-		Count   int
-	}
 	buckets := make([]bucketCount, 0, len(counts))
 	for key, count := range counts {
 		buckets = append(buckets, bucketCount{
@@ -1548,40 +1178,35 @@ func buildGroupCountExtremeVerifiedResult(dataset *chatDatasetCacheEntry, verifi
 			verified.Notes = append(verified.Notes, "Some matching rows do not identify one exact group, so the exact top result could change.")
 			return verified
 		}
-		safe := false
-		if len(buckets) == 1 {
-			safe = true
-		} else if plan.SortDirection == "asc" {
-			safe = bestCount+uncertainRows < buckets[1].Count
-		} else {
-			safe = bestCount > buckets[1].Count+uncertainRows
-		}
-		if safe {
-			verified.Notes = append(verified.Notes, fmt.Sprintf("%d matching rows were not counted because they do not identify one exact %s.", uncertainRows, groupLabelForNotes(plan.GroupByGranularity)))
-		} else {
-			verified.Status = "cannot_determine_exactly"
-			verified.Notes = append(verified.Notes, "Some matching rows do not identify one exact group, so the exact top result could change.")
-			return verified
+		if len(buckets) > 1 {
+			secondCount := buckets[1].Count
+			if plan.SortDirection == "asc" {
+				if bestCount+uncertainRows >= secondCount {
+					verified.Status = "cannot_determine_exactly"
+					verified.Notes = append(verified.Notes, "Some matching rows do not identify one exact group, so the exact top result could change.")
+					return verified
+				}
+			} else if bestCount <= secondCount+uncertainRows {
+				verified.Status = "cannot_determine_exactly"
+				verified.Notes = append(verified.Notes, "Some matching rows do not identify one exact group, so the exact top result could change.")
+				return verified
+			}
 		}
 	}
 
-	winnerRows := make([]map[string]any, 0, len(winners))
 	winnerValues := make([]string, 0, len(winners))
 	winnerNames := make([]string, 0)
-	winnerRowIDs := make([]int, 0)
 	seenNames := map[string]struct{}{}
+	winnerRows := make([]cachedChatRow, 0)
 	seenRowIDs := map[int]struct{}{}
 	for _, winner := range winners {
-		winnerRows = append(winnerRows, map[string]any{
-			"value": winner.Display,
-			"count": winner.Count,
-		})
 		winnerValues = append(winnerValues, winner.Display)
 		for _, row := range groupRows[winner.Key] {
-			if _, ok := seenRowIDs[row.RowID]; !ok {
-				seenRowIDs[row.RowID] = struct{}{}
-				winnerRowIDs = append(winnerRowIDs, row.RowID)
+			if _, ok := seenRowIDs[row.RowID]; ok {
+				continue
 			}
+			seenRowIDs[row.RowID] = struct{}{}
+			winnerRows = append(winnerRows, row)
 			if name := strings.TrimSpace(row.primaryName()); name != "" {
 				key := normalizeSearchText(name)
 				if _, ok := seenNames[key]; ok {
@@ -1592,54 +1217,394 @@ func buildGroupCountExtremeVerifiedResult(dataset *chatDatasetCacheEntry, verifi
 			}
 		}
 	}
-
 	sort.Strings(winnerNames)
-	verified.FocusRowIDs = winnerRowIDs
-	verified.Rows = winnerRows
+
+	verified.FocusRowIDs = rowIDsFromRows(winnerRows)
+	verified.SourceRows = cloneRows(winnerRows)
 	verified.Value = map[string]any{
-		"group_by":       firstNonEmpty(plan.GroupByGranularity, "value"),
-		"group_field":    groupField.Label,
+		"group_by":       firstNonEmpty(plan.GroupByGranularity, field.Label),
+		"group_field":    field.Label,
 		"winning_values": winnerValues,
 		"max_count":      bestCount,
-		"counted_rows":   usableRows,
 		"sort_direction": firstNonEmpty(plan.SortDirection, "desc"),
 		"winner_names":   winnerNames,
 	}
 	return verified
 }
 
-func extractGroupCountKey(row cachedChatRow, field *chatSchemaField, granularity string, schema *chatDatasetSchema) (key string, display string, exact bool, present bool) {
-	raw := strings.TrimSpace(row.valueByField(field.ID, schema))
-	if raw == "" {
-		return "", "", false, false
-	}
-	if field.Kind != chatFieldKindDate {
-		key = normalizeSearchText(raw)
-		if key == "" {
-			return "", "", false, false
+func renderVerifiedAnswer(question string, dataset *chatDatasetCacheEntry, verified chatVerifiedResult) string {
+	switch verified.Status {
+	case "needs_clarification":
+		return strings.TrimSpace(verified.ClarificationQuestion)
+	case "not_found":
+		return renderNotFoundAnswer(question, verified)
+	case "cannot_determine_exactly":
+		if len(verified.Notes) > 0 {
+			return "I can't determine that exactly from the available data. " + strings.TrimSpace(verified.Notes[0])
 		}
-		return key, raw, true, true
+		return "I can't determine that exactly from the available data."
 	}
 
-	tv, ok := row.temporalByField(field.ID)
-	if !ok {
-		return "", "", false, true
-	}
-	return tv.groupBucket(granularity)
-}
-
-func groupLabelForNotes(granularity string) string {
-	switch granularity {
-	case "day":
-		return "day"
-	case "month":
-		return "month"
+	switch verified.Intent {
+	case "describe_subject":
+		return renderDescribeAnswer(dataset, verified)
+	case "field_lookup":
+		return renderFieldLookupAnswer(verified)
+	case "count_rows":
+		return renderCountAnswer(question, verified)
+	case "list_values":
+		return renderListAnswer(verified)
+	case "extreme":
+		return renderExtremeAnswer(question, verified)
+	case "group_count_extreme":
+		return renderGroupAnswer(question, verified)
 	default:
-		return "year"
+		return "I couldn't map that question safely."
 	}
 }
 
-func determineExtremeDate(rows []cachedChatRow, fieldID string) (*cachedChatRow, []cachedChatRow, string) {
+func renderNotFoundAnswer(question string, verified chatVerifiedResult) string {
+	if isExistenceCountQuestion(normalizeSearchText(question)) {
+		return "No. I couldn't find any matching records in the available data."
+	}
+	if len(verified.Notes) > 0 {
+		return strings.TrimSpace(verified.Notes[0])
+	}
+	return "I couldn't find a matching answer in the available data."
+}
+
+func renderDescribeAnswer(dataset *chatDatasetCacheEntry, verified chatVerifiedResult) string {
+	if len(verified.SourceRows) == 0 {
+		return "I couldn't find a matching record in the available data."
+	}
+	row := verified.SourceRows[0]
+	name := firstNonEmpty(row.primaryName(), "This record")
+	sentences := []string{name + "."}
+
+	if community := firstNonEmpty(row.Communities...); community != "" {
+		sentences = append(sentences, "The record links them to "+community+".")
+	}
+	if school := firstNonEmpty(row.Schools...); school != "" {
+		sentences = append(sentences, "The school listed is "+school+".")
+	}
+	if field := dataset.schema.bestDateFieldForQuestion("death"); field != nil {
+		if value := strings.TrimSpace(row.valueByField(field.ID, &dataset.schema)); value != "" {
+			sentences = append(sentences, "The date listed is "+value+".")
+		}
+	}
+	if causeField := dataset.schema.bestFieldForQuestion("cause of death"); causeField != nil {
+		if value := strings.TrimSpace(row.valueByField(causeField.ID, &dataset.schema)); value != "" {
+			sentences = append(sentences, "The recorded cause or detail is "+value+".")
+		}
+	}
+	if len(sentences) == 1 {
+		for _, field := range dataset.schema.Fields {
+			value := strings.TrimSpace(row.valueByField(field.ID, &dataset.schema))
+			if value == "" || field.Role == chatFieldRoleName {
+				continue
+			}
+			sentences = append(sentences, fmt.Sprintf("%s is listed as %s.", strings.ToLower(field.Label), value))
+			if len(sentences) >= 3 {
+				break
+			}
+		}
+	}
+	return strings.Join(sentences, " ")
+}
+
+func renderFieldLookupAnswer(verified chatVerifiedResult) string {
+	if len(verified.SourceRows) == 0 {
+		return "I couldn't find a matching record in the available data."
+	}
+	row := verified.SourceRows[0]
+	name := row.primaryName()
+	fieldLabel := strings.ToLower(strings.TrimSpace(verified.TargetFieldLabel))
+	value := strings.TrimSpace(fmt.Sprint(verified.Value))
+	if value == "" || value == "<nil>" {
+		if name != "" {
+			return fmt.Sprintf("The records don't specify %s's %s.", name, fieldLabel)
+		}
+		return fmt.Sprintf("The records don't specify %s.", fieldLabel)
+	}
+	if name != "" {
+		return fmt.Sprintf("The records show %s's %s as %s.", name, fieldLabel, value)
+	}
+	return fmt.Sprintf("The %s listed in the records is %s.", fieldLabel, value)
+}
+
+func renderCountAnswer(question string, verified chatVerifiedResult) string {
+	count, _ := verified.Value.(int)
+	noun := groupedEventNoun(question)
+	if isExistenceCountQuestion(normalizeSearchText(question)) {
+		if count == 0 {
+			return "No. I couldn't find any matching records in the available data."
+		}
+		if questionRequestsMatchedNames(normalizeSearchText(question)) {
+			names := uniqueNamesFromRows(verified.SourceRows)
+			if len(names) > 0 {
+				return fmt.Sprintf("Yes. I found %s: %s.", groupedCountPhrase(noun, count), joinWithAnd(names))
+			}
+		}
+		return fmt.Sprintf("Yes. I found %s.", groupedCountPhrase(noun, count))
+	}
+
+	answer := fmt.Sprintf("I found %s.", groupedCountPhrase(noun, count))
+	if questionRequestsMatchedNames(normalizeSearchText(question)) {
+		names := uniqueNamesFromRows(verified.SourceRows)
+		if len(names) > 0 {
+			answer += " The names listed are " + joinWithAnd(names) + "."
+		}
+	}
+	return answer
+}
+
+func renderListAnswer(verified chatVerifiedResult) string {
+	values, _ := verified.Value.([]string)
+	if len(values) == 0 {
+		return "I couldn't find any values to list in the available data."
+	}
+	return "The records list " + joinWithAnd(values) + "."
+}
+
+func renderExtremeAnswer(question string, verified chatVerifiedResult) string {
+	if len(verified.SourceRows) == 0 {
+		return "I couldn't determine an exact result from the available data."
+	}
+	fieldLabel := strings.ToLower(strings.TrimSpace(verified.TargetFieldLabel))
+	value := strings.TrimSpace(fmt.Sprint(verified.Value))
+	names := uniqueNamesFromRows(verified.SourceRows)
+	qnorm := normalizeSearchText(question)
+	descriptor := "earliest"
+	if containsAny(qnorm, "latest", "last", "youngest") {
+		descriptor = "latest"
+	}
+	if value == "" || value == "<nil>" {
+		return "I couldn't determine an exact result from the available data."
+	}
+	if len(names) == 1 {
+		return fmt.Sprintf("The %s %s in the matching records is %s for %s.", descriptor, fieldLabel, value, names[0])
+	}
+	if len(names) > 1 {
+		return fmt.Sprintf("The %s %s in the matching records is %s for %s.", descriptor, fieldLabel, value, joinWithAnd(names))
+	}
+	return fmt.Sprintf("The %s %s in the matching records is %s.", descriptor, fieldLabel, value)
+}
+
+func renderGroupAnswer(question string, verified chatVerifiedResult) string {
+	valueMap, ok := verified.Value.(map[string]any)
+	if !ok {
+		return "I couldn't determine an exact grouped result from the available data."
+	}
+	values := extractStringListFromAny(valueMap["winning_values"])
+	names := extractStringListFromAny(valueMap["winner_names"])
+	maxCount, _ := extractIntFromAny(valueMap["max_count"])
+	groupBy := strings.TrimSpace(fmt.Sprint(valueMap["group_by"]))
+	sortDirection := normalizeSearchText(fmt.Sprint(valueMap["sort_direction"]))
+	noun := groupedEventNoun(question)
+	valueText := joinWithAnd(values)
+	if valueText == "" {
+		return "I couldn't determine an exact grouped result from the available data."
+	}
+
+	comparisonWord := "highest"
+	if sortDirection == "asc" {
+		comparisonWord = "lowest"
+	}
+	answer := ""
+	if groupBy == "year" || groupBy == "month" || groupBy == "day" {
+		answer = fmt.Sprintf("%s had the %s number of %s, with %s.", valueText, comparisonWord, noun, groupedCountPhrase(noun, maxCount))
+	} else {
+		answer = fmt.Sprintf("%s had the %s number of %s, with %s.", valueText, comparisonWord, noun, groupedCountPhrase(noun, maxCount))
+	}
+	if questionRequestsMatchedNames(normalizeSearchText(question)) && len(names) > 0 {
+		answer += " The names listed are " + joinWithAnd(names) + "."
+	}
+	return answer
+}
+
+func detectQuestionEventScope(question string) string {
+	qnorm := normalizeSearchText(question)
+	switch {
+	case containsAny(qnorm, "death", "deaths", "die", "died", "dead", "deceased", "cause of death", "death cause"):
+		return "death"
+	case containsAny(qnorm, "birth", "births", "born"):
+		return "birth"
+	case containsAny(qnorm, "burial", "burials", "buried"):
+		return "burial"
+	case containsAny(qnorm, "admission", "admissions", "admitted", "admit"):
+		return "admission"
+	case containsAny(qnorm, "discharge", "discharges", "discharged"):
+		return "discharge"
+	default:
+		return ""
+	}
+}
+
+func shouldApplyEventScope(plan chatPlannerOutput, eventScope string) bool {
+	if eventScope == "" {
+		return false
+	}
+	switch plan.Intent {
+	case "clarify", "describe_subject":
+		return false
+	default:
+		return true
+	}
+}
+
+func applyEventScope(rows []cachedChatRow, dataset *chatDatasetCacheEntry, eventScope string) []cachedChatRow {
+	fieldIDs := dataset.schema.eventFieldIDs[eventScope]
+	if len(fieldIDs) == 0 {
+		return rows
+	}
+	filtered := make([]cachedChatRow, 0, len(rows))
+	for _, row := range rows {
+		if rowMatchesEventScope(row, &dataset.schema, eventScope, fieldIDs) {
+			filtered = append(filtered, row)
+		}
+	}
+	return filtered
+}
+
+func rowMatchesEventScope(row cachedChatRow, schema *chatDatasetSchema, eventScope string, fieldIDs []string) bool {
+	for _, fieldID := range fieldIDs {
+		field, ok := schema.resolveField(fieldID)
+		if !ok {
+			continue
+		}
+		raw := strings.TrimSpace(row.valueByField(fieldID, schema))
+		if raw == "" {
+			continue
+		}
+		if eventScope == "death" && field.Role == chatFieldRoleBoolean {
+			return isTruthy(raw)
+		}
+		return true
+	}
+	return false
+}
+
+func focusIDsForSession(verified chatVerifiedResult) []int {
+	if verified.Status != "ok" {
+		return nil
+	}
+	switch verified.Intent {
+	case "describe_subject", "field_lookup", "extreme":
+		if len(verified.FocusRowIDs) > 0 && len(verified.FocusRowIDs) <= 4 {
+			return verified.FocusRowIDs
+		}
+	}
+	return nil
+}
+
+func buildRowClarificationQuestion(rows []cachedChatRow, dataset *chatDatasetCacheEntry) string {
+	labels := make([]string, 0, minInt(len(rows), 4))
+	for idx := range rows {
+		if len(labels) >= 4 {
+			break
+		}
+		name := firstNonEmpty(rows[idx].primaryName(), fmt.Sprintf("row %d", rows[idx].RowID))
+		qualifier := rowDisambiguator(rows[idx], dataset)
+		if qualifier != "" {
+			labels = append(labels, fmt.Sprintf("%s (%s)", name, qualifier))
+		} else {
+			labels = append(labels, name)
+		}
+	}
+	if len(labels) == 0 {
+		return "Which exact record do you mean?"
+	}
+	return "I found multiple possible matches: " + joinWithAnd(labels) + ". Which one do you mean?"
+}
+
+func rowDisambiguator(row cachedChatRow, dataset *chatDatasetCacheEntry) string {
+	if community := firstNonEmpty(row.Communities...); community != "" {
+		return community
+	}
+	if school := firstNonEmpty(row.Schools...); school != "" {
+		return school
+	}
+	for _, field := range dataset.schema.Fields {
+		if field.Role == chatFieldRoleDate {
+			if value := strings.TrimSpace(row.valueByField(field.ID, &dataset.schema)); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+func refineClarificationRows(rows []cachedChatRow, dataset *chatDatasetCacheEntry, reply string) []cachedChatRow {
+	refined := applyMultiColumnFilter(rows, dataset, reply)
+	if len(refined) > 0 {
+		return refined
+	}
+
+	tokens := strings.Fields(normalizeSearchText(reply))
+	refined = rows
+	for _, token := range tokens {
+		next := applyMultiColumnFilter(refined, dataset, token)
+		if len(next) == 0 {
+			continue
+		}
+		refined = next
+	}
+	return refined
+}
+
+func matchSubjectRows(rows []cachedChatRow, subject string) []chatSubjectMatch {
+	subjectNorm := normalizeSearchText(subject)
+	if subjectNorm == "" {
+		return nil
+	}
+	matches := make([]chatSubjectMatch, 0)
+	for i := range rows {
+		bestScore := 0.0
+		bestName := ""
+		for _, candidateName := range rows[i].Names {
+			score := scoreNameMatch(subjectNorm, normalizeSearchText(candidateName))
+			if score > bestScore {
+				bestScore = score
+				bestName = candidateName
+			}
+		}
+		if bestScore >= 0.65 {
+			rowCopy := rows[i]
+			matches = append(matches, chatSubjectMatch{
+				Row:         &rowCopy,
+				Score:       bestScore,
+				MatchedName: bestName,
+			})
+		}
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].Score == matches[j].Score {
+			return matches[i].Row.primaryName() < matches[j].Row.primaryName()
+		}
+		return matches[i].Score > matches[j].Score
+	})
+	return matches
+}
+
+func selectSubjectRows(matches []chatSubjectMatch) []cachedChatRow {
+	if len(matches) == 0 {
+		return nil
+	}
+	top := matches[0].Score
+	selected := make([]cachedChatRow, 0)
+	for _, match := range matches {
+		if match.Score+0.03 < top {
+			break
+		}
+		selected = append(selected, *match.Row)
+		if len(selected) >= 4 {
+			break
+		}
+	}
+	return selected
+}
+
+func determineEarliestDate(rows []cachedChatRow, fieldID string) (*cachedChatRow, []cachedChatRow, string) {
 	type candidate struct {
 		row cachedChatRow
 		tv  temporalValue
@@ -1655,7 +1620,6 @@ func determineExtremeDate(rows []cachedChatRow, fieldID string) (*cachedChatRow,
 	if len(candidates) == 0 {
 		return nil, nil, ""
 	}
-
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].tv.Lower.compare(*candidates[j].tv.Lower) < 0
 	})
@@ -1743,6 +1707,25 @@ func determineExtremeNumber(rows []cachedChatRow, fieldID, direction string) []c
 	return winners
 }
 
+func extractGroupCountKey(row cachedChatRow, field *chatSchemaField, granularity string, schema *chatDatasetSchema) (key string, display string, exact bool, present bool) {
+	raw := strings.TrimSpace(row.valueByField(field.ID, schema))
+	if raw == "" {
+		return "", "", false, false
+	}
+	if field.Role != chatFieldRoleDate {
+		key = normalizeSearchText(raw)
+		if key == "" {
+			return "", "", false, false
+		}
+		return key, raw, true, true
+	}
+	tv, ok := row.temporalByField(field.ID)
+	if !ok {
+		return "", "", false, true
+	}
+	return tv.groupBucket(granularity)
+}
+
 func applyFilter(rows []cachedChatRow, field *chatSchemaField, filter chatPlannerFilter) []cachedChatRow {
 	filtered := make([]cachedChatRow, 0, len(rows))
 	for _, row := range rows {
@@ -1753,131 +1736,17 @@ func applyFilter(rows []cachedChatRow, field *chatSchemaField, filter chatPlanne
 	return filtered
 }
 
-// applyMultiColumnFilter searches for a keyword across all columns in all rows
-func applyMultiColumnFilter(rows []cachedChatRow, dataset *chatDatasetCacheEntry, keyword string) []cachedChatRow {
-	if keyword == "" {
-		return rows
-	}
-
-	keywordNorm := normalizeSearchText(keyword)
-	if keywordNorm == "" {
-		return rows
-	}
-
-	filtered := make([]cachedChatRow, 0, len(rows))
-
-	for _, row := range rows {
-		found := false
-		for _, field := range dataset.schema.Fields {
-			value := strings.TrimSpace(row.valueByField(field.ID, &dataset.schema))
-			if value == "" {
-				continue
-			}
-			valueNorm := normalizeSearchText(value)
-			if valueMatchesSearchTerm(valueNorm, keywordNorm) {
-				found = true
-				break
-			}
-		}
-
-		if found {
-			filtered = append(filtered, row)
-		}
-	}
-
-	return filtered
-}
-
-func valueMatchesSearchTerm(valueNorm, keywordNorm string) bool {
-	if valueNorm == "" || keywordNorm == "" {
-		return false
-	}
-	if strings.Contains(valueNorm, keywordNorm) || strings.Contains(keywordNorm, valueNorm) {
-		return true
-	}
-
-	valueTokens := strings.Fields(valueNorm)
-	keywordTokens := strings.Fields(keywordNorm)
-	if len(keywordTokens) > 1 {
-		for _, keywordToken := range keywordTokens {
-			matched := false
-			for _, valueToken := range valueTokens {
-				if tokenMatchesSearchTerm(valueToken, keywordToken) {
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				return false
-			}
-		}
-		return true
-	}
-
-	for _, valueToken := range valueTokens {
-		if tokenMatchesSearchTerm(valueToken, keywordNorm) {
-			return true
-		}
-	}
-	return false
-}
-
-func tokenMatchesSearchTerm(valueToken, keywordToken string) bool {
-	valueToken = strings.TrimSpace(valueToken)
-	keywordToken = strings.TrimSpace(keywordToken)
-	if valueToken == "" || keywordToken == "" {
-		return false
-	}
-	if valueToken == keywordToken || strings.Contains(valueToken, keywordToken) || strings.Contains(keywordToken, valueToken) {
-		return true
-	}
-
-	valueRoot := searchTokenRoot(valueToken)
-	keywordRoot := searchTokenRoot(keywordToken)
-	if valueRoot != "" && keywordRoot != "" && (valueRoot == keywordRoot || strings.Contains(valueRoot, keywordRoot) || strings.Contains(keywordRoot, valueRoot)) {
-		return true
-	}
-
-	maxLen := maxInt(len(valueToken), len(keywordToken))
-	if maxLen >= 5 && levenshteinDistance(valueToken, keywordToken) <= 1 {
-		return true
-	}
-	if maxLen >= 7 && valueRoot != "" && keywordRoot != "" && levenshteinDistance(valueRoot, keywordRoot) <= 1 {
-		return true
-	}
-	return false
-}
-
-func searchTokenRoot(token string) string {
-	token = strings.TrimSpace(token)
-	if len(token) <= 4 {
-		return token
-	}
-	suffixes := []string{"ingly", "edly", "ation", "ition", "ments", "ment", "ings", "ness", "tion", "sion", "edly", "edly", "ing", "ers", "ies", "ied", "est", "ous", "ive", "ful", "ed", "es", "s"}
-	root := token
-	for _, suffix := range suffixes {
-		if len(root) > len(suffix)+2 && strings.HasSuffix(root, suffix) {
-			root = strings.TrimSuffix(root, suffix)
-			break
-		}
-	}
-	if strings.HasSuffix(root, "i") && len(root) > 3 {
-		root = strings.TrimSuffix(root, "i") + "y"
-	}
-	return root
-}
-
 func rowMatchesFilter(row cachedChatRow, field *chatSchemaField, filter chatPlannerFilter) bool {
 	raw := row.valueByField(field.ID, nil)
-	switch field.Kind {
-	case chatFieldKindBoolean:
+	switch field.Role {
+	case chatFieldRoleBoolean:
 		switch filter.Op {
 		case "yes":
 			return isTruthy(raw)
 		case "no":
 			return isFalsy(raw)
 		}
-	case chatFieldKindNumber:
+	case chatFieldRoleNumber:
 		value, ok := parseNumericValue(raw)
 		if !ok {
 			return false
@@ -1899,7 +1768,7 @@ func rowMatchesFilter(row cachedChatRow, field *chatSchemaField, filter chatPlan
 		case "contains":
 			return strings.Contains(normalizeSearchText(raw), normalizeSearchText(filter.Value))
 		}
-	case chatFieldKindDate:
+	case chatFieldRoleDate:
 		tv, ok := row.temporalByField(field.ID)
 		if !ok {
 			return false
@@ -1921,7 +1790,7 @@ func rowMatchesFilter(row cachedChatRow, field *chatSchemaField, filter chatPlan
 		case "contains":
 			return strings.Contains(normalizeSearchText(raw), normalizeSearchText(filter.Value))
 		}
-	case chatFieldKindCommunity, chatFieldKindLocation:
+	case chatFieldRoleCommunity, chatFieldRoleSchool, chatFieldRoleLocation:
 		switch filter.Op {
 		case "eq", "contains":
 			return scopedLocationMatch(raw, filter.Value)
@@ -1951,6 +1820,111 @@ func rowMatchesFilter(row cachedChatRow, field *chatSchemaField, filter chatPlan
 	return false
 }
 
+func applyMultiColumnFilter(rows []cachedChatRow, dataset *chatDatasetCacheEntry, keyword string) []cachedChatRow {
+	keywordNorm := normalizeSearchText(keyword)
+	if keywordNorm == "" {
+		return rows
+	}
+
+	filtered := make([]cachedChatRow, 0, len(rows))
+	for _, row := range rows {
+		if valueMatchesSearchTerm(strings.Join(row.SearchTokens, " "), keywordNorm) {
+			filtered = append(filtered, row)
+			continue
+		}
+		found := false
+		for _, field := range dataset.schema.Fields {
+			if !field.Searchable {
+				continue
+			}
+			value := strings.TrimSpace(row.valueByField(field.ID, &dataset.schema))
+			if value == "" {
+				continue
+			}
+			if valueMatchesSearchTerm(normalizeSearchText(value), keywordNorm) {
+				found = true
+				break
+			}
+		}
+		if found {
+			filtered = append(filtered, row)
+		}
+	}
+	return filtered
+}
+
+func valueMatchesSearchTerm(valueNorm, keywordNorm string) bool {
+	if valueNorm == "" || keywordNorm == "" {
+		return false
+	}
+	if strings.Contains(valueNorm, keywordNorm) || strings.Contains(keywordNorm, valueNorm) {
+		return true
+	}
+	valueTokens := strings.Fields(valueNorm)
+	keywordTokens := strings.Fields(keywordNorm)
+	if len(keywordTokens) > 1 {
+		for _, keywordToken := range keywordTokens {
+			matched := false
+			for _, valueToken := range valueTokens {
+				if tokenMatchesSearchTerm(valueToken, keywordToken) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return false
+			}
+		}
+		return true
+	}
+	for _, valueToken := range valueTokens {
+		if tokenMatchesSearchTerm(valueToken, keywordNorm) {
+			return true
+		}
+	}
+	return false
+}
+
+func tokenMatchesSearchTerm(valueToken, keywordToken string) bool {
+	if valueToken == "" || keywordToken == "" {
+		return false
+	}
+	if valueToken == keywordToken || strings.Contains(valueToken, keywordToken) || strings.Contains(keywordToken, valueToken) {
+		return true
+	}
+	valueRoot := searchTokenRoot(valueToken)
+	keywordRoot := searchTokenRoot(keywordToken)
+	if valueRoot != "" && keywordRoot != "" && (valueRoot == keywordRoot || strings.Contains(valueRoot, keywordRoot) || strings.Contains(keywordRoot, valueRoot)) {
+		return true
+	}
+	maxLen := maxInt(len(valueToken), len(keywordToken))
+	if maxLen >= 5 && levenshteinDistance(valueToken, keywordToken) <= 1 {
+		return true
+	}
+	if maxLen >= 7 && valueRoot != "" && keywordRoot != "" && levenshteinDistance(valueRoot, keywordRoot) <= 1 {
+		return true
+	}
+	return false
+}
+
+func searchTokenRoot(token string) string {
+	if len(token) <= 4 {
+		return token
+	}
+	root := token
+	suffixes := []string{"ingly", "edly", "ation", "ition", "ments", "ment", "ings", "ness", "tion", "sion", "ing", "ers", "ies", "ied", "est", "ous", "ive", "ful", "ed", "es", "s"}
+	for _, suffix := range suffixes {
+		if len(root) > len(suffix)+2 && strings.HasSuffix(root, suffix) {
+			root = strings.TrimSuffix(root, suffix)
+			break
+		}
+	}
+	if strings.HasSuffix(root, "i") && len(root) > 3 {
+		root = strings.TrimSuffix(root, "i") + "y"
+	}
+	return root
+}
+
 func scopedLocationMatch(raw, target string) bool {
 	rawNorm := normalizeSearchText(raw)
 	targetNorm := normalizeSearchText(target)
@@ -1967,23 +1941,7 @@ func scopedLocationMatch(raw, target string) bool {
 	return score >= 0.45
 }
 
-func isLocationLikeField(field *chatSchemaField) bool {
-	if field == nil {
-		return false
-	}
-	switch field.Kind {
-	case chatFieldKindCommunity, chatFieldKindLocation:
-		return true
-	default:
-		return fieldSupportsValueInference(field)
-	}
-}
-
 func applyPreferredLocationFilter(rows []cachedChatRow, dataset *chatDatasetCacheEntry, preferredField *chatSchemaField, target string) []cachedChatRow {
-	if dataset == nil || strings.TrimSpace(target) == "" {
-		return nil
-	}
-
 	groups := map[string][]*chatSchemaField{
 		"school":    {},
 		"community": {},
@@ -2021,9 +1979,6 @@ func applyLocationFields(rows []cachedChatRow, dataset *chatDatasetCacheEntry, f
 	filtered := make([]cachedChatRow, 0, len(rows))
 	for _, row := range rows {
 		for _, field := range fields {
-			if field == nil {
-				continue
-			}
 			if scopedLocationMatch(row.valueByField(field.ID, &dataset.schema), target) {
 				filtered = append(filtered, row)
 				break
@@ -2033,90 +1988,343 @@ func applyLocationFields(rows []cachedChatRow, dataset *chatDatasetCacheEntry, f
 	return filtered
 }
 
-func locationFieldCategory(field *chatSchemaField) string {
-	if field == nil {
-		return "other"
+func scoreLocationMatch(questionNorm, locationNorm string) float64 {
+	if strings.Contains(questionNorm, locationNorm) {
+		return 1.0
 	}
-	blob := fieldSearchBlob(field)
-	switch {
-	case containsAny(blob, "school", "institution", "residential"):
-		return "school"
-	case containsAny(blob, "community", "reserve", "first nation", "home"):
-		return "community"
-	default:
-		return "other"
+	locationWords := strings.Fields(locationNorm)
+	if len(locationWords) == 0 {
+		return 0
 	}
+	matchedWords := 0
+	for _, word := range locationWords {
+		if len(word) >= 4 && strings.Contains(questionNorm, word) {
+			matchedWords++
+		}
+	}
+	if matchedWords > 0 {
+		score := float64(matchedWords) / float64(len(locationWords))
+		if strings.Contains(questionNorm, locationWords[0]) {
+			score += 0.2
+		}
+		return score
+	}
+	return 0
 }
 
-func matchSubjectRows(rows []cachedChatRow, subject string) []chatSubjectMatch {
-	subject = strings.TrimSpace(subject)
-	if subject == "" {
-		return nil
+func inferQuestionFilters(question string, dataset *chatDatasetCacheEntry, existing []chatPlannerFilter) []chatPlannerFilter {
+	if dataset == nil {
+		return existing
+	}
+	qnorm := normalizeSearchText(question)
+	if qnorm == "" {
+		return existing
 	}
 
-	subjectNorm := normalizeSearchText(subject)
-	if subjectNorm == "" {
-		return nil
+	filters := make([]chatPlannerFilter, 0, len(existing)+1)
+	filters = append(filters, existing...)
+	seenFields := map[string]struct{}{}
+	for _, filter := range existing {
+		seenFields[filter.FieldID] = struct{}{}
 	}
 
-	matches := make([]chatSubjectMatch, 0)
-	for i := range rows {
-		bestScore := 0.0
-		bestName := ""
-		for _, candidateName := range rows[i].Names {
-			score := scoreNameMatch(subjectNorm, normalizeSearchText(candidateName))
-			if score > bestScore {
-				bestScore = score
-				bestName = candidateName
+	type inferredCandidate struct {
+		field *chatSchemaField
+		value string
+		score float64
+	}
+	best := inferredCandidate{}
+	for idx := range dataset.schema.Fields {
+		field := &dataset.schema.Fields[idx]
+		if _, ok := seenFields[field.ID]; ok {
+			continue
+		}
+		if !fieldSupportsValueInference(field) {
+			continue
+		}
+		if value, score, ok := dataset.bestFilterValueForQuestion(field, qnorm); ok {
+			score += filterFieldPreference(field, qnorm)
+			if score > best.score {
+				best = inferredCandidate{field: field, value: value, score: score}
 			}
 		}
-		// Lowered threshold from 0.72 to 0.65 to catch spelling variations, abbreviations, and name aliases
-		// The ambiguity check below will ask for clarification if there are multiple close matches
-		if bestScore >= 0.65 {
-			rowCopy := rows[i]
-			matches = append(matches, chatSubjectMatch{
-				Row:         &rowCopy,
-				Score:       bestScore,
-				MatchedName: bestName,
-			})
-		}
 	}
-
-	sort.Slice(matches, func(i, j int) bool {
-		if matches[i].Score == matches[j].Score {
-			return matches[i].Row.primaryName() < matches[j].Row.primaryName()
-		}
-		return matches[i].Score > matches[j].Score
-	})
-	return matches
+	if best.field != nil {
+		filters = append(filters, chatPlannerFilter{
+			FieldID: best.field.ID,
+			Op:      "eq",
+			Value:   best.value,
+		})
+	}
+	return filters
 }
 
-func selectSubjectRows(matches []chatSubjectMatch) []cachedChatRow {
-	if len(matches) == 0 {
+func inferSearchTerms(question string, dataset *chatDatasetCacheEntry, filters []chatPlannerFilter) []string {
+	qnorm := normalizeSearchText(question)
+	if qnorm == "" {
 		return nil
 	}
-	top := matches[0].Score
-	selected := make([]cachedChatRow, 0)
-	for _, match := range matches {
-		if match.Score+0.03 < top {
-			break
+
+	excluded := map[string]struct{}{}
+	for _, filter := range filters {
+		field, ok := dataset.schema.resolveField(filter.FieldID)
+		if !ok {
+			continue
 		}
-		selected = append(selected, *match.Row)
-		if len(selected) >= 4 {
+		addNormalizedPhraseTokens(excluded, field.Label)
+		addNormalizedPhraseTokens(excluded, filter.Value)
+		addNormalizedPhraseTokens(excluded, filter.Value2)
+	}
+	for _, field := range dataset.schema.Fields {
+		addNormalizedPhraseTokens(excluded, field.Label)
+		for _, alias := range field.Aliases {
+			addNormalizedPhraseTokens(excluded, alias)
+		}
+	}
+
+	stopWords := map[string]struct{}{
+		"a": {}, "about": {}, "after": {}, "all": {}, "an": {}, "and": {}, "any": {}, "are": {}, "at": {}, "before": {},
+		"birth": {}, "births": {}, "by": {}, "child": {}, "children": {}, "community": {}, "count": {}, "date": {}, "dates": {},
+		"death": {}, "deaths": {}, "describe": {}, "did": {}, "do": {}, "does": {}, "during": {}, "earliest": {}, "find": {},
+		"first": {}, "for": {}, "from": {}, "had": {}, "has": {}, "have": {}, "highest": {}, "how": {}, "in": {}, "information": {},
+		"institution": {}, "is": {}, "it": {}, "its": {}, "last": {}, "latest": {}, "least": {}, "list": {}, "many": {}, "month": {},
+		"months": {}, "most": {}, "much": {}, "number": {}, "occur": {}, "occurred": {}, "of": {}, "on": {}, "or": {}, "records": {},
+		"reserve": {}, "reserves": {}, "school": {}, "show": {}, "student": {}, "students": {}, "tell": {}, "that": {}, "the": {},
+		"their": {}, "there": {}, "these": {}, "they": {}, "this": {}, "those": {}, "total": {}, "was": {}, "were": {}, "what": {},
+		"when": {}, "where": {}, "which": {}, "who": {}, "with": {}, "year": {}, "years": {},
+	}
+
+	terms := make([]string, 0, 3)
+	seen := map[string]struct{}{}
+	for _, token := range strings.Fields(qnorm) {
+		if len(token) < 4 {
+			continue
+		}
+		if _, ok := stopWords[token]; ok {
+			continue
+		}
+		if _, ok := excluded[token]; ok {
+			continue
+		}
+		if _, ok := seen[token]; ok {
+			continue
+		}
+		seen[token] = struct{}{}
+		terms = append(terms, token)
+		if len(terms) >= 3 {
 			break
 		}
 	}
-	return selected
+	return terms
 }
 
-func sampleRowsForPrompt(dataset *chatDatasetCacheEntry, rows []cachedChatRow, targetFieldID string, limit int, includeAll bool) []map[string]any {
-	if limit <= 0 || limit > len(rows) {
-		limit = len(rows)
+func addNormalizedPhraseTokens(dest map[string]struct{}, value string) {
+	for _, token := range strings.Fields(normalizeSearchText(value)) {
+		dest[token] = struct{}{}
 	}
-	out := make([]map[string]any, 0, limit)
-	for idx := 0; idx < limit; idx++ {
-		out = append(out, dataset.rowPromptData(rows[idx], targetFieldID, includeAll))
+}
+
+func detectGroupedCountSpec(questionNorm string) (string, string, bool) {
+	if questionNorm == "" {
+		return "", "", false
 	}
+	if containsAny(questionNorm, "earliest", "latest", "first", "last", "oldest", "youngest") {
+		return "", "", false
+	}
+
+	direction := "desc"
+	if containsAny(questionNorm, "least", "lowest", "fewest", "smallest number") {
+		direction = "asc"
+	} else if !containsAny(questionNorm, "most", "highest", "largest number", "greatest number", "maximum", "max") {
+		return "", "", false
+	}
+
+	granularity := ""
+	switch {
+	case containsAny(questionNorm, "year", "years"):
+		granularity = "year"
+	case containsAny(questionNorm, "month", "months"):
+		granularity = "month"
+	case containsAny(questionNorm, "day", "days", "date", "dates"):
+		granularity = "day"
+	default:
+		return "", "", false
+	}
+
+	if !containsAny(questionNorm, "death", "deaths", "died", "birth", "births", "born", "burial", "buried", "admission", "admissions", "admitted", "discharge", "discharges", "occur", "occurred") {
+		return "", "", false
+	}
+	return granularity, direction, true
+}
+
+func questionRequestsMatchedNames(questionNorm string) bool {
+	return containsAny(
+		questionNorm,
+		"what are the names",
+		"what were the names",
+		"names of those",
+		"their names",
+		"which children",
+		"who were the children",
+		"who are the children",
+		"who were they",
+	)
+}
+
+func shouldUseSessionContext(question string, session *chatSessionState) bool {
+	if session == nil {
+		return false
+	}
+	qnorm := normalizeSearchText(question)
+	if qnorm == "" {
+		return false
+	}
+	padded := " " + qnorm + " "
+	if hasSessionPronoun(padded) {
+		return len(session.FocusRowIDs) > 0
+	}
+	if containsAny(qnorm, "what about", "how about", "same person", "same one", "same child", "same student", "that person", "that one", "this person", "this one") {
+		return len(session.FocusRowIDs) > 0
+	}
+	if session.Pending != nil && isLikelyClarificationReply(qnorm) {
+		return true
+	}
+	return false
+}
+
+func isLikelyClarificationReply(questionNorm string) bool {
+	if questionNorm == "" {
+		return false
+	}
+	if containsAny(questionNorm, "did any", "were there any", "are there any", "is there any", "how many", "count", "number of", "in what year", "in what years", "which year", "which years", "tell me", "list ", "show ", "find ", "search ", "who ", "what ", "when ", "where ") {
+		return false
+	}
+	return len(strings.Fields(questionNorm)) <= 8
+}
+
+func isExistenceCountQuestion(questionNorm string) bool {
+	return containsAny(questionNorm, "did any", "were there any", "are there any", "is there any", "was there any", "have any")
+}
+
+func hasSessionPronoun(questionNorm string) bool {
+	return containsAny(questionNorm, " he ", " she ", " they ", " them ", " him ", " her ", " his ", " their ", " same person", " same one", " that person", " that one", " this one", " this person")
+}
+
+func groupedEventNoun(question string) string {
+	qnorm := normalizeSearchText(question)
+	switch {
+	case containsAny(qnorm, "death", "deaths", "died"):
+		return "deaths"
+	case containsAny(qnorm, "birth", "births", "born"):
+		return "births"
+	case containsAny(qnorm, "admission", "admissions", "admitted", "admit"):
+		return "admissions"
+	case containsAny(qnorm, "discharge", "discharges", "discharged"):
+		return "discharges"
+	default:
+		return "matching records"
+	}
+}
+
+func groupedCountPhrase(noun string, count int) string {
+	switch noun {
+	case "deaths":
+		return fmt.Sprintf("%d recorded death%s", count, pluralSuffix(count))
+	case "births":
+		return fmt.Sprintf("%d recorded birth%s", count, pluralSuffix(count))
+	case "admissions":
+		return fmt.Sprintf("%d recorded admission%s", count, pluralSuffix(count))
+	case "discharges":
+		return fmt.Sprintf("%d recorded discharge%s", count, pluralSuffix(count))
+	default:
+		return fmt.Sprintf("%d matching record%s", count, pluralSuffix(count))
+	}
+}
+
+func pluralSuffix(count int) string {
+	if count == 1 {
+		return ""
+	}
+	return "s"
+}
+
+func joinWithAnd(values []string) string {
+	switch len(values) {
+	case 0:
+		return ""
+	case 1:
+		return values[0]
+	case 2:
+		return values[0] + " and " + values[1]
+	default:
+		return strings.Join(values[:len(values)-1], ", ") + ", and " + values[len(values)-1]
+	}
+}
+
+func extractStringListFromAny(value any) []string {
+	switch v := value.(type) {
+	case []string:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			item = strings.TrimSpace(item)
+			if item != "" {
+				out = append(out, item)
+			}
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
+				out = append(out, strings.TrimSpace(text))
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+func extractIntFromAny(value any) (int, bool) {
+	switch v := value.(type) {
+	case int:
+		return v, true
+	case int32:
+		return int(v), true
+	case int64:
+		return int(v), true
+	case float64:
+		return int(v), true
+	case json.Number:
+		i, err := v.Int64()
+		return int(i), err == nil
+	}
+	return 0, false
+}
+
+func uniqueNamesFromRows(rows []cachedChatRow) []string {
+	names := make([]string, 0, len(rows))
+	seen := map[string]struct{}{}
+	for _, row := range rows {
+		name := strings.TrimSpace(row.primaryName())
+		if name == "" {
+			continue
+		}
+		key := normalizeSearchText(name)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		names = append(names, name)
+	}
+	return names
+}
+
+func cloneRows(rows []cachedChatRow) []cachedChatRow {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]cachedChatRow, len(rows))
+	copy(out, rows)
 	return out
 }
 
@@ -2129,49 +2337,79 @@ func rowIDsFromRows(rows []cachedChatRow) []int {
 }
 
 func (cs *ChatService) getOrLoadChatDataset(file f.File) (*chatDatasetCacheEntry, error) {
-	cacheKey := chatDatasetCacheKey(file.ID, file.Version)
+	configJSON, configUpdatedAt, err := cs.loadChatConfigJSON(file.Filename)
+	if err != nil {
+		return nil, err
+	}
+	cacheKey := chatDatasetCacheKey(file.ID, file.Version, configUpdatedAt)
 	if cached, ok := cs.datasetCache.Load(cacheKey); ok {
 		if entry, ok := cached.(*chatDatasetCacheEntry); ok {
 			return entry, nil
 		}
 	}
 
-	var rawRowsDB []f.FileData
-	if err := cs.DB.Select("id, row_data").
-		Where("file_id = ? AND version = ?", file.ID, file.Version).
-		Order("id ASC").
-		Find(&rawRowsDB).Error; err != nil {
+	var records []chatRowRecord
+	if err := cs.DB.Table("file_data fd").
+		Select(`
+			fd.id AS row_id,
+			fd.row_data,
+			fd.updated_at AS row_updated_at,
+			fdn.row_data_normalized,
+			fdn.search_text,
+			fdn.canonical_name,
+			fdn.canonical_community,
+			fdn.canonical_school,
+			fdn.status,
+			fdn.source_updated_at
+		`).
+		Joins("LEFT JOIN file_data_normalized fdn ON fdn.source_row_id = fd.id").
+		Where("fd.file_id = ? AND fd.version = ?", file.ID, file.Version).
+		Order("fd.id ASC").
+		Scan(&records).Error; err != nil {
 		return nil, fmt.Errorf("file data not found: %w", err)
 	}
+	if len(records) == 0 {
+		return nil, fmt.Errorf("file data not found")
+	}
 
-	rawRows := make([]rawChatRow, 0, len(rawRowsDB))
-	for _, rawRow := range rawRowsDB {
-		rowMap, err := rowJSONToStrings(rawRow.RowData)
+	rawRows := make([]chatRawRow, 0, len(records))
+	for _, record := range records {
+		values, err := rowJSONToStrings(record.RowData)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal file data: invalid row json")
+			return nil, fmt.Errorf("failed to marshal file data: %w", err)
 		}
-		rawRows = append(rawRows, rawChatRow{
-			RowID:   int(rawRow.ID),
-			RowJSON: string(rawRow.RowData),
-			Values:  rowMap,
+		rawRows = append(rawRows, chatRawRow{
+			RowID:              int(record.RowID),
+			RowJSON:            string(record.RowData),
+			Values:             values,
+			NormalizedPayload:  parseNormalizedPayload(record.RowDataNormalized),
+			SearchText:         strings.TrimSpace(record.SearchText),
+			CanonicalName:      strings.TrimSpace(record.CanonicalName),
+			CanonicalCommunity: strings.TrimSpace(record.CanonicalCommunity),
+			CanonicalSchool:    strings.TrimSpace(record.CanonicalSchool),
 		})
 	}
 
 	columns := extractOrderedColumns(file.ColumnsOrder, rawRows)
-	schema := buildChatSchema(columns, rawRows)
-	rows := make([]cachedChatRow, 0, len(rawRows))
+	schema := buildChatSchema(columns, rawRows, configJSON)
+	cachedRows := make([]cachedChatRow, 0, len(rawRows))
 	rowByID := make(map[int]*cachedChatRow, len(rawRows))
 	for _, rawRow := range rawRows {
 		row := buildCachedChatRow(rawRow, &schema)
-		rows = append(rows, row)
-		rowByID[row.RowID] = &rows[len(rows)-1]
+		cachedRows = append(cachedRows, row)
+		rowByID[row.RowID] = &cachedRows[len(cachedRows)-1]
 	}
 
 	entry := &chatDatasetCacheEntry{
-		rows:    rows,
-		rowByID: rowByID,
-		schema:  schema,
+		FileID:   file.ID,
+		Filename: file.Filename,
+		Version:  file.Version,
+		ConfigAt: configUpdatedAt,
+		rows:     cachedRows,
+		rowByID:  rowByID,
+		schema:   schema,
 	}
+
 	actual, _ := cs.datasetCache.LoadOrStore(cacheKey, entry)
 	if cached, ok := actual.(*chatDatasetCacheEntry); ok {
 		return cached, nil
@@ -2179,44 +2417,79 @@ func (cs *ChatService) getOrLoadChatDataset(file f.File) (*chatDatasetCacheEntry
 	return entry, nil
 }
 
-func rowJSONToStrings(raw []byte) (map[string]string, error) {
-	var anyMap map[string]any
-	if err := json.Unmarshal(raw, &anyMap); err != nil {
+func (cs *ChatService) loadChatConfigJSON(filename string) ([]byte, time.Time, error) {
+	service := dc.DataConfigService{DB: cs.DB}
+	result, err := service.GetByFileNameIfModified(filename, nil)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "record not found") {
+			return nil, time.Time{}, nil
+		}
+		return nil, time.Time{}, err
+	}
+	if result == nil || result.Config == nil {
+		return nil, time.Time{}, nil
+	}
+	return []byte(result.Config.Config), result.Config.UpdatedAt.UTC(), nil
+}
+
+func chatDatasetCacheKey(fileID uint, version int, configAt time.Time) string {
+	stamp := "nocfg"
+	if !configAt.IsZero() {
+		stamp = configAt.UTC().Format(time.RFC3339Nano)
+	}
+	return fmt.Sprintf("%d:%d:%s", fileID, version, stamp)
+}
+
+type chatRawRow struct {
+	RowID              int
+	RowJSON            string
+	Values             map[string]string
+	NormalizedPayload  chatNormalizedPayload
+	SearchText         string
+	CanonicalName      string
+	CanonicalCommunity string
+	CanonicalSchool    string
+}
+
+func parseNormalizedPayload(raw datatypes.JSON) chatNormalizedPayload {
+	payload := chatNormalizedPayload{Fields: map[string]chatNormalizedField{}}
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return payload
+	}
+	_ = json.Unmarshal(raw, &payload)
+	if payload.Fields == nil {
+		payload.Fields = map[string]chatNormalizedField{}
+	}
+	return payload
+}
+
+func rowJSONToStrings(rowData datatypes.JSON) (map[string]string, error) {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(rowData, &raw); err != nil {
 		return nil, err
 	}
-	out := make(map[string]string, len(anyMap))
-	for key, value := range anyMap {
+	out := make(map[string]string, len(raw))
+	for key, value := range raw {
 		out[key] = stringifyRowValue(value)
 	}
 	return out, nil
 }
 
-func stringifyRowValue(value any) string {
-	switch v := value.(type) {
-	case nil:
+func stringifyRowValue(value interface{}) string {
+	if value == nil {
 		return ""
+	}
+	switch v := value.(type) {
 	case string:
-		return v
-	case float64:
-		if math.Trunc(v) == v {
-			return strconv.FormatInt(int64(v), 10)
-		}
-		return strconv.FormatFloat(v, 'f', -1, 64)
-	case bool:
-		if v {
-			return "true"
-		}
-		return "false"
+		return strings.TrimSpace(v)
+	case fmt.Stringer:
+		return strings.TrimSpace(v.String())
 	default:
-		b, err := json.Marshal(v)
-		if err != nil {
-			return fmt.Sprintf("%v", v)
-		}
-		return string(b)
+		return strings.TrimSpace(fmt.Sprint(v))
 	}
 }
 
-func extractOrderedColumns(columnsJSON []byte, rows []rawChatRow) []string {
+func extractOrderedColumns(columnsJSON []byte, rows []chatRawRow) []string {
 	var columns []string
 	if len(strings.TrimSpace(string(columnsJSON))) > 0 {
 		_ = json.Unmarshal(columnsJSON, &columns)
@@ -2242,7 +2515,8 @@ func extractOrderedColumns(columnsJSON []byte, rows []rawChatRow) []string {
 	return columns
 }
 
-func buildChatSchema(columns []string, rows []rawChatRow) chatDatasetSchema {
+func buildChatSchema(columns []string, rows []chatRawRow, configJSON []byte) chatDatasetSchema {
+	configLookup := parseChatConfig(configJSON)
 	schema := chatDatasetSchema{
 		Fields:        make([]chatSchemaField, 0, len(columns)),
 		fieldByID:     map[string]*chatSchemaField{},
@@ -2252,23 +2526,51 @@ func buildChatSchema(columns []string, rows []rawChatRow) chatDatasetSchema {
 
 	usedIDs := map[string]int{}
 	for _, column := range columns {
+		meta := configLookup.lookup(column)
 		fieldID := uniqueFieldID(column, usedIDs)
-		kind := inferFieldKind(column, rows)
+		role := meta.Role
+		if role == "" {
+			role = inferFieldRole(column, rows)
+		}
+
+		aliases := inferFieldAliases(column, role)
+		aliases = append(aliases, meta.Aliases...)
+		aliases = uniqueStrings(aliases)
+
+		searchable := true
+		if meta.Searchable != nil {
+			searchable = *meta.Searchable
+		}
+		groupable := role == chatFieldRoleCommunity || role == chatFieldRoleSchool || role == chatFieldRoleLocation || role == chatFieldRoleDate
+		if meta.Groupable != nil {
+			groupable = *meta.Groupable
+		}
+		exactOnly := false
+		if meta.ExactOnly != nil {
+			exactOnly = *meta.ExactOnly
+		}
+
 		field := chatSchemaField{
-			ID:       fieldID,
-			Label:    column,
-			Kind:     kind,
-			Aliases:  inferFieldAliases(column, kind),
-			Examples: collectFieldExamples(column, rows, kind),
+			ID:         fieldID,
+			Label:      column,
+			Role:       role,
+			Aliases:    aliases,
+			Examples:   collectFieldExamples(column, rows),
+			Searchable: searchable,
+			Groupable:  groupable,
+			ExactOnly:  exactOnly,
 		}
 		schema.Fields = append(schema.Fields, field)
-		if kind == chatFieldKindName {
+		switch role {
+		case chatFieldRoleName:
 			schema.nameFieldIDs = append(schema.nameFieldIDs, fieldID)
-		}
-		if kind == chatFieldKindCommunity {
+		case chatFieldRoleCommunity:
 			schema.communityFieldIDs = append(schema.communityFieldIDs, fieldID)
-		}
-		if kind == chatFieldKindDate {
+		case chatFieldRoleSchool:
+			schema.schoolFieldIDs = append(schema.schoolFieldIDs, fieldID)
+		case chatFieldRoleLocation:
+			schema.locationFieldIDs = append(schema.locationFieldIDs, fieldID)
+		case chatFieldRoleDate:
 			schema.dateFieldIDs = append(schema.dateFieldIDs, fieldID)
 		}
 		for _, event := range inferFieldEvents(field) {
@@ -2288,25 +2590,212 @@ func buildChatSchema(columns []string, rows []rawChatRow) chatDatasetSchema {
 	return schema
 }
 
-func uniqueFieldID(label string, used map[string]int) string {
-	base := slugify(label)
-	if base == "" {
-		base = "field"
+func (schema *chatDatasetSchema) resolveField(ref string) (*chatSchemaField, bool) {
+	ref = normalizeSearchText(ref)
+	if ref == "" {
+		return nil, false
 	}
-	used[base]++
-	if used[base] == 1 {
-		return base
-	}
-	return fmt.Sprintf("%s_%d", base, used[base])
+	field, ok := schema.fieldByLookup[ref]
+	return field, ok
 }
 
-func inferFieldKind(label string, rows []rawChatRow) chatFieldKind {
+func (schema *chatDatasetSchema) bestFieldForQuestion(question string) *chatSchemaField {
+	qnorm := normalizeSearchText(question)
+	bestScore := 0
+	var best *chatSchemaField
+	for idx := range schema.Fields {
+		field := &schema.Fields[idx]
+		score := 0
+		for _, alias := range field.Aliases {
+			aliasNorm := normalizeSearchText(alias)
+			if aliasNorm != "" && strings.Contains(qnorm, aliasNorm) && len(aliasNorm) > score {
+				score = len(aliasNorm)
+			}
+		}
+		if score > bestScore {
+			bestScore = score
+			best = field
+		}
+	}
+	return best
+}
+
+func (schema *chatDatasetSchema) bestDateFieldForQuestion(question string) *chatSchemaField {
+	qnorm := normalizeSearchText(question)
+	bestScore := 0
+	var best *chatSchemaField
+	for _, fieldID := range schema.dateFieldIDs {
+		field := schema.fieldByID[fieldID]
+		if field == nil {
+			continue
+		}
+		score := 0
+		for _, alias := range field.Aliases {
+			aliasNorm := normalizeSearchText(alias)
+			if aliasNorm != "" && strings.Contains(qnorm, aliasNorm) {
+				score = maxInt(score, len(aliasNorm)+5)
+			}
+		}
+		blob := fieldSearchBlob(field)
+		switch {
+		case containsAny(qnorm, "death", "deaths", "died") && containsAny(blob, "death", "died"):
+			score += 50
+		case containsAny(qnorm, "birth", "births", "born") && containsAny(blob, "birth", "born"):
+			score += 50
+		case containsAny(qnorm, "burial", "buried") && containsAny(blob, "burial", "buried"):
+			score += 40
+		case containsAny(qnorm, "admission", "admissions", "admitted", "admit") && containsAny(blob, "admission", "admitted", "admit"):
+			score += 40
+		case containsAny(qnorm, "discharge", "discharges", "discharged") && containsAny(blob, "discharge", "discharged"):
+			score += 40
+		}
+		if containsAny(qnorm, "year", "years", "month", "months", "day", "days", "date", "dates") {
+			score += 2
+		}
+		if score > bestScore {
+			bestScore = score
+			best = field
+		}
+	}
+	if best != nil {
+		return best
+	}
+	return schema.defaultExtremeField(qnorm)
+}
+
+func (schema *chatDatasetSchema) defaultExtremeField(questionNorm string) *chatSchemaField {
+	if containsAny(questionNorm, "oldest", "youngest") {
+		for idx := range schema.Fields {
+			field := &schema.Fields[idx]
+			if field.Role == chatFieldRoleNumber && strings.Contains(strings.ToLower(field.Label), "age") {
+				return field
+			}
+		}
+	}
+	for _, fieldID := range schema.dateFieldIDs {
+		field := schema.fieldByID[fieldID]
+		if field == nil {
+			continue
+		}
+		label := strings.ToLower(field.Label)
+		if strings.Contains(label, "death") || strings.Contains(label, "birth") {
+			return field
+		}
+	}
+	if len(schema.dateFieldIDs) > 0 {
+		return schema.fieldByID[schema.dateFieldIDs[0]]
+	}
+	return nil
+}
+
+func (schema *chatDatasetSchema) primaryListFieldID() string {
+	if len(schema.nameFieldIDs) > 0 {
+		return schema.nameFieldIDs[0]
+	}
+	if len(schema.communityFieldIDs) > 0 {
+		return schema.communityFieldIDs[0]
+	}
+	if len(schema.Fields) > 0 {
+		return schema.Fields[0].ID
+	}
+	return ""
+}
+
+func (schema *chatDatasetSchema) bestCommunityFieldForQuestion(question string) *chatSchemaField {
+	qnorm := normalizeSearchText(question)
+	bestScore := -1
+	var best *chatSchemaField
+	for idx := range schema.Fields {
+		field := &schema.Fields[idx]
+		if field.Role != chatFieldRoleCommunity {
+			continue
+		}
+		score := 10
+		blob := fieldSearchBlob(field)
+		if containsAny(qnorm, "community", "communities") && containsAny(blob, "community") {
+			score += 40
+		}
+		if containsAny(qnorm, "reserve", "reserves") && containsAny(blob, "reserve") {
+			score += 40
+		}
+		if containsAny(qnorm, "first nation", "first nations") && containsAny(blob, "first nation") {
+			score += 40
+		}
+		for _, alias := range field.Aliases {
+			aliasNorm := normalizeSearchText(alias)
+			if aliasNorm != "" && strings.Contains(qnorm, aliasNorm) {
+				score += len(aliasNorm)
+			}
+		}
+		if score > bestScore {
+			bestScore = score
+			best = field
+		}
+	}
+	return best
+}
+
+func (schema *chatDatasetSchema) bestSchoolFieldForQuestion(question string) *chatSchemaField {
+	qnorm := normalizeSearchText(question)
+	bestScore := -1
+	var best *chatSchemaField
+	for idx := range schema.Fields {
+		field := &schema.Fields[idx]
+		if locationFieldCategory(field) != "school" {
+			continue
+		}
+		score := 10
+		blob := fieldSearchBlob(field)
+		if containsAny(qnorm, "school", "residential school", "institution") && containsAny(blob, "school", "institution", "residential") {
+			score += 50
+		}
+		for _, alias := range field.Aliases {
+			aliasNorm := normalizeSearchText(alias)
+			if aliasNorm != "" && strings.Contains(qnorm, aliasNorm) {
+				score += len(aliasNorm)
+			}
+		}
+		if score > bestScore {
+			bestScore = score
+			best = field
+		}
+	}
+	return best
+}
+
+func (schema *chatDatasetSchema) describeForPlanner() string {
+	lines := make([]string, 0, len(schema.Fields))
+	for _, field := range schema.Fields {
+		line := fmt.Sprintf("- id=%s | label=%s | role=%s", field.ID, field.Label, field.Role)
+		if len(field.Aliases) > 0 {
+			line += " | aliases=" + strings.Join(field.Aliases[:minInt(len(field.Aliases), 5)], ", ")
+		}
+		if len(field.Examples) > 0 {
+			line += " | examples=" + strings.Join(field.Examples[:minInt(len(field.Examples), 5)], "; ")
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func fieldSearchBlob(field *chatSchemaField) string {
+	if field == nil {
+		return ""
+	}
+	parts := []string{field.ID, field.Label}
+	parts = append(parts, field.Aliases...)
+	return normalizeSearchText(strings.Join(parts, " "))
+}
+
+func inferFieldRole(label string, rows []chatRawRow) chatFieldRole {
 	lower := strings.ToLower(strings.TrimSpace(label))
 	switch {
 	case strings.Contains(lower, "deceased"):
-		return chatFieldKindBoolean
+		return chatFieldRoleBoolean
 	case strings.Contains(lower, "community"), strings.Contains(lower, "reserve"), strings.Contains(lower, "first nation"), strings.Contains(lower, "home"):
-		return chatFieldKindCommunity
+		return chatFieldRoleCommunity
+	case strings.Contains(lower, "school"), strings.Contains(lower, "residential"), strings.Contains(lower, "institution"):
+		return chatFieldRoleSchool
 	case strings.Contains(lower, "place of death"),
 		strings.Contains(lower, "location of death"),
 		strings.Contains(lower, "death location"),
@@ -2314,17 +2803,15 @@ func inferFieldKind(label string, rows []rawChatRow) chatFieldKind {
 		strings.Contains(lower, "place died"),
 		strings.Contains(lower, "place of burial"),
 		strings.Contains(lower, "burial place"),
-		strings.Contains(lower, "school"),
-		strings.Contains(lower, "institution"),
 		(strings.Contains(lower, "location") && !strings.Contains(lower, "date")),
 		(strings.Contains(lower, "place") && !strings.Contains(lower, "date")):
-		return chatFieldKindLocation
+		return chatFieldRoleLocation
 	case strings.Contains(lower, "name") && !strings.Contains(lower, "parent") && !strings.Contains(lower, "sibling"):
-		return chatFieldKindName
+		return chatFieldRoleName
 	case strings.Contains(lower, "date"), strings.Contains(lower, "birth"), strings.Contains(lower, "death"), strings.Contains(lower, "burial"), strings.Contains(lower, "admit"), strings.Contains(lower, "discharge"):
-		return chatFieldKindDate
+		return chatFieldRoleDate
 	case strings.Contains(lower, "age"), strings.Contains(lower, "number"), lower == "no.", lower == "no":
-		return chatFieldKindNumber
+		return chatFieldRoleNumber
 	}
 
 	sampleCount := 0
@@ -2337,75 +2824,33 @@ func inferFieldKind(label string, rows []rawChatRow) chatFieldKind {
 			continue
 		}
 		sampleCount++
-		parsedDate := parseTemporalValue(value)
-		if parsedDate.Kind != temporalKindMalformed && parsedDate.Kind != temporalKindUnknown {
-			dateCount++
-		}
 		if _, ok := parseNumericValue(value); ok {
 			numberCount++
 		}
 		if isTruthy(value) || isFalsy(value) {
 			boolCount++
 		}
-		if sampleCount >= 20 {
+		tv := parseTemporalValue(value)
+		if tv.Kind != temporalKindUnknown && tv.Kind != temporalKindMalformed {
+			dateCount++
+		}
+		if sampleCount >= 12 {
 			break
 		}
 	}
-
 	switch {
-	case boolCount >= 4:
-		return chatFieldKindBoolean
-	case dateCount >= 4:
-		return chatFieldKindDate
-	case numberCount >= 4:
-		return chatFieldKindNumber
+	case sampleCount > 0 && dateCount*2 >= sampleCount:
+		return chatFieldRoleDate
+	case sampleCount > 0 && numberCount*2 >= sampleCount:
+		return chatFieldRoleNumber
+	case sampleCount > 0 && boolCount*2 >= sampleCount:
+		return chatFieldRoleBoolean
 	default:
-		return chatFieldKindText
+		return chatFieldRoleText
 	}
 }
 
-func collectFieldExamples(label string, rows []rawChatRow, kind chatFieldKind) []string {
-	counts := map[string]int{}
-	for _, row := range rows {
-		value := strings.TrimSpace(row.Values[label])
-		if value == "" {
-			continue
-		}
-		counts[value]++
-	}
-	if len(counts) == 0 {
-		return nil
-	}
-	type pair struct {
-		value string
-		count int
-	}
-	items := make([]pair, 0, len(counts))
-	for value, count := range counts {
-		items = append(items, pair{value: value, count: count})
-	}
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].count == items[j].count {
-			return items[i].value < items[j].value
-		}
-		return items[i].count > items[j].count
-	})
-
-	limit := 5
-	if kind == chatFieldKindCommunity {
-		limit = 8
-	}
-	if len(items) < limit {
-		limit = len(items)
-	}
-	examples := make([]string, 0, limit)
-	for _, item := range items[:limit] {
-		examples = append(examples, item.value)
-	}
-	return examples
-}
-
-func inferFieldAliases(label string, kind chatFieldKind) []string {
+func inferFieldAliases(label string, role chatFieldRole) []string {
 	lower := strings.ToLower(strings.TrimSpace(label))
 	aliases := []string{label, lower}
 	add := func(values ...string) {
@@ -2443,27 +2888,13 @@ func inferFieldAliases(label string, kind chatFieldKind) []string {
 		add("deceased", "dead", "died")
 	}
 
-	switch kind {
-	case chatFieldKindName:
-		add("name", "person", "student")
-	case chatFieldKindDate:
+	switch role {
+	case chatFieldRoleName:
+		add("name", "person", "student", "child")
+	case chatFieldRoleDate:
 		add("date")
 	}
-
-	uniq := map[string]struct{}{}
-	out := make([]string, 0, len(aliases))
-	for _, alias := range aliases {
-		key := normalizeSearchText(alias)
-		if key == "" {
-			continue
-		}
-		if _, ok := uniq[key]; ok {
-			continue
-		}
-		uniq[key] = struct{}{}
-		out = append(out, alias)
-	}
-	return out
+	return aliases
 }
 
 func inferFieldEvents(field chatSchemaField) []string {
@@ -2477,7 +2908,6 @@ func inferFieldEvents(field chatSchemaField) []string {
 		}
 		events = append(events, event)
 	}
-
 	if containsAny(blob, "death", "deaths", "died", "deceased", "cause of death", "death cause", "death factor", "place of death", "death location") {
 		add("death")
 	}
@@ -2493,34 +2923,114 @@ func inferFieldEvents(field chatSchemaField) []string {
 	if containsAny(blob, "discharge", "discharges", "discharged") {
 		add("discharge")
 	}
-
 	return events
 }
 
-func buildCachedChatRow(rawRow rawChatRow, schema *chatDatasetSchema) cachedChatRow {
+func collectFieldExamples(label string, rows []chatRawRow) []string {
+	counts := map[string]int{}
+	for _, row := range rows {
+		value := strings.TrimSpace(row.Values[label])
+		if value == "" {
+			continue
+		}
+		counts[value]++
+	}
+	type pair struct {
+		value string
+		count int
+	}
+	items := make([]pair, 0, len(counts))
+	for value, count := range counts {
+		items = append(items, pair{value: value, count: count})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].count == items[j].count {
+			return items[i].value < items[j].value
+		}
+		return items[i].count > items[j].count
+	})
+	limit := minInt(len(items), 5)
+	examples := make([]string, 0, limit)
+	for _, item := range items[:limit] {
+		examples = append(examples, item.value)
+	}
+	return examples
+}
+
+func uniqueFieldID(label string, used map[string]int) string {
+	base := slugify(label)
+	if base == "" {
+		base = "field"
+	}
+	used[base]++
+	if used[base] == 1 {
+		return base
+	}
+	return fmt.Sprintf("%s_%d", base, used[base])
+}
+
+func buildCachedChatRow(rawRow chatRawRow, schema *chatDatasetSchema) cachedChatRow {
 	row := cachedChatRow{
 		RowID:      rawRow.RowID,
 		RowJSON:    rawRow.RowJSON,
 		Values:     rawRow.Values,
 		Normalized: map[string]string{},
+		Tokens:     map[string][]string{},
 		Temporal:   map[string]temporalValue{},
 	}
 
+	searchTokens := make([]string, 0)
 	for _, field := range schema.Fields {
-		value := strings.TrimSpace(rawRow.Values[field.Label])
-		row.Normalized[field.ID] = normalizeSearchText(value)
-		if field.Kind == chatFieldKindDate && value != "" {
-			row.Temporal[field.ID] = parseTemporalValue(value)
+		rawValue := strings.TrimSpace(rawRow.Values[field.Label])
+		normValue := normalizeSearchText(rawValue)
+		tokens := tokenizeSearchValue(rawValue)
+
+		if normalizedField, ok := rawRow.NormalizedPayload.Fields[field.Label]; ok {
+			if strings.TrimSpace(normalizedField.Normalized) != "" {
+				normValue = strings.TrimSpace(normalizedField.Normalized)
+			}
+			if len(normalizedField.Tokens) > 0 {
+				tokens = cloneStringSlice(normalizedField.Tokens)
+			}
+		}
+
+		row.Normalized[field.ID] = normValue
+		row.Tokens[field.ID] = uniqueStrings(tokens)
+		searchTokens = append(searchTokens, tokens...)
+
+		if field.Role == chatFieldRoleDate && rawValue != "" {
+			row.Temporal[field.ID] = parseTemporalValue(rawValue)
 		}
 	}
 
-	row.Names = collectRowNames(row, schema)
-	for _, fieldID := range schema.communityFieldIDs {
-		if value := strings.TrimSpace(row.valueByField(fieldID, schema)); value != "" {
-			row.Community = value
-			break
+	row.SearchTokens = uniqueStrings(append(searchTokens, strings.Fields(normalizeSearchText(rawRow.SearchText))...))
+	row.Names = uniqueStrings(append(cloneStringSlice(rawRow.NormalizedPayload.Names), collectRowNames(row, schema)...))
+	row.Communities = uniqueStrings(append(cloneStringSlice(rawRow.NormalizedPayload.Communities), normalizeNonEmpty(rawRow.CanonicalCommunity)...))
+	row.Schools = uniqueStrings(append(cloneStringSlice(rawRow.NormalizedPayload.Schools), normalizeNonEmpty(rawRow.CanonicalSchool)...))
+	row.Locations = uniqueStrings(cloneStringSlice(rawRow.NormalizedPayload.Locations))
+
+	if len(row.Communities) == 0 {
+		for _, fieldID := range schema.communityFieldIDs {
+			if value := normalizeSearchText(row.valueByField(fieldID, schema)); value != "" {
+				row.Communities = append(row.Communities, value)
+			}
 		}
 	}
+	if len(row.Schools) == 0 {
+		for _, fieldID := range schema.schoolFieldIDs {
+			if value := normalizeSearchText(row.valueByField(fieldID, schema)); value != "" {
+				row.Schools = append(row.Schools, value)
+			}
+		}
+	}
+	if len(row.Locations) == 0 {
+		for _, fieldID := range schema.locationFieldIDs {
+			if value := normalizeSearchText(row.valueByField(fieldID, schema)); value != "" {
+				row.Locations = append(row.Locations, value)
+			}
+		}
+	}
+
 	return row
 }
 
@@ -2553,417 +3063,15 @@ func collectRowNames(row cachedChatRow, schema *chatDatasetSchema) []string {
 			names = append([]string{full}, names...)
 		}
 	}
-	uniq := map[string]struct{}{}
-	out := make([]string, 0, len(names))
-	for _, name := range names {
-		key := normalizeSearchText(name)
-		if key == "" {
-			continue
-		}
-		if _, ok := uniq[key]; ok {
-			continue
-		}
-		uniq[key] = struct{}{}
-		out = append(out, strings.TrimSpace(name))
-	}
-	return out
+	return names
 }
 
-func (schema *chatDatasetSchema) resolveField(ref string) (*chatSchemaField, bool) {
-	ref = normalizeSearchText(ref)
-	if ref == "" {
-		return nil, false
-	}
-	field, ok := schema.fieldByLookup[ref]
-	return field, ok
-}
-
-func (schema *chatDatasetSchema) bestFieldForQuestion(question string) *chatSchemaField {
-	qnorm := normalizeSearchText(question)
-	bestScore := 0
-	var best *chatSchemaField
-	for idx := range schema.Fields {
-		field := &schema.Fields[idx]
-		score := 0
-		for _, alias := range field.Aliases {
-			aliasNorm := normalizeSearchText(alias)
-			if aliasNorm == "" {
-				continue
-			}
-			if strings.Contains(qnorm, aliasNorm) && len(aliasNorm) > score {
-				score = len(aliasNorm)
-			}
-		}
-		if score > bestScore {
-			bestScore = score
-			best = field
-		}
-	}
-	return best
-}
-
-func (schema *chatDatasetSchema) bestDateFieldForQuestion(question string) *chatSchemaField {
-	qnorm := normalizeSearchText(question)
-	bestScore := 0
-	var best *chatSchemaField
-	for _, fieldID := range schema.dateFieldIDs {
-		field := schema.fieldByID[fieldID]
-		if field == nil {
-			continue
-		}
-
-		score := 0
-		for _, alias := range field.Aliases {
-			aliasNorm := normalizeSearchText(alias)
-			if aliasNorm == "" {
-				continue
-			}
-			if strings.Contains(qnorm, aliasNorm) {
-				score = maxInt(score, len(aliasNorm)+5)
-			}
-		}
-
-		blob := fieldSearchBlob(field)
-		switch {
-		case containsAny(qnorm, "death", "deaths", "died") && containsAny(blob, "death", "died"):
-			score += 50
-		case containsAny(qnorm, "birth", "births", "born") && containsAny(blob, "birth", "born"):
-			score += 50
-		case containsAny(qnorm, "burial", "buried") && containsAny(blob, "burial", "buried"):
-			score += 40
-		case containsAny(qnorm, "admission", "admissions", "admitted", "admit") && containsAny(blob, "admission", "admitted", "admit"):
-			score += 40
-		case containsAny(qnorm, "discharge", "discharges", "discharged") && containsAny(blob, "discharge", "discharged"):
-			score += 40
-		}
-		if containsAny(qnorm, "year", "years", "month", "months", "day", "days", "date", "dates") {
-			score += 2
-		}
-		if score > bestScore {
-			bestScore = score
-			best = field
-		}
-	}
-	if best != nil {
-		return best
-	}
-	if fallback := schema.defaultExtremeField(qnorm); fallback != nil && fallback.Kind == chatFieldKindDate {
-		return fallback
-	}
-	return nil
-}
-
-func fieldSearchBlob(field *chatSchemaField) string {
-	if field == nil {
-		return ""
-	}
-	parts := []string{field.ID, field.Label}
-	parts = append(parts, field.Aliases...)
-	return normalizeSearchText(strings.Join(parts, " "))
-}
-
-func (schema *chatDatasetSchema) defaultExtremeField(questionNorm string) *chatSchemaField {
-	if containsAny(questionNorm, "oldest", "youngest") {
-		for idx := range schema.Fields {
-			field := &schema.Fields[idx]
-			if field.Kind == chatFieldKindNumber && strings.Contains(strings.ToLower(field.Label), "age") {
-				return field
-			}
-		}
-	}
-	for _, fieldID := range schema.dateFieldIDs {
-		field := schema.fieldByID[fieldID]
-		if field == nil {
-			continue
-		}
-		label := strings.ToLower(field.Label)
-		if strings.Contains(label, "death") || strings.Contains(label, "birth") {
-			return field
-		}
-	}
-	if len(schema.dateFieldIDs) > 0 {
-		return schema.fieldByID[schema.dateFieldIDs[0]]
-	}
-	return nil
-}
-
-func (schema *chatDatasetSchema) primaryListFieldID() string {
-	if len(schema.nameFieldIDs) > 0 {
-		return schema.nameFieldIDs[0]
-	}
-	if len(schema.communityFieldIDs) > 0 {
-		return schema.communityFieldIDs[0]
-	}
-	if len(schema.Fields) > 0 {
-		return schema.Fields[0].ID
-	}
-	return ""
-}
-
-func (schema *chatDatasetSchema) primaryCommunityField() *chatSchemaField {
-	if len(schema.communityFieldIDs) == 0 {
+func normalizeNonEmpty(value string) []string {
+	value = normalizeSearchText(value)
+	if value == "" {
 		return nil
 	}
-	return schema.fieldByID[schema.communityFieldIDs[0]]
-}
-
-func (schema *chatDatasetSchema) bestCommunityFieldForQuestion(question string) *chatSchemaField {
-	qnorm := normalizeSearchText(question)
-	bestScore := -1
-	var best *chatSchemaField
-
-	for idx := range schema.Fields {
-		field := &schema.Fields[idx]
-		if field.Kind != chatFieldKindCommunity {
-			continue
-		}
-
-		score := 10
-		blob := fieldSearchBlob(field)
-		if containsAny(qnorm, "community", "communities") && containsAny(blob, "community") {
-			score += 40
-		}
-		if containsAny(qnorm, "reserve", "reserves") && containsAny(blob, "reserve") {
-			score += 40
-		}
-		if containsAny(qnorm, "first nation", "first nations") && containsAny(blob, "first nation") {
-			score += 40
-		}
-		if containsAny(qnorm, "home", "homes") && containsAny(blob, "home") {
-			score += 20
-		}
-		for _, alias := range field.Aliases {
-			aliasNorm := normalizeSearchText(alias)
-			if aliasNorm != "" && strings.Contains(qnorm, aliasNorm) {
-				score += len(aliasNorm)
-			}
-		}
-		if score > bestScore {
-			bestScore = score
-			best = field
-		}
-	}
-	if best != nil {
-		return best
-	}
-	return schema.primaryCommunityField()
-}
-
-func (schema *chatDatasetSchema) primarySchoolField() *chatSchemaField {
-	for idx := range schema.Fields {
-		field := &schema.Fields[idx]
-		if !isLocationLikeField(field) {
-			continue
-		}
-		if locationFieldCategory(field) == "school" {
-			return field
-		}
-	}
-	return nil
-}
-
-func (schema *chatDatasetSchema) bestSchoolFieldForQuestion(question string) *chatSchemaField {
-	qnorm := normalizeSearchText(question)
-	bestScore := -1
-	var best *chatSchemaField
-
-	for idx := range schema.Fields {
-		field := &schema.Fields[idx]
-		if !isLocationLikeField(field) || locationFieldCategory(field) != "school" {
-			continue
-		}
-
-		score := 10
-		blob := fieldSearchBlob(field)
-		if containsAny(qnorm, "school", "residential school", "institution") && containsAny(blob, "school", "residential", "institution") {
-			score += 50
-		}
-		if containsAny(qnorm, "location", "place") && containsAny(blob, "location", "place") {
-			score += 10
-		}
-		for _, alias := range field.Aliases {
-			aliasNorm := normalizeSearchText(alias)
-			if aliasNorm != "" && strings.Contains(qnorm, aliasNorm) {
-				score += len(aliasNorm)
-			}
-		}
-		if score > bestScore {
-			bestScore = score
-			best = field
-		}
-	}
-	if best != nil {
-		return best
-	}
-	return schema.primarySchoolField()
-}
-
-func inferQuestionFilters(question string, dataset *chatDatasetCacheEntry, existing []chatPlannerFilter) []chatPlannerFilter {
-	qnorm := normalizeSearchText(question)
-	if qnorm == "" {
-		return existing
-	}
-
-	filters := make([]chatPlannerFilter, 0, len(existing)+1)
-	filters = append(filters, existing...)
-	seenFields := map[string]struct{}{}
-	for _, filter := range existing {
-		seenFields[filter.FieldID] = struct{}{}
-	}
-
-	type inferredFilterCandidate struct {
-		field *chatSchemaField
-		value string
-		score float64
-	}
-	best := inferredFilterCandidate{}
-
-	for idx := range dataset.schema.Fields {
-		field := &dataset.schema.Fields[idx]
-		if _, ok := seenFields[field.ID]; ok {
-			continue
-		}
-		if !fieldSupportsValueInference(field) {
-			continue
-		}
-		if value, score, ok := dataset.bestFilterValueForQuestion(field, qnorm); ok {
-			score += filterFieldPreference(field, qnorm)
-			if score > best.score {
-				best = inferredFilterCandidate{field: field, value: value, score: score}
-			}
-		}
-	}
-	if best.field != nil {
-		filters = append(filters, chatPlannerFilter{
-			FieldID: best.field.ID,
-			Op:      "eq",
-			Value:   best.value,
-		})
-	}
-
-	return filters
-}
-
-func fieldSupportsValueInference(field *chatSchemaField) bool {
-	if field == nil {
-		return false
-	}
-	switch field.Kind {
-	case chatFieldKindCommunity, chatFieldKindLocation:
-		return true
-	case chatFieldKindText:
-		blob := fieldSearchBlob(field)
-		return containsAny(blob, "school", "institution", "community", "reserve", "location", "place")
-	default:
-		return false
-	}
-}
-
-func filterFieldPreference(field *chatSchemaField, questionNorm string) float64 {
-	if field == nil {
-		return 0
-	}
-	blob := fieldSearchBlob(field)
-	score := 0.0
-	switch field.Kind {
-	case chatFieldKindLocation:
-		score += 0.10
-	case chatFieldKindCommunity:
-		score += 0.05
-	}
-	if containsAny(questionNorm, "school", "residential school", "institution") && containsAny(blob, "school", "institution", "residential") {
-		score += 0.35
-	}
-	if containsAny(questionNorm, "community", "reserve", "home") && containsAny(blob, "community", "reserve", "home") {
-		score += 0.25
-	}
-	if containsAny(questionNorm, "at ", " in ") && containsAny(blob, "school", "location", "place", "institution") {
-		score += 0.10
-	}
-	return score
-}
-
-func inferSearchTerms(question string, dataset *chatDatasetCacheEntry, filters []chatPlannerFilter) []string {
-	qnorm := normalizeSearchText(question)
-	if qnorm == "" {
-		return nil
-	}
-
-	excluded := map[string]struct{}{}
-	for _, filter := range filters {
-		field, ok := dataset.schema.resolveField(filter.FieldID)
-		if !ok {
-			continue
-		}
-		addNormalizedPhraseTokens(excluded, field.Label)
-		addNormalizedPhraseTokens(excluded, filter.Value)
-		addNormalizedPhraseTokens(excluded, filter.Value2)
-	}
-	for _, field := range dataset.schema.Fields {
-		addNormalizedPhraseTokens(excluded, field.Label)
-		for _, alias := range field.Aliases {
-			addNormalizedPhraseTokens(excluded, alias)
-		}
-	}
-
-	stopWords := map[string]struct{}{
-		"a": {}, "about": {}, "admissions": {}, "admitted": {}, "after": {}, "all": {}, "an": {}, "and": {}, "any": {}, "are": {}, "at": {},
-		"before": {}, "birth": {}, "births": {}, "by": {}, "child": {}, "children": {}, "community": {}, "count": {}, "date": {}, "dates": {},
-		"death": {}, "deaths": {}, "describe": {}, "did": {}, "do": {}, "does": {}, "during": {}, "earliest": {}, "find": {}, "first": {},
-		"for": {}, "from": {}, "had": {}, "has": {}, "have": {}, "highest": {}, "how": {}, "in": {}, "indian": {}, "information": {},
-		"institution": {}, "is": {}, "it": {}, "its": {}, "last": {}, "latest": {}, "least": {}, "list": {}, "many": {}, "month": {}, "months": {},
-		"most": {}, "much": {}, "number": {}, "occur": {}, "occurred": {}, "of": {}, "on": {}, "or": {}, "records": {}, "residential": {},
-		"same": {}, "school": {}, "show": {}, "student": {}, "students": {}, "tell": {}, "that": {}, "the": {}, "their": {}, "there": {},
-		"these": {}, "they": {}, "this": {}, "those": {}, "total": {}, "was": {}, "were": {}, "what": {}, "when": {}, "where": {}, "which": {},
-		"who": {}, "with": {}, "year": {}, "years": {},
-	}
-
-	terms := make([]string, 0, 3)
-	seen := map[string]struct{}{}
-	for _, token := range strings.Fields(qnorm) {
-		if len(token) < 4 {
-			continue
-		}
-		if _, ok := stopWords[token]; ok {
-			continue
-		}
-		if _, ok := excluded[token]; ok {
-			continue
-		}
-		if _, ok := seen[token]; ok {
-			continue
-		}
-		seen[token] = struct{}{}
-		terms = append(terms, token)
-		if len(terms) >= 3 {
-			break
-		}
-	}
-	return terms
-}
-
-func addNormalizedPhraseTokens(dest map[string]struct{}, value string) {
-	for _, token := range strings.Fields(normalizeSearchText(value)) {
-		if token == "" {
-			continue
-		}
-		dest[token] = struct{}{}
-	}
-}
-
-func (schema *chatDatasetSchema) describeForPlanner() string {
-	lines := make([]string, 0, len(schema.Fields))
-	for _, field := range schema.Fields {
-		line := fmt.Sprintf("- id=%s | label=%s | kind=%s", field.ID, field.Label, field.Kind)
-		if len(field.Aliases) > 0 {
-			line += " | aliases=" + strings.Join(field.Aliases[:minInt(len(field.Aliases), 5)], ", ")
-		}
-		if len(field.Examples) > 0 {
-			line += " | examples=" + strings.Join(field.Examples[:minInt(len(field.Examples), 5)], "; ")
-		}
-		lines = append(lines, line)
-	}
-	return strings.Join(lines, "\n")
+	return []string{value}
 }
 
 func (dataset *chatDatasetCacheEntry) rowsForCommunities(communities []string) []cachedChatRow {
@@ -2976,97 +3084,18 @@ func (dataset *chatDatasetCacheEntry) rowsForCommunities(communities []string) [
 	}
 	out := make([]cachedChatRow, 0, len(dataset.rows))
 	for _, row := range dataset.rows {
-		if _, ok := allowed[normalizeSearchText(row.Community)]; ok {
+		matched := false
+		for _, community := range row.Communities {
+			if _, ok := allowed[normalizeSearchText(community)]; ok {
+				matched = true
+				break
+			}
+		}
+		if matched {
 			out = append(out, row)
 		}
 	}
 	return out
-}
-
-func (dataset *chatDatasetCacheEntry) bestFilterValueForQuestion(field *chatSchemaField, questionNorm string) (string, float64, bool) {
-	if dataset == nil || field == nil || questionNorm == "" {
-		return "", 0, false
-	}
-
-	bestRaw := ""
-	bestScore := 0.0
-	seen := map[string]struct{}{}
-
-	// First try field examples
-	for _, example := range field.Examples {
-		raw := strings.TrimSpace(example)
-		norm := normalizeSearchText(raw)
-		if len(norm) < 3 {
-			continue
-		}
-		seen[norm] = struct{}{}
-
-		score := scoreLocationMatch(questionNorm, norm)
-		if score > bestScore {
-			bestScore = score
-			bestRaw = raw
-		}
-	}
-
-	// Then try dataset values
-	for _, row := range dataset.rows {
-		raw := strings.TrimSpace(row.valueByField(field.ID, &dataset.schema))
-		norm := strings.TrimSpace(row.Normalized[field.ID])
-		if len(norm) < 3 || len(norm) > 80 {
-			continue
-		}
-		if _, ok := seen[norm]; ok {
-			continue
-		}
-		seen[norm] = struct{}{}
-
-		score := scoreLocationMatch(questionNorm, norm)
-		if score > bestScore {
-			bestScore = score
-			bestRaw = raw
-		}
-	}
-
-	if bestScore > 0.5 {
-		return bestRaw, bestScore, true
-	}
-	return "", 0, false
-}
-
-// scoreLocationMatch checks if a normalized location appears in the question
-// It handles multi-word location names by checking component words
-func scoreLocationMatch(questionNorm string, locationNorm string) float64 {
-	if strings.Contains(questionNorm, locationNorm) {
-		// Exact substring match - highest score
-		return 1.0
-	}
-
-	// Check if any significant word from location matches in question
-	locationWords := strings.Fields(locationNorm)
-	if len(locationWords) == 0 {
-		return 0.0
-	}
-
-	matchedWords := 0
-	for _, word := range locationWords {
-		if len(word) >= 4 && strings.Contains(questionNorm, word) {
-			matchedWords++
-		}
-	}
-
-	// Score based on fraction of words matched
-	// For "Shingwauk Indian Residential School", if "shingwauk" matches, that's 1/4 = 0.25
-	// But that might be enough if it's the most specific word
-	if matchedWords > 0 {
-		score := float64(matchedWords) / float64(len(locationWords))
-		// Boost score for first/primary word (usually the name)
-		if strings.Contains(questionNorm, locationWords[0]) {
-			score += 0.2
-		}
-		return score
-	}
-
-	return 0.0
 }
 
 func (dataset *chatDatasetCacheEntry) rowsByIDs(ids []int, within []cachedChatRow) []cachedChatRow {
@@ -3097,8 +3126,10 @@ func (dataset *chatDatasetCacheEntry) rowPromptData(row cachedChatRow, targetFie
 	if targetFieldID != "" {
 		if field, ok := dataset.schema.resolveField(targetFieldID); ok {
 			raw := strings.TrimSpace(row.valueByField(field.ID, &dataset.schema))
-			out["target_field"] = field.Label
-			out["target_value"] = raw
+			if raw != "" {
+				out["target_field"] = field.Label
+				out["target_value"] = raw
+			}
 			if tv, ok := row.temporalByField(field.ID); ok {
 				out["target_value_meta"] = renderTemporalMetadata(tv)
 			}
@@ -3108,7 +3139,7 @@ func (dataset *chatDatasetCacheEntry) rowPromptData(row cachedChatRow, targetFie
 	if includeAll {
 		fields := map[string]any{}
 		for _, field := range dataset.schema.Fields {
-			value := strings.TrimSpace(row.Values[field.Label])
+			value := strings.TrimSpace(row.valueByField(field.ID, &dataset.schema))
 			if value == "" {
 				continue
 			}
@@ -3117,9 +3148,53 @@ func (dataset *chatDatasetCacheEntry) rowPromptData(row cachedChatRow, targetFie
 				fields[field.Label+"__meta"] = renderTemporalMetadata(tv)
 			}
 		}
-		out["fields"] = fields
+		if len(fields) > 0 {
+			out["fields"] = fields
+		}
 	}
+
 	return out
+}
+
+func (dataset *chatDatasetCacheEntry) bestFilterValueForQuestion(field *chatSchemaField, questionNorm string) (string, float64, bool) {
+	bestRaw := ""
+	bestScore := 0.0
+	seen := map[string]struct{}{}
+
+	for _, example := range field.Examples {
+		raw := strings.TrimSpace(example)
+		norm := normalizeSearchText(raw)
+		if len(norm) < 3 {
+			continue
+		}
+		seen[norm] = struct{}{}
+		score := scoreLocationMatch(questionNorm, norm)
+		if score > bestScore {
+			bestScore = score
+			bestRaw = raw
+		}
+	}
+
+	for _, row := range dataset.rows {
+		raw := strings.TrimSpace(row.valueByField(field.ID, &dataset.schema))
+		norm := normalizeSearchText(raw)
+		if len(norm) < 3 || len(norm) > 80 {
+			continue
+		}
+		if _, ok := seen[norm]; ok {
+			continue
+		}
+		seen[norm] = struct{}{}
+		score := scoreLocationMatch(questionNorm, norm)
+		if score > bestScore {
+			bestScore = score
+			bestRaw = raw
+		}
+	}
+	if bestScore > 0.5 {
+		return bestRaw, bestScore, true
+	}
+	return "", 0, false
 }
 
 func (dataset *chatDatasetCacheEntry) bestSubjectFromQuestion(question string) string {
@@ -3165,6 +3240,299 @@ func (row cachedChatRow) primaryName() string {
 	return strings.TrimSpace(row.Names[0])
 }
 
+func parseChatConfig(configJSON []byte) chatConfigLookup {
+	lookup := chatConfigLookup{byKey: map[string]*chatConfigFieldMeta{}}
+	if len(strings.TrimSpace(string(configJSON))) == 0 {
+		return lookup
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(configJSON, &raw); err != nil {
+		return lookup
+	}
+
+	for _, key := range []string{"date_fields", "dates"} {
+		lookup.applyRoleList(chatFieldRoleDate, raw[key])
+	}
+	for _, key := range []string{"name_fields", "names"} {
+		lookup.applyRoleList(chatFieldRoleName, raw[key])
+	}
+	for _, key := range []string{"community_fields", "reserve_fields"} {
+		lookup.applyRoleList(chatFieldRoleCommunity, raw[key])
+	}
+	for _, key := range []string{"school_fields"} {
+		lookup.applyRoleList(chatFieldRoleSchool, raw[key])
+	}
+	for _, key := range []string{"location_fields", "place_fields"} {
+		lookup.applyRoleList(chatFieldRoleLocation, raw[key])
+	}
+	lookup.applyFlagList("searchable_fields", raw["searchable_fields"], func(meta *chatConfigFieldMeta) { v := true; meta.Searchable = &v })
+	lookup.applyFlagList("groupable_fields", raw["groupable_fields"], func(meta *chatConfigFieldMeta) { v := true; meta.Groupable = &v })
+	lookup.applyFlagList("exact_match_fields", raw["exact_match_fields"], func(meta *chatConfigFieldMeta) { v := true; meta.ExactOnly = &v })
+	lookup.applyFlagList("exact_fields", raw["exact_fields"], func(meta *chatConfigFieldMeta) { v := true; meta.ExactOnly = &v })
+
+	lookup.applyAliasMap(raw["aliases"])
+	lookup.applyAliasMap(raw["field_aliases"])
+	lookup.applyRoleMap(raw["field_roles"])
+	lookup.applyRoleMap(raw["roles"])
+	lookup.applyFieldConfigObject(raw["fields"])
+	lookup.applyFieldConfigObject(raw["columns"])
+	lookup.applyFieldConfigObject(raw["schema"])
+
+	return lookup
+}
+
+func (lookup chatConfigLookup) ensure(field string) *chatConfigFieldMeta {
+	key := normalizeSearchText(field)
+	if key == "" {
+		return &chatConfigFieldMeta{}
+	}
+	if existing, ok := lookup.byKey[key]; ok {
+		return existing
+	}
+	meta := &chatConfigFieldMeta{}
+	lookup.byKey[key] = meta
+	return meta
+}
+
+func (lookup chatConfigLookup) lookup(field string) chatConfigFieldMeta {
+	key := normalizeSearchText(field)
+	if existing, ok := lookup.byKey[key]; ok && existing != nil {
+		return *existing
+	}
+	return chatConfigFieldMeta{}
+}
+
+func (lookup chatConfigLookup) applyRoleList(role chatFieldRole, value any) {
+	for _, field := range extractStringList(value) {
+		meta := lookup.ensure(field)
+		meta.Role = role
+	}
+}
+
+func (lookup chatConfigLookup) applyFlagList(_ string, value any, apply func(*chatConfigFieldMeta)) {
+	for _, field := range extractStringList(value) {
+		meta := lookup.ensure(field)
+		apply(meta)
+	}
+}
+
+func (lookup chatConfigLookup) applyAliasMap(value any) {
+	items, ok := value.(map[string]any)
+	if !ok {
+		return
+	}
+	for key, rawAliases := range items {
+		meta := lookup.ensure(key)
+		meta.Aliases = append(meta.Aliases, extractStringList(rawAliases)...)
+	}
+}
+
+func (lookup chatConfigLookup) applyRoleMap(value any) {
+	items, ok := value.(map[string]any)
+	if !ok {
+		return
+	}
+	for key, rawRole := range items {
+		role := parseConfiguredRole(rawRole)
+		if role == "" {
+			continue
+		}
+		meta := lookup.ensure(key)
+		meta.Role = role
+	}
+}
+
+func (lookup chatConfigLookup) applyFieldConfigObject(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, item := range typed {
+			if fieldMap, ok := item.(map[string]any); ok {
+				fieldName := firstNonEmpty(extractFieldReference(fieldMap), key)
+				meta := lookup.ensure(fieldName)
+				mergeFieldConfig(meta, fieldMap)
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			fieldMap, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			fieldName := extractFieldReference(fieldMap)
+			if fieldName == "" {
+				continue
+			}
+			meta := lookup.ensure(fieldName)
+			mergeFieldConfig(meta, fieldMap)
+		}
+	}
+}
+
+func mergeFieldConfig(meta *chatConfigFieldMeta, fieldMap map[string]any) {
+	if meta == nil {
+		return
+	}
+	if role := parseConfiguredRole(fieldMap["role"]); role != "" {
+		meta.Role = role
+	}
+	meta.Aliases = append(meta.Aliases, extractStringList(fieldMap["aliases"])...)
+	if value, ok := extractBool(fieldMap["searchable"]); ok {
+		meta.Searchable = &value
+	}
+	if value, ok := extractBool(fieldMap["groupable"]); ok {
+		meta.Groupable = &value
+	}
+	if value, ok := extractBool(fieldMap["exact_match"]); ok {
+		meta.ExactOnly = &value
+	}
+	if value, ok := extractBool(fieldMap["exact_only"]); ok {
+		meta.ExactOnly = &value
+	}
+}
+
+func extractFieldReference(fieldMap map[string]any) string {
+	for _, key := range []string{"field", "column", "name", "label", "id", "source", "field_name"} {
+		if value, ok := fieldMap[key]; ok {
+			if text := strings.TrimSpace(fmt.Sprint(value)); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func parseConfiguredRole(value any) chatFieldRole {
+	role := normalizeSearchText(fmt.Sprint(value))
+	switch role {
+	case "name", "person", "student", "child":
+		return chatFieldRoleName
+	case "date", "death date", "birth date":
+		return chatFieldRoleDate
+	case "community", "reserve", "first nation":
+		return chatFieldRoleCommunity
+	case "school", "institution":
+		return chatFieldRoleSchool
+	case "location", "place":
+		return chatFieldRoleLocation
+	case "number", "numeric":
+		return chatFieldRoleNumber
+	case "boolean", "bool":
+		return chatFieldRoleBoolean
+	case "text", "notes":
+		return chatFieldRoleText
+	default:
+		return ""
+	}
+}
+
+func extractStringList(value any) []string {
+	switch typed := value.(type) {
+	case string:
+		parts := strings.Split(typed, ",")
+		out := make([]string, 0, len(parts))
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				out = append(out, part)
+			}
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			text := strings.TrimSpace(fmt.Sprint(item))
+			if text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	case []string:
+		return cloneStringSlice(typed)
+	default:
+		return nil
+	}
+}
+
+func extractBool(value any) (bool, bool) {
+	switch typed := value.(type) {
+	case bool:
+		return typed, true
+	case string:
+		switch normalizeSearchText(typed) {
+		case "true", "yes", "1":
+			return true, true
+		case "false", "no", "0":
+			return false, true
+		}
+	}
+	return false, false
+}
+
+func fieldSupportsValueInference(field *chatSchemaField) bool {
+	if field == nil {
+		return false
+	}
+	switch field.Role {
+	case chatFieldRoleCommunity, chatFieldRoleSchool, chatFieldRoleLocation:
+		return true
+	case chatFieldRoleText:
+		blob := fieldSearchBlob(field)
+		return containsAny(blob, "school", "institution", "community", "reserve", "location", "place")
+	default:
+		return false
+	}
+}
+
+func filterFieldPreference(field *chatSchemaField, questionNorm string) float64 {
+	if field == nil {
+		return 0
+	}
+	blob := fieldSearchBlob(field)
+	score := 0.0
+	switch field.Role {
+	case chatFieldRoleSchool:
+		score += 0.20
+	case chatFieldRoleCommunity:
+		score += 0.10
+	case chatFieldRoleLocation:
+		score += 0.05
+	}
+	if containsAny(questionNorm, "school", "residential school", "institution") && containsAny(blob, "school", "institution", "residential") {
+		score += 0.35
+	}
+	if containsAny(questionNorm, "community", "reserve", "home") && containsAny(blob, "community", "reserve", "home") {
+		score += 0.25
+	}
+	return score
+}
+
+func isLocationLikeField(field *chatSchemaField) bool {
+	if field == nil {
+		return false
+	}
+	switch field.Role {
+	case chatFieldRoleCommunity, chatFieldRoleSchool, chatFieldRoleLocation:
+		return true
+	default:
+		return fieldSupportsValueInference(field)
+	}
+}
+
+func locationFieldCategory(field *chatSchemaField) string {
+	if field == nil {
+		return "other"
+	}
+	switch field.Role {
+	case chatFieldRoleSchool:
+		return "school"
+	case chatFieldRoleCommunity:
+		return "community"
+	default:
+		return "other"
+	}
+}
+
 func normalizeSearchText(v string) string {
 	var b strings.Builder
 	lastSpace := true
@@ -3186,6 +3554,59 @@ func normalizeSearchText(v string) string {
 	return strings.TrimSpace(b.String())
 }
 
+func tokenizeSearchValue(value string) []string {
+	normalized := normalizeSearchText(value)
+	if normalized == "" {
+		return nil
+	}
+	parts := strings.Fields(normalized)
+	tokens := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if len(part) <= 1 {
+			continue
+		}
+		tokens = append(tokens, part)
+		if strings.HasSuffix(part, "ing") && len(part) > 4 {
+			tokens = append(tokens, strings.TrimSuffix(part, "ing"))
+		}
+		if strings.HasSuffix(part, "ed") && len(part) > 3 {
+			tokens = append(tokens, strings.TrimSuffix(part, "ed"))
+		}
+		if strings.HasSuffix(part, "s") && len(part) > 3 {
+			tokens = append(tokens, strings.TrimSuffix(part, "s"))
+		}
+	}
+	return uniqueStrings(tokens)
+}
+
+func extractJSONObjectCandidate(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "```") {
+		raw = strings.TrimPrefix(raw, "```json")
+		raw = strings.TrimPrefix(raw, "```JSON")
+		raw = strings.TrimPrefix(raw, "```")
+		raw = strings.TrimSpace(raw)
+		raw = strings.TrimSuffix(raw, "```")
+		raw = strings.TrimSpace(raw)
+	}
+	if json.Valid([]byte(raw)) {
+		return raw
+	}
+	start := strings.IndexByte(raw, '{')
+	end := strings.LastIndexByte(raw, '}')
+	if start == -1 || end == -1 || end < start {
+		return ""
+	}
+	candidate := strings.TrimSpace(raw[start : end+1])
+	if !json.Valid([]byte(candidate)) {
+		return ""
+	}
+	return candidate
+}
+
 func slugify(v string) string {
 	return strings.ReplaceAll(normalizeSearchText(v), " ", "_")
 }
@@ -3199,86 +3620,6 @@ func containsAny(value string, patterns ...string) bool {
 	return false
 }
 
-func detectGroupedCountSpec(questionNorm string) (string, string, bool) {
-	if questionNorm == "" {
-		return "", "", false
-	}
-	if containsAny(questionNorm, "earliest", "latest", "first", "last", "oldest", "youngest") {
-		return "", "", false
-	}
-
-	direction := "desc"
-	if containsAny(questionNorm, "least", "lowest", "fewest", "smallest number") {
-		direction = "asc"
-	} else if !containsAny(questionNorm, "most", "highest", "largest number", "greatest number", "maximum", "max") {
-		return "", "", false
-	}
-
-	granularity := ""
-	switch {
-	case containsAny(questionNorm, "year", "years"):
-		granularity = "year"
-	case containsAny(questionNorm, "month", "months"):
-		granularity = "month"
-	case containsAny(questionNorm, "day", "days", "date", "dates"):
-		granularity = "day"
-	default:
-		return "", "", false
-	}
-
-	if !containsAny(questionNorm, "death", "deaths", "died", "birth", "births", "born", "burial", "buried", "admission", "admissions", "admitted", "discharge", "discharges", "occur", "occurred") {
-		return "", "", false
-	}
-
-	return granularity, direction, true
-}
-
-func shouldUseSessionContext(question string, session *chatSessionState) bool {
-	if session == nil {
-		return false
-	}
-	qnorm := normalizeSearchText(question)
-	if qnorm == "" {
-		return false
-	}
-	padded := " " + qnorm + " "
-	if hasSessionPronoun(padded) {
-		return len(session.FocusRowIDs) > 0
-	}
-	if containsAny(qnorm, "what about", "how about", "same person", "same one", "same child", "same student", "that person", "that one", "this person", "this one") {
-		return len(session.FocusRowIDs) > 0
-	}
-	if session.PendingPrompt != "" && isLikelyClarificationReply(qnorm) {
-		return true
-	}
-	return false
-}
-
-func isLikelyClarificationReply(questionNorm string) bool {
-	if questionNorm == "" {
-		return false
-	}
-	if containsAny(questionNorm, "did any", "were there any", "are there any", "is there any", "how many", "count", "number of", "in what year", "in what years", "which year", "which years", "tell me", "list ", "show ", "find ", "search ", "who ", "what ", "when ", "where ") {
-		return false
-	}
-	return len(strings.Fields(questionNorm)) <= 8
-}
-
-func isExistenceCountQuestion(questionNorm string) bool {
-	return containsAny(questionNorm,
-		"did any",
-		"were there any",
-		"are there any",
-		"is there any",
-		"was there any",
-		"have any",
-	)
-}
-
-func hasSessionPronoun(questionNorm string) bool {
-	return containsAny(questionNorm, " he ", " she ", " they ", " them ", " him ", " her ", " his ", " their ", " same person", " same one", " that person", " that one", " this one", " this person")
-}
-
 func scoreNameMatch(query, candidate string) float64 {
 	if query == "" || candidate == "" {
 		return 0
@@ -3289,18 +3630,10 @@ func scoreNameMatch(query, candidate string) float64 {
 	if strings.Contains(candidate, query) || strings.Contains(query, candidate) {
 		return 0.96
 	}
-
-	// Check for known name variations (Albert/Bert, Elizabeth/Betsy, etc.)
-	if isNameVariation(query, candidate) {
-		return 0.92
-	}
-
-	// Check if phonetically similar (handles common spelling variations)
 	if soundsLike(query, candidate) {
 		return 0.88
 	}
 
-	// Split by spaces and check token matches
 	queryTokens := strings.Fields(query)
 	candidateTokens := strings.Fields(candidate)
 	overlap := 0
@@ -3317,171 +3650,35 @@ func scoreNameMatch(query, candidate string) float64 {
 		tokenScore = float64(overlap) / float64(len(queryTokens))
 	}
 
-	// Levenshtein distance for fuzzy matching
 	dist := levenshteinDistance(query, candidate)
 	maxLen := maxInt(len(query), len(candidate))
 	if maxLen == 0 {
 		return tokenScore
 	}
 	editScore := 1 - (float64(dist) / float64(maxLen))
-
-	// For short names, be less strict about edit distance
-	if maxLen <= 8 {
-		// Names like "Leo" vs "Loe" should match at high score
-		if dist <= 2 {
-			editScore = math.Max(editScore, 0.85)
-		}
+	if maxLen <= 8 && dist <= 2 {
+		editScore = math.Max(editScore, 0.85)
 	}
-
 	return math.Max(tokenScore, editScore)
 }
 
-// isNameVariation checks for common name aliases/variations
-func isNameVariation(name1, name2 string) bool {
-	n1 := strings.ToLower(strings.TrimSpace(name1))
-	n2 := strings.ToLower(strings.TrimSpace(name2))
-
-	variations := map[string][]string{
-		// Common name variations
-		"albert":      {"bert", "al"},
-		"bert":        {"albert"},
-		"elizabeth":   {"betsy", "beth", "liz", "betty", "libby"},
-		"betsy":       {"elizabeth", "beth", "betty"},
-		"betty":       {"elizabeth", "betsy", "beth"},
-		"beth":        {"elizabeth", "betsy", "betty"},
-		"william":     {"bill", "will", "liam", "wm"},
-		"bill":        {"william", "will"},
-		"will":        {"william", "bill"},
-		"margaret":    {"maggie", "meg", "marge", "margot"},
-		"maggie":      {"margaret", "meg", "marge"},
-		"meg":         {"margaret", "maggie", "marge"},
-		"john":        {"johnny", "jon", "jack"},
-		"johnny":      {"john", "jon"},
-		"jon":         {"john", "johnny"},
-		"jack":        {"john", "johnny"},
-		"robert":      {"bob", "rob", "robin"},
-		"bob":         {"robert", "rob", "robin"},
-		"rob":         {"robert", "bob"},
-		"robin":       {"robert", "rob", "bob"},
-		"james":       {"jim", "jimmy", "jamie", "jim"},
-		"jim":         {"james", "jimmy", "jamie"},
-		"jimmy":       {"james", "jim", "jamie"},
-		"jamie":       {"james", "jim", "jimmy"},
-		"joseph":      {"joe", "jo", "joey"},
-		"joe":         {"joseph", "joey"},
-		"joey":        {"joseph", "joe"},
-		"thomas":      {"tom", "tommy", "tom"},
-		"tom":         {"thomas", "tommy"},
-		"tommy":       {"thomas", "tom"},
-		"benjamin":    {"ben", "benji", "benny"},
-		"ben":         {"benjamin", "benji"},
-		"benji":       {"benjamin", "ben", "benny"},
-		"christopher": {"chris", "kit", "kip"},
-		"chris":       {"christopher", "kit"},
-		"charles":     {"charlie", "chuck", "chas"},
-		"charlie":     {"charles", "chuck", "chas"},
-		"chuck":       {"charles", "charlie"},
-		"edward":      {"ed", "eddie", "ted"},
-		"ed":          {"edward", "eddie"},
-		"eddie":       {"edward", "ed"},
-		"ted":         {"edward", "ed"},
-		"henry":       {"hank", "harry"},
-		"hank":        {"henry", "harry"},
-		"harry":       {"henry", "hank", "harrison"},
-		"richard":     {"rich", "rick", "dick"},
-		"rick":        {"richard", "rich"},
-		"rich":        {"richard", "rick"},
-		"dick":        {"richard", "rick", "rich"},
-		"lawrence":    {"larry", "laurence", "lars"},
-		"larry":       {"lawrence", "laurence"},
-		"samuel":      {"sam", "sammie", "sammy"},
-		"sam":         {"samuel", "sammie", "sammy"},
-		"sammy":       {"samuel", "sam"},
-		"sampson":     {"sam", "sammy"},
-		"david":       {"dave", "davy"},
-		"dave":        {"david", "davy"},
-		"davy":        {"david", "dave"},
-		"daniel":      {"dan", "danny"},
-		"dan":         {"daniel", "danny"},
-		"danny":       {"daniel", "dan"},
-		"andrew":      {"andy", "andre", "andres"},
-		"andy":        {"andrew", "andre"},
-		"andre":       {"andrew", "andy"},
-		"michael":     {"mike", "mick", "michael"},
-		"mike":        {"michael", "mick"},
-		"mick":        {"michael", "mike"},
-		"paul":        {"paulo", "pablo", "pol"},
-		"stephen":     {"steve", "stephen", "steven"},
-		"steve":       {"stephen", "steven"},
-		"steven":      {"stephen", "steve"},
-		"patrick":     {"pat", "patty", "patrick"},
-		"pat":         {"patrick", "patty"},
-		"patty":       {"patrick", "pat"},
-		"anthony":     {"tony", "ant"},
-		"tony":        {"anthony", "ant"},
-		"ant":         {"anthony", "tony"},
-		"nicholas":    {"nick", "nicky", "col"},
-		"nick":        {"nicholas", "nicky"},
-		"nicky":       {"nicholas", "nick"},
-		"george":      {"geo", "georgia"},
-		"elijah":      {"eli", "lijah"},
-		"eli":         {"elijah", "lijah"},
-		"jeremiah":    {"jerry", "jer"},
-		"jerry":       {"jeremiah", "jer"},
-		"isaiah":      {"isa", "zay"},
-		"isa":         {"isaiah", "zay"},
-	}
-
-	if alts, ok := variations[n1]; ok {
-		for _, alt := range alts {
-			if alt == n2 {
-				return true
-			}
-		}
-	}
-	if alts, ok := variations[n2]; ok {
-		for _, alt := range alts {
-			if alt == n1 {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// soundsLike checks for phonetic similarity (handles common spelling variations)
 func soundsLike(name1, name2 string) bool {
-	n1 := strings.ToLower(strings.TrimSpace(name1))
-	n2 := strings.ToLower(strings.TrimSpace(name2))
-
-	// Common phonetic substitutions
-	phonetic1 := phoneticallyNormalize(n1)
-	phonetic2 := phoneticallyNormalize(n2)
-
-	if phonetic1 == phonetic2 && phonetic1 != "" {
+	n1 := phoneticallyNormalize(strings.ToLower(strings.TrimSpace(name1)))
+	n2 := phoneticallyNormalize(strings.ToLower(strings.TrimSpace(name2)))
+	if n1 == n2 && n1 != "" {
 		return true
 	}
-
-	// Check for common letter swaps (Penance vs Pinnance)
-	if levenshteinDistance(n1, n2) <= 2 && len(n1) >= 4 {
-		return true
-	}
-
-	return false
+	return levenshteinDistance(name1, name2) <= 2 && len(name1) >= 4
 }
 
-// phoneticallyNormalize applies common phonetic transformations
 func phoneticallyNormalize(s string) string {
-	s = strings.ToLower(s)
-	// Vowel normalization (a, e, i, o, u all similar)
 	s = strings.NewReplacer(
 		"a", "a",
 		"e", "a",
 		"i", "a",
 		"o", "a",
 		"u", "a",
-	).Replace(s)
-	// Common consonant pairs
+	).Replace(strings.ToLower(s))
 	s = strings.NewReplacer(
 		"c", "k",
 		"j", "g",
@@ -3526,11 +3723,10 @@ func levenshteinDistance(a, b string) int {
 }
 
 func parseNumericValue(raw string) (float64, bool) {
-	raw = strings.TrimSpace(raw)
+	raw = strings.TrimSpace(strings.ReplaceAll(raw, ",", ""))
 	if raw == "" {
 		return 0, false
 	}
-	raw = strings.ReplaceAll(raw, ",", "")
 	v, err := strconv.ParseFloat(raw, 64)
 	return v, err == nil
 }
@@ -3553,6 +3749,64 @@ func isFalsy(raw string) bool {
 	}
 }
 
+func extractSubjectCandidate(question string) string {
+	text := strings.TrimSpace(question)
+	replacements := []string{
+		"tell me about ", "describe ", "information about ", "who is ", "who was ", "what is ", "what was ",
+		"when did ", "where did ", "how did ", "which ", "give me details about ",
+	}
+	lower := strings.ToLower(text)
+	for _, prefix := range replacements {
+		if strings.HasPrefix(lower, prefix) {
+			text = strings.TrimSpace(text[len(prefix):])
+			break
+		}
+	}
+	for _, suffix := range []string{" die", " died", " pass away", " date of death", " cause of death", " community", " school"} {
+		if strings.HasSuffix(strings.ToLower(text), suffix) {
+			text = strings.TrimSpace(text[:len(text)-len(suffix)])
+			break
+		}
+	}
+	if len(strings.Fields(text)) > 6 {
+		return ""
+	}
+	return strings.Trim(text, " ?.")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func uniqueStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := normalizeSearchText(value)
+		if key == "" {
+			key = value
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
 func minInt(a, b int) int {
 	if a < b {
 		return a
@@ -3565,14 +3819,4 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			return value
-		}
-	}
-	return ""
 }
