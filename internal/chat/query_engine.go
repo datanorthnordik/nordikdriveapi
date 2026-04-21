@@ -512,7 +512,7 @@ func parseChatPlannerOutput(raw string, schema *chatDatasetSchema) (chatPlannerO
 		filter.FieldID = field.ID
 		filter.Op = strings.TrimSpace(strings.ToLower(filter.Op))
 		switch filter.Op {
-		case "eq", "contains", "before", "after", "between", "yes", "no":
+		case "eq", "contains", "before", "after", "between", "yes", "no", "is_empty", "is_not_empty":
 			cleanFilters = append(cleanFilters, filter)
 		}
 	}
@@ -1738,6 +1738,12 @@ func applyFilter(rows []cachedChatRow, field *chatSchemaField, filter chatPlanne
 
 func rowMatchesFilter(row cachedChatRow, field *chatSchemaField, filter chatPlannerFilter) bool {
 	raw := row.valueByField(field.ID, nil)
+	switch filter.Op {
+	case "is_empty":
+		return strings.TrimSpace(raw) == ""
+	case "is_not_empty":
+		return strings.TrimSpace(raw) != ""
+	}
 	switch field.Role {
 	case chatFieldRoleBoolean:
 		switch filter.Op {
@@ -1992,7 +1998,7 @@ func scoreLocationMatch(questionNorm, locationNorm string) float64 {
 	if strings.Contains(questionNorm, locationNorm) {
 		return 1.0
 	}
-	locationWords := strings.Fields(locationNorm)
+	locationWords := nonGenericLocationTokens(locationNorm)
 	if len(locationWords) == 0 {
 		return 0
 	}
@@ -2006,6 +2012,9 @@ func scoreLocationMatch(questionNorm, locationNorm string) float64 {
 		score := float64(matchedWords) / float64(len(locationWords))
 		if strings.Contains(questionNorm, locationWords[0]) {
 			score += 0.2
+		}
+		if score > 1 {
+			score = 1
 		}
 		return score
 	}
@@ -2026,6 +2035,10 @@ func inferQuestionFilters(question string, dataset *chatDatasetCacheEntry, exist
 	seenFields := map[string]struct{}{}
 	for _, filter := range existing {
 		seenFields[filter.FieldID] = struct{}{}
+	}
+
+	if filter, ok := inferMissingFieldFilter(question, dataset, seenFields); ok {
+		return append(filters, filter)
 	}
 
 	type inferredCandidate struct {
@@ -2091,7 +2104,8 @@ func inferSearchTerms(question string, dataset *chatDatasetCacheEntry, filters [
 		"months": {}, "most": {}, "much": {}, "number": {}, "occur": {}, "occurred": {}, "of": {}, "on": {}, "or": {}, "records": {},
 		"reserve": {}, "reserves": {}, "school": {}, "show": {}, "student": {}, "students": {}, "tell": {}, "that": {}, "the": {},
 		"their": {}, "there": {}, "these": {}, "they": {}, "this": {}, "those": {}, "total": {}, "was": {}, "were": {}, "what": {},
-		"when": {}, "where": {}, "which": {}, "who": {}, "with": {}, "year": {}, "years": {},
+		"when": {}, "where": {}, "which": {}, "who": {}, "with": {}, "year": {}, "years": {}, "name": {}, "names": {},
+		"without": {}, "missing": {}, "blank": {}, "empty": {}, "not": {},
 	}
 
 	terms := make([]string, 0, 3)
@@ -2168,6 +2182,21 @@ func questionRequestsMatchedNames(questionNorm string) bool {
 		"who were the children",
 		"who are the children",
 		"who were they",
+	)
+}
+
+func questionAsksForMissingField(questionNorm string) bool {
+	return containsAny(
+		questionNorm,
+		"does not have",
+		"do not have",
+		"doesnt have",
+		"dont have",
+		"without",
+		"missing",
+		"blank",
+		"empty",
+		"not have",
 	)
 }
 
@@ -2763,6 +2792,34 @@ func (schema *chatDatasetSchema) bestSchoolFieldForQuestion(question string) *ch
 	return best
 }
 
+func (schema *chatDatasetSchema) bestLocationFieldForQuestion(question string) *chatSchemaField {
+	qnorm := normalizeSearchText(question)
+	bestScore := -1
+	var best *chatSchemaField
+	for idx := range schema.Fields {
+		field := &schema.Fields[idx]
+		if field.Role != chatFieldRoleLocation {
+			continue
+		}
+		score := 10
+		blob := fieldSearchBlob(field)
+		if containsAny(qnorm, "location", "locations", "place", "places") && containsAny(blob, "location", "place") {
+			score += 40
+		}
+		for _, alias := range field.Aliases {
+			aliasNorm := normalizeSearchText(alias)
+			if aliasNorm != "" && strings.Contains(qnorm, aliasNorm) {
+				score += len(aliasNorm)
+			}
+		}
+		if score > bestScore {
+			bestScore = score
+			best = field
+		}
+	}
+	return best
+}
+
 func (schema *chatDatasetSchema) describeForPlanner() string {
 	lines := make([]string, 0, len(schema.Fields))
 	for _, field := range schema.Fields {
@@ -3167,6 +3224,9 @@ func (dataset *chatDatasetCacheEntry) bestFilterValueForQuestion(field *chatSche
 		if len(norm) < 3 {
 			continue
 		}
+		if isGenericFilterValue(norm) {
+			continue
+		}
 		seen[norm] = struct{}{}
 		score := scoreLocationMatch(questionNorm, norm)
 		if score > bestScore {
@@ -3181,6 +3241,9 @@ func (dataset *chatDatasetCacheEntry) bestFilterValueForQuestion(field *chatSche
 		if len(norm) < 3 || len(norm) > 80 {
 			continue
 		}
+		if isGenericFilterValue(norm) {
+			continue
+		}
 		if _, ok := seen[norm]; ok {
 			continue
 		}
@@ -3191,7 +3254,7 @@ func (dataset *chatDatasetCacheEntry) bestFilterValueForQuestion(field *chatSche
 			bestRaw = raw
 		}
 	}
-	if bestScore > 0.5 {
+	if bestScore >= 0.4 {
 		return bestRaw, bestScore, true
 	}
 	return "", 0, false
@@ -3484,6 +3547,61 @@ func fieldSupportsValueInference(field *chatSchemaField) bool {
 	}
 }
 
+func inferMissingFieldFilter(question string, dataset *chatDatasetCacheEntry, seenFields map[string]struct{}) (chatPlannerFilter, bool) {
+	if dataset == nil {
+		return chatPlannerFilter{}, false
+	}
+	qnorm := normalizeSearchText(question)
+	if qnorm == "" || !questionAsksForMissingField(qnorm) {
+		return chatPlannerFilter{}, false
+	}
+
+	field := dataset.schema.bestFieldForQuestion(question)
+	if field == nil {
+		switch {
+		case containsAny(qnorm, "community", "reserve", "first nation", "home"):
+			field = dataset.schema.bestCommunityFieldForQuestion(question)
+		case containsAny(qnorm, "school", "institution", "residential"):
+			field = dataset.schema.bestSchoolFieldForQuestion(question)
+		case containsAny(qnorm, "location", "place"):
+			field = dataset.schema.bestLocationFieldForQuestion(question)
+		}
+	}
+	if field == nil {
+		return chatPlannerFilter{}, false
+	}
+	if _, seen := seenFields[field.ID]; seen {
+		return chatPlannerFilter{}, false
+	}
+	return chatPlannerFilter{FieldID: field.ID, Op: "is_empty"}, true
+}
+
+func isGenericFilterValue(norm string) bool {
+	if norm == "" {
+		return true
+	}
+	generic := map[string]struct{}{
+		"community": {}, "communities": {}, "reserve": {}, "reserves": {}, "first nation": {}, "first nations": {},
+		"school": {}, "schools": {}, "institution": {}, "institutions": {}, "location": {}, "locations": {},
+		"place": {}, "places": {}, "name": {}, "names": {}, "student": {}, "students": {}, "child": {}, "children": {},
+		"record": {}, "records": {}, "date": {}, "dates": {}, "death": {}, "deaths": {}, "birth": {}, "births": {},
+		"admission": {}, "admissions": {}, "discharge": {}, "discharges": {},
+	}
+	if _, ok := generic[norm]; ok {
+		return true
+	}
+	tokens := strings.Fields(norm)
+	if len(tokens) == 0 {
+		return true
+	}
+	for _, token := range tokens {
+		if _, ok := generic[token]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func filterFieldPreference(field *chatSchemaField, questionNorm string) float64 {
 	if field == nil {
 		return 0
@@ -3492,11 +3610,11 @@ func filterFieldPreference(field *chatSchemaField, questionNorm string) float64 
 	score := 0.0
 	switch field.Role {
 	case chatFieldRoleSchool:
-		score += 0.20
+		score += 0.25
 	case chatFieldRoleCommunity:
 		score += 0.10
 	case chatFieldRoleLocation:
-		score += 0.05
+		score -= 0.10
 	}
 	if containsAny(questionNorm, "school", "residential school", "institution") && containsAny(blob, "school", "institution", "residential") {
 		score += 0.35
@@ -3504,7 +3622,35 @@ func filterFieldPreference(field *chatSchemaField, questionNorm string) float64 
 	if containsAny(questionNorm, "community", "reserve", "home") && containsAny(blob, "community", "reserve", "home") {
 		score += 0.25
 	}
+	if containsAny(questionNorm, "location", "locations", "place", "places", "where") && containsAny(blob, "location", "place", "where") {
+		score += 0.30
+	}
+	if !containsAny(questionNorm, "location", "locations", "place", "places", "where") {
+		if field.Role == chatFieldRoleSchool {
+			score += 0.30
+		}
+		if field.Role == chatFieldRoleLocation {
+			score -= 0.15
+		}
+	}
 	return score
+}
+
+func nonGenericLocationTokens(locationNorm string) []string {
+	tokens := strings.Fields(locationNorm)
+	if len(tokens) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		if !isGenericFilterValue(token) {
+			out = append(out, token)
+		}
+	}
+	if len(out) == 0 {
+		return tokens
+	}
+	return out
 }
 
 func isLocationLikeField(field *chatSchemaField) bool {
