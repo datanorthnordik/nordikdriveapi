@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"mime/multipart"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,35 +35,33 @@ Style requirements:
 - Prefer short paragraphs over bullet points.
 - Do NOT use bullet points unless the user explicitly asks for a list.
 - Do NOT sound robotic or overly formal.
-- Do NOT mention JSON, database, columns, file name, file version, cached content, or any technical details.
-- If the answer is not present in the provided data, say so clearly and ask 1 short follow-up question only when absolutely needed.
-- Maintain an empathetic and respectful tone, especially when discussing deaths or sensitive topics.
+- Do NOT mention JSON, database, columns, file name, file version, or any technical details.
+- If the answer is not present in the provided data, say so clearly and ask 1 short follow-up question if needed.
 
 Accuracy requirements:
-- Use ONLY the cached file context and the latest user turn. Do not use outside knowledge.
-- Carefully analyze ALL relevant records before answering.
+- Use ONLY the provided data. Do not use outside knowledge.
+- Carefully analyze ALL provided data before answering.
 - Do not stop after finding the first match.
 - Always check if multiple equally correct answers exist.
 - Never return only one answer if multiple valid answers are present.
 - For questions involving highest, lowest, most, least, first, last, top, or similar comparisons:
   verify that no other entries share the same value before answering.
 
-Session rules:
-- Treat prior conversation context as optional support only.
-- If the latest user turn is a fresh standalone question, ignore prior conversation context.
-- Use prior conversation context only when the latest turn clearly refers back or is explicitly answering a clarification question.
-- Never let older conversation context change the answer to a new standalone question.
+Before responding:
+- Internally re-check the data to confirm whether another valid answer exists.
+- Only respond after confirming that all correct answers are included.
 
-Clarification rules:
-- Ask a clarification question only when it is necessary to avoid a wrong answer.
-- Keep clarification questions short and specific.
-- If the prompt says no clarification budget remains, do not ask another clarification question. Instead say the records do not allow an exact answer.
+Answer format:
+- Start with a direct answer in 1-2 sentences.
+- If multiple answers exist, include ALL of them in the first sentence.
+- Combine them naturally (example: "1882 and 1995").
+- Provide as much detail as possible based on the data.
 
 Output requirements:
 - Return ONLY the final answer text.
 - Do NOT return JSON.
 - Do NOT prefix the answer with labels like "answer:" or "response:".
-- If you need clarification, return only the short clarification question.
+- If clarification is needed, ask only 1 short follow-up question.
 `
 
 var (
@@ -82,9 +81,11 @@ type chatDatasetCacheEntry struct {
 }
 
 type cachedChatRow struct {
-	RowID     int
-	RowJSON   string
-	Community string
+	RowID      int
+	RowJSON    string
+	Community  string
+	Values     map[string]string
+	Normalized map[string]string
 }
 
 type preparedChatDataset struct {
@@ -96,6 +97,13 @@ type chatContextCacheEntry struct {
 	Name      string
 	Model     string
 	ExpiresAt time.Time
+}
+
+type verifiedDeathYearAggregate struct {
+	ScopeOriginal   string
+	ScopeNormalized string
+	Years           []int
+	Count           int
 }
 
 func (cs *ChatService) ChatForUser(userID int64, question string, audioFile *multipart.FileHeader, filename string, communities []string) (*ChatResult, error) {
@@ -139,6 +147,16 @@ func (cs *ChatService) ChatForUser(userID int64, question string, audioFile *mul
 	}
 
 	ctx := context.Background()
+	if session.Pending == nil && !looksLikeFollowUpQuestion(questionNorm) && !isLikelyClarificationReply(questionNorm) {
+		if deterministicAnswer, handled, err := cs.tryDeterministicChatAnswer(ctx, dataset, filteredCommunities, question, questionNorm); err != nil {
+			return nil, err
+		} else if handled {
+			result := finalizeChatAnswer(question, questionNorm, session, deterministicAnswer)
+			cs.saveSession(userID, session)
+			return result, nil
+		}
+	}
+
 	answerText, err := cs.generateChatAnswer(ctx, prepared, question, audioBytes, audioMime, session)
 	if err != nil {
 		return nil, err
@@ -282,22 +300,10 @@ func buildPreparedChatDataset(dataset *chatDatasetCacheEntry, communities []stri
 }
 
 func buildChatCacheBody(dataset *chatDatasetCacheEntry, communities []string, rowCount int, promptJSON string) string {
-	sections := []string{
-		"FILE CONTEXT",
-		fmt.Sprintf("Filename: %s", dataset.Filename),
-		fmt.Sprintf("Version: %d", dataset.Version),
-		fmt.Sprintf("Rows in scope: %d", rowCount),
-		fmt.Sprintf("Community scope: %s", renderCommunityScope(communities)),
-	}
-
-	if strings.TrimSpace(dataset.ColumnsOrderJSON) != "" {
-		sections = append(sections, "COLUMNS ORDER:\n"+dataset.ColumnsOrderJSON)
-	}
-	if strings.TrimSpace(dataset.ConfigJSON) != "" {
-		sections = append(sections, "ACTIVE CONFIG:\n"+dataset.ConfigJSON)
-	}
-	sections = append(sections, "DATA (only source of truth):\n"+promptJSON)
-	return strings.Join(sections, "\n\n")
+	_ = dataset
+	_ = communities
+	_ = rowCount
+	return "DATA (only source of truth):\n" + promptJSON
 }
 
 func renderCommunityScope(communities []string) string {
@@ -339,16 +345,55 @@ func buildPromptRowRef(position int) string {
 
 func buildCachedChatRow(rawRow f.FileData) cachedChatRow {
 	row := cachedChatRow{
-		RowID:   int(rawRow.ID),
-		RowJSON: string(rawRow.RowData),
+		RowID:      int(rawRow.ID),
+		RowJSON:    string(rawRow.RowData),
+		Values:     make(map[string]string),
+		Normalized: make(map[string]string),
 	}
 
 	var rowMap map[string]interface{}
 	if err := json.Unmarshal(rawRow.RowData, &rowMap); err != nil {
 		return row
 	}
+	for key, rawValue := range rowMap {
+		stringValue := stringifyChatValue(rawValue)
+		row.Values[key] = stringValue
+		row.Normalized[key] = normalizeSearchText(stringValue)
+	}
 	row.Community = extractCommunityValue(rowMap)
 	return row
+}
+
+func stringifyChatValue(value interface{}) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(typed)
+	case fmt.Stringer:
+		return strings.TrimSpace(typed.String())
+	case float64:
+		return strings.TrimSpace(strconv.FormatFloat(typed, 'f', -1, 64))
+	case float32:
+		return strings.TrimSpace(strconv.FormatFloat(float64(typed), 'f', -1, 32))
+	case int:
+		return strconv.Itoa(typed)
+	case int64:
+		return strconv.FormatInt(typed, 10)
+	case int32:
+		return strconv.FormatInt(int64(typed), 10)
+	case uint:
+		return strconv.FormatUint(uint64(typed), 10)
+	case uint64:
+		return strconv.FormatUint(typed, 10)
+	case bool:
+		if typed {
+			return "true"
+		}
+		return "false"
+	default:
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
 }
 
 func extractCommunityValue(rowMap map[string]interface{}) string {
@@ -379,6 +424,349 @@ func loadOptionalAudio(audioFile *multipart.FileHeader) ([]byte, string, error) 
 		return nil, "", fmt.Errorf("failed to read audio file: %w", err)
 	}
 	return audioBytes, audioFile.Header.Get("Content-Type"), nil
+}
+
+func (cs *ChatService) tryDeterministicChatAnswer(
+	ctx context.Context,
+	dataset *chatDatasetCacheEntry,
+	communities []string,
+	question string,
+	questionNorm string,
+) (string, bool, error) {
+	aggregate, ok := detectHighestDeathsByYearAggregate(dataset, communities, question, questionNorm)
+	if !ok {
+		return "", false, nil
+	}
+
+	answer, err := cs.renderVerifiedDeathYearAggregate(ctx, question, aggregate)
+	if err != nil {
+		return renderVerifiedDeathYearAggregateFallback(aggregate), true, nil
+	}
+	return answer, true, nil
+}
+
+func detectHighestDeathsByYearAggregate(
+	dataset *chatDatasetCacheEntry,
+	communities []string,
+	question string,
+	questionNorm string,
+) (*verifiedDeathYearAggregate, bool) {
+	if !isHighestDeathsByYearQuestion(questionNorm) {
+		return nil, false
+	}
+
+	scopeOriginal, scopeNormalized := extractAggregateScope(question, questionNorm)
+	yearCounts := make(map[int]int)
+
+	for _, row := range dataset.rows {
+		if !rowAllowedByCommunities(row, communities) {
+			continue
+		}
+		if scopeNormalized != "" && !rowMatchesAggregateScope(row, scopeNormalized) {
+			continue
+		}
+		year, ok := extractDeathYearFromRow(row)
+		if !ok {
+			continue
+		}
+		yearCounts[year]++
+	}
+
+	if len(yearCounts) == 0 {
+		return nil, false
+	}
+
+	maxCount := 0
+	years := make([]int, 0, len(yearCounts))
+	for year, count := range yearCounts {
+		switch {
+		case count > maxCount:
+			maxCount = count
+			years = []int{year}
+		case count == maxCount:
+			years = append(years, year)
+		}
+	}
+	if maxCount == 0 || len(years) == 0 {
+		return nil, false
+	}
+	sort.Ints(years)
+
+	return &verifiedDeathYearAggregate{
+		ScopeOriginal:   scopeOriginal,
+		ScopeNormalized: scopeNormalized,
+		Years:           years,
+		Count:           maxCount,
+	}, true
+}
+
+func isHighestDeathsByYearQuestion(questionNorm string) bool {
+	if questionNorm == "" {
+		return false
+	}
+	if !strings.Contains(questionNorm, "death") || !strings.Contains(questionNorm, "year") {
+		return false
+	}
+	if strings.Contains(questionNorm, "highest number of deaths") {
+		return true
+	}
+	if strings.Contains(questionNorm, "most deaths") {
+		return true
+	}
+	if strings.Contains(questionNorm, "highest deaths") {
+		return true
+	}
+	return false
+}
+
+var aggregateScopeSuffixRe = regexp.MustCompile(`(?i)\boccur(?:red)?\s+(?:at|in)\s+(.+?)\s*\??$`)
+
+func extractAggregateScope(question string, questionNorm string) (string, string) {
+	match := aggregateScopeSuffixRe.FindStringSubmatch(strings.TrimSpace(question))
+	if len(match) == 2 {
+		scopeOriginal := strings.TrimSpace(strings.Trim(match[1], " ?."))
+		return scopeOriginal, normalizeAggregateScope(scopeOriginal)
+	}
+
+	match = aggregateScopeSuffixRe.FindStringSubmatch(strings.TrimSpace(questionNorm))
+	if len(match) == 2 {
+		scopeNorm := normalizeAggregateScope(match[1])
+		return strings.TrimSpace(match[1]), scopeNorm
+	}
+	return "", ""
+}
+
+func normalizeAggregateScope(scope string) string {
+	scope = normalizeSearchText(scope)
+	if scope == "" {
+		return ""
+	}
+	stopwords := map[string]struct{}{
+		"the": {}, "a": {}, "an": {}, "school": {}, "residential": {}, "indian": {}, "institution": {},
+		"irs": {}, "at": {}, "in": {}, "of": {}, "for": {},
+	}
+	parts := make([]string, 0, len(strings.Fields(scope)))
+	for _, part := range strings.Fields(scope) {
+		if _, skip := stopwords[part]; skip {
+			continue
+		}
+		parts = append(parts, part)
+	}
+	if len(parts) == 0 {
+		return scope
+	}
+	return strings.Join(parts, " ")
+}
+
+func rowAllowedByCommunities(row cachedChatRow, communities []string) bool {
+	if len(communities) == 0 {
+		return true
+	}
+	for _, community := range communities {
+		if row.Community == community {
+			return true
+		}
+	}
+	return false
+}
+
+func rowMatchesAggregateScope(row cachedChatRow, scopeNormalized string) bool {
+	if scopeNormalized == "" {
+		return true
+	}
+	for fieldName, valueNorm := range row.Normalized {
+		if valueNorm == "" {
+			continue
+		}
+		fieldNorm := normalizeSearchText(fieldName)
+		if !isAggregateScopeField(fieldNorm) {
+			continue
+		}
+		if aggregateScopeMatchesValue(scopeNormalized, valueNorm) {
+			return true
+		}
+	}
+	return false
+}
+
+func isAggregateScopeField(fieldNorm string) bool {
+	return strings.Contains(fieldNorm, "school") ||
+		strings.Contains(fieldNorm, "residential") ||
+		strings.Contains(fieldNorm, "institution") ||
+		strings.Contains(fieldNorm, "place") ||
+		strings.Contains(fieldNorm, "location") ||
+		strings.Contains(fieldNorm, "community") ||
+		strings.Contains(fieldNorm, "reserve") ||
+		strings.Contains(fieldNorm, "first nation")
+}
+
+func aggregateScopeMatchesValue(scopeNormalized, valueNormalized string) bool {
+	if scopeNormalized == "" || valueNormalized == "" {
+		return false
+	}
+	if strings.Contains(valueNormalized, scopeNormalized) {
+		return true
+	}
+	for _, token := range strings.Fields(scopeNormalized) {
+		if token == "" || !strings.Contains(valueNormalized, token) {
+			return false
+		}
+	}
+	return true
+}
+
+func extractDeathYearFromRow(row cachedChatRow) (int, bool) {
+	type candidate struct {
+		score int
+		value string
+	}
+	candidates := make([]candidate, 0, len(row.Values))
+	for fieldName, value := range row.Values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		score := deathDateFieldScore(normalizeSearchText(fieldName))
+		if score <= 0 {
+			continue
+		}
+		candidates = append(candidates, candidate{score: score, value: value})
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].score > candidates[j].score
+	})
+
+	for _, candidate := range candidates {
+		if year, ok := extractSingleYear(candidate.value); ok {
+			return year, true
+		}
+	}
+	return 0, false
+}
+
+func deathDateFieldScore(fieldNorm string) int {
+	switch {
+	case strings.Contains(fieldNorm, "date of death"):
+		return 100
+	case strings.Contains(fieldNorm, "year of death"):
+		return 95
+	case strings.Contains(fieldNorm, "death date"):
+		return 95
+	case strings.Contains(fieldNorm, "death") && strings.Contains(fieldNorm, "date"):
+		return 90
+	case strings.Contains(fieldNorm, "death") && strings.Contains(fieldNorm, "year"):
+		return 85
+	default:
+		return 0
+	}
+}
+
+var singleYearRe = regexp.MustCompile(`\b(1[0-9]{3}|20[0-9]{2})\b`)
+
+func extractSingleYear(value string) (int, bool) {
+	matches := singleYearRe.FindAllString(value, -1)
+	if len(matches) == 0 {
+		return 0, false
+	}
+	unique := make(map[string]struct{}, len(matches))
+	for _, match := range matches {
+		unique[match] = struct{}{}
+	}
+	if len(unique) != 1 {
+		return 0, false
+	}
+	for yearText := range unique {
+		year, err := strconv.Atoi(yearText)
+		if err != nil {
+			return 0, false
+		}
+		return year, true
+	}
+	return 0, false
+}
+
+const chatVerifiedResultInstruction = `
+You are a helpful assistant answering a community data question for a non-technical user.
+
+Style requirements:
+- Answer like a human: natural, warm, and conversational.
+- Prefer short paragraphs over bullet points.
+- Do NOT use bullet points unless the user explicitly asks for a list.
+- Do NOT sound robotic or overly formal.
+- Do NOT mention JSON, database, file structure, verification logic, or technical details.
+
+Accuracy requirements:
+- Use ONLY the VERIFIED RESULT below.
+- Do NOT add facts that are not in the VERIFIED RESULT.
+- Keep the exact years and counts unchanged.
+
+Answer format:
+- Start with a direct answer in 1-2 sentences.
+- If multiple years tie, include all of them naturally in the first sentence.
+- Return ONLY the final answer text.
+`
+
+func (cs *ChatService) renderVerifiedDeathYearAggregate(ctx context.Context, question string, aggregate *verifiedDeathYearAggregate) (string, error) {
+	if aggregate == nil {
+		return "", fmt.Errorf("verified aggregate is required")
+	}
+
+	var scopeLine string
+	if strings.TrimSpace(aggregate.ScopeOriginal) != "" {
+		scopeLine = fmt.Sprintf("Scope: %s\n", strings.TrimSpace(aggregate.ScopeOriginal))
+	} else {
+		scopeLine = "Scope: all records in the current data\n"
+	}
+
+	prompt := strings.TrimSpace(chatVerifiedResultInstruction) + "\n\nUser question:\n" + strings.TrimSpace(question) +
+		"\n\nVERIFIED RESULT:\n" +
+		scopeLine +
+		fmt.Sprintf("Highest death count in a single year: %d\n", aggregate.Count) +
+		fmt.Sprintf("Year(s): %s\n", joinYearsForPrompt(aggregate.Years))
+
+	answer, _, err := cs.generateFromPrompt(ctx, prompt, nil, "")
+	if err != nil {
+		return "", err
+	}
+	return sanitizeAnswerText(answer), nil
+}
+
+func joinYearsForPrompt(years []int) string {
+	parts := make([]string, 0, len(years))
+	for _, year := range years {
+		parts = append(parts, strconv.Itoa(year))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func renderVerifiedDeathYearAggregateFallback(aggregate *verifiedDeathYearAggregate) string {
+	scopeText := "in the data"
+	if strings.TrimSpace(aggregate.ScopeOriginal) != "" {
+		scopeText = "at " + strings.TrimSpace(aggregate.ScopeOriginal)
+	}
+	if len(aggregate.Years) == 1 {
+		return fmt.Sprintf("The highest number of deaths %s occurred in %d, when %d students died.", scopeText, aggregate.Years[0], aggregate.Count)
+	}
+
+	yearParts := make([]string, 0, len(aggregate.Years))
+	for _, year := range aggregate.Years {
+		yearParts = append(yearParts, strconv.Itoa(year))
+	}
+	return fmt.Sprintf("The highest number of deaths %s occurred in %s, with %d students in each of those years.", scopeText, joinNaturalList(yearParts), aggregate.Count)
+}
+
+func joinNaturalList(items []string) string {
+	switch len(items) {
+	case 0:
+		return ""
+	case 1:
+		return items[0]
+	case 2:
+		return items[0] + " and " + items[1]
+	default:
+		return strings.Join(items[:len(items)-1], ", ") + ", and " + items[len(items)-1]
+	}
 }
 
 func (cs *ChatService) generateChatAnswer(
@@ -950,7 +1338,7 @@ func newChatGenerateConfig(cachedContent string) *genai.GenerateContentConfig {
 		CachedContent:    cachedContent,
 		ResponseMIMEType: "text/plain",
 		MaxOutputTokens:  1536,
-		Temperature:      float32Ptr(0.1),
+		Temperature:      float32Ptr(0),
 	}
 }
 

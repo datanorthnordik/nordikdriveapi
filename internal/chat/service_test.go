@@ -493,6 +493,67 @@ func TestChatService_Chat_RetriesMalformedTruncatedResponse(t *testing.T) {
 	}
 }
 
+func TestChatService_Chat_DeterministicHighestDeathsByYearAtScope(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	rows := []string{
+		`{"NAME":"A","SCHOOL":"Shingwauk","DATE OF DEATH":"1913-01-01","First Nation/Community":"Garden River"}`,
+		`{"NAME":"B","SCHOOL":"Shingwauk","DATE OF DEATH":"1913-02-01","First Nation/Community":"Garden River"}`,
+		`{"NAME":"C","SCHOOL":"Shingwauk","DATE OF DEATH":"1913-03-01","First Nation/Community":"Garden River"}`,
+		`{"NAME":"D","SCHOOL":"Shingwauk","DATE OF DEATH":"1913-04-01","First Nation/Community":"Garden River"}`,
+		`{"NAME":"E","SCHOOL":"Shingwauk","DATE OF DEATH":"1913-05-01","First Nation/Community":"Garden River"}`,
+		`{"NAME":"F","SCHOOL":"Shingwauk","DATE OF DEATH":"1913-06-01","First Nation/Community":"Garden River"}`,
+		`{"NAME":"G","SCHOOL":"Shingwauk","DATE OF DEATH":"1882-01-01","First Nation/Community":"Garden River"}`,
+		`{"NAME":"H","SCHOOL":"Shingwauk","DATE OF DEATH":"1882-02-01","First Nation/Community":"Garden River"}`,
+		`{"NAME":"I","SCHOOL":"Shingwauk","DATE OF DEATH":"1882-03-01","First Nation/Community":"Garden River"}`,
+		`{"NAME":"J","SCHOOL":"Shingwauk","DATE OF DEATH":"1882-04-01","First Nation/Community":"Garden River"}`,
+		`{"NAME":"K","SCHOOL":"Shingwauk","DATE OF DEATH":"1882-05-01","First Nation/Community":"Garden River"}`,
+		`{"NAME":"L","SCHOOL":"Other School","DATE OF DEATH":"1913-01-01","First Nation/Community":"Garden River"}`,
+		`{"NAME":"M","SCHOOL":"Other School","DATE OF DEATH":"1913-02-01","First Nation/Community":"Garden River"}`,
+	}
+	expectChatRowsLookup(mock, rows...)
+
+	oldCreate := genaiCreateCachedContentHook
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiCreateCachedContentHook = oldCreate
+		genaiGenerateContentHook = oldGenerate
+	})
+
+	genaiCreateCachedContentHook = func(_ *genai.Client, _ context.Context, _ string, _ *genai.CreateCachedContentConfig) (*genai.CachedContent, error) {
+		t.Fatal("did not expect cache creation for deterministic aggregate answer")
+		return nil, nil
+	}
+
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		if len(contents) == 0 || contents[0] == nil || len(contents[0].Parts) == 0 {
+			t.Fatalf("expected verified-result prompt, got %#v", contents)
+		}
+		prompt := contents[0].Parts[0].Text
+		if !strings.Contains(prompt, "VERIFIED RESULT:") {
+			t.Fatalf("expected verified-result prompt, got:\n%s", prompt)
+		}
+		if !strings.Contains(prompt, "Highest death count in a single year: 6") {
+			t.Fatalf("expected verified count in prompt, got:\n%s", prompt)
+		}
+		if !strings.Contains(prompt, "Year(s): 1913") {
+			t.Fatalf("expected verified year in prompt, got:\n%s", prompt)
+		}
+		return jsonAnswer("The highest number of deaths at Shingwauk occurred in 1913, when 6 students died.", nil, false, ""), nil
+	}
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	result, err := cs.Chat("In what years did the highest number of deaths occur at Shingwauk?", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !strings.Contains(result.Answer, "1913") || !strings.Contains(result.Answer, "6") {
+		t.Fatalf("unexpected deterministic answer: %#v", result)
+	}
+}
+
 func TestChatService_Chat_AudioReadError(t *testing.T) {
 	db, mock, cleanup := newMockDBChatSvc(t)
 	defer cleanup()
