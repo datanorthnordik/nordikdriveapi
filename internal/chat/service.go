@@ -101,10 +101,15 @@ func firstTextFromResp(genResp *genai.GenerateContentResponse) string {
 		if candidate.Content == nil {
 			continue
 		}
+		var b strings.Builder
 		for _, part := range candidate.Content.Parts {
-			if strings.TrimSpace(part.Text) != "" {
-				return part.Text
+			if strings.TrimSpace(part.Text) == "" {
+				continue
 			}
+			b.WriteString(part.Text)
+		}
+		if strings.TrimSpace(b.String()) != "" {
+			return b.String()
 		}
 	}
 	return ""

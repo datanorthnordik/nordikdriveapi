@@ -843,11 +843,11 @@ func samePrompt(a, b string) bool {
 
 func newChatGenerateConfig(cachedContent string) *genai.GenerateContentConfig {
 	return &genai.GenerateContentConfig{
-		CachedContent:      cachedContent,
-		ResponseMIMEType:   "application/json",
+		CachedContent:     cachedContent,
+		ResponseMIMEType:  "application/json",
 		ResponseJsonSchema: chatResponseJSONSchema,
-		MaxOutputTokens:    1536,
-		Temperature:        float32Ptr(0.1),
+		MaxOutputTokens:   1536,
+		Temperature:       float32Ptr(0.1),
 	}
 }
 
