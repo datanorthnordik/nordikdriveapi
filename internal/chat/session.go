@@ -16,8 +16,6 @@ type chatPendingClarification struct {
 	Prompt           string
 	Attempts         int
 	OriginalQuestion string
-	CandidateRowIDs  []int
-	Plan             chatPlannerOutput
 }
 
 type chatSessionState struct {
@@ -26,8 +24,6 @@ type chatSessionState struct {
 	Filename    string
 	Version     int
 	Communities []string
-	FocusRowIDs []int
-	LastFieldID string
 	Pending     *chatPendingClarification
 	RecentTurns []chatSessionTurn
 	UpdatedAt   time.Time
@@ -36,7 +32,6 @@ type chatSessionState struct {
 type chatSessionTurn struct {
 	Question string
 	Answer   string
-	FieldID  string
 	At       time.Time
 }
 
@@ -49,15 +44,6 @@ func communitiesSignature(communities []string) string {
 		return "__all__"
 	}
 	return strings.Join(communities, "\x1f")
-}
-
-func cloneIntSlice(src []int) []int {
-	if len(src) == 0 {
-		return nil
-	}
-	out := make([]int, len(src))
-	copy(out, src)
-	return out
 }
 
 func cloneStringSlice(src []string) []string {
@@ -86,8 +72,6 @@ func clonePending(src *chatPendingClarification) *chatPendingClarification {
 		Prompt:           src.Prompt,
 		Attempts:         src.Attempts,
 		OriginalQuestion: src.OriginalQuestion,
-		CandidateRowIDs:  cloneIntSlice(src.CandidateRowIDs),
-		Plan:             src.Plan,
 	}
 }
 
@@ -101,8 +85,6 @@ func cloneSessionState(src *chatSessionState) *chatSessionState {
 		Filename:    src.Filename,
 		Version:     src.Version,
 		Communities: cloneStringSlice(src.Communities),
-		FocusRowIDs: cloneIntSlice(src.FocusRowIDs),
-		LastFieldID: src.LastFieldID,
 		Pending:     clonePending(src.Pending),
 		RecentTurns: cloneTurns(src.RecentTurns),
 		UpdatedAt:   src.UpdatedAt,
@@ -154,13 +136,11 @@ func (cs *ChatService) saveSession(userID int64, state *chatSessionState) {
 	cs.sessionCache.Store(chatSessionKey(userID), cloneSessionState(state))
 }
 
-func (s *chatSessionState) registerTurn(question, answer, fieldID string, focusRowIDs []int) {
+func (s *chatSessionState) registerTurn(question, answer string) {
 	if s == nil {
 		return
 	}
 	s.UpdatedAt = time.Now().UTC()
-	s.LastFieldID = strings.TrimSpace(fieldID)
-	s.FocusRowIDs = cloneIntSlice(focusRowIDs)
 
 	question = strings.TrimSpace(question)
 	answer = strings.TrimSpace(answer)
@@ -171,7 +151,6 @@ func (s *chatSessionState) registerTurn(question, answer, fieldID string, focusR
 	s.RecentTurns = append(s.RecentTurns, chatSessionTurn{
 		Question: question,
 		Answer:   answer,
-		FieldID:  s.LastFieldID,
 		At:       s.UpdatedAt,
 	})
 	if len(s.RecentTurns) > chatSessionMaxTurns {
@@ -179,56 +158,37 @@ func (s *chatSessionState) registerTurn(question, answer, fieldID string, focusR
 	}
 }
 
-func (s *chatSessionState) summaryForPrompt(dataset *chatDatasetCacheEntry) string {
-	if s == nil {
-		return "No active session context."
+func (s *chatSessionState) summaryForPrompt() string {
+	if s == nil || len(s.RecentTurns) == 0 {
+		return "No recent conversation context."
 	}
 
-	lines := []string{}
-	if len(s.FocusRowIDs) > 0 && dataset != nil {
-		focusNames := make([]string, 0, len(s.FocusRowIDs))
-		for _, rowID := range s.FocusRowIDs {
-			if row, ok := dataset.rowByID[rowID]; ok {
-				name := strings.TrimSpace(row.primaryName())
-				if name == "" {
-					name = fmt.Sprintf("row %d", rowID)
-				}
-				focusNames = append(focusNames, name)
-			}
-		}
-		if len(focusNames) > 0 {
-			lines = append(lines, "Current focus: "+strings.Join(focusNames, ", "))
-		}
+	start := 0
+	if len(s.RecentTurns) > 2 {
+		start = len(s.RecentTurns) - 2
 	}
-	if s.LastFieldID != "" {
-		lines = append(lines, "Last field: "+s.LastFieldID)
-	}
-	if s.Pending != nil && s.Pending.Prompt != "" {
-		lines = append(lines, "Pending clarification: "+s.Pending.Prompt)
-	}
-	if len(s.RecentTurns) > 0 {
-		lines = append(lines, "Recent turns:")
-		start := 0
-		if len(s.RecentTurns) > 3 {
-			start = len(s.RecentTurns) - 3
+
+	lines := []string{"Recent conversation:"}
+	for _, turn := range s.RecentTurns[start:] {
+		question := strings.TrimSpace(turn.Question)
+		answer := strings.TrimSpace(turn.Answer)
+		if question == "" {
+			continue
 		}
-		for _, turn := range s.RecentTurns[start:] {
-			q := strings.TrimSpace(turn.Question)
-			a := strings.TrimSpace(turn.Answer)
-			if q == "" {
-				continue
-			}
-			if len(q) > 160 {
-				q = q[:157] + "..."
-			}
-			if len(a) > 200 {
-				a = a[:197] + "..."
-			}
-			lines = append(lines, fmt.Sprintf("- Q: %s | A: %s", q, a))
+		if len(question) > 180 {
+			question = question[:177] + "..."
+		}
+		if len(answer) > 220 {
+			answer = answer[:217] + "..."
+		}
+		lines = append(lines, fmt.Sprintf("- Q: %s", question))
+		if answer != "" {
+			lines = append(lines, fmt.Sprintf("- A: %s", answer))
 		}
 	}
-	if len(lines) == 0 {
-		return "No active session context."
+
+	if len(lines) == 1 {
+		return "No recent conversation context."
 	}
 	return strings.Join(lines, "\n")
 }

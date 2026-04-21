@@ -10,7 +10,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -79,36 +78,40 @@ func (h textprotoMIMEHeader) toHeader() map[string][]string {
 	return out
 }
 
-func plannerThenAnswerHook(t *testing.T, plannerJSON string, answerText string, inspectPlanner func(string), inspectAnswer func(string)) func(*genai.Client, context.Context, string, []*genai.Content) (*genai.GenerateContentResponse, error) {
-	t.Helper()
-	return func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content) (*genai.GenerateContentResponse, error) {
-		if len(contents) == 0 || contents[0] == nil || len(contents[0].Parts) == 0 {
-			t.Fatalf("expected prompt contents, got %#v", contents)
-		}
-		prompt := contents[0].Parts[0].Text
-		var out genai.GenerateContentResponse
-		if strings.Contains(prompt, "VERIFIED RESULT (only source of truth):") {
-			if inspectAnswer != nil {
-				inspectAnswer(prompt)
-			}
-			_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":`+strconv.Quote(answerText)+`}]}}]}`), &out)
-			return &out, nil
-		}
-		if inspectPlanner != nil {
-			inspectPlanner(prompt)
-		}
-		_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":`+strconv.Quote(plannerJSON)+`}]}}]}`), &out)
-		return &out, nil
-	}
-}
-
-func expectChatDatasetQueries(mock sqlmock.Sqlmock) {
+func expectChatFileLookup(mock sqlmock.Sqlmock, filename string) {
 	mock.ExpectQuery(`(?i)select.*from.*file.*where.*filename.*order.*version.*desc.*limit`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "filename", "version", "columns_order"}).
-			AddRow(uint(1), "sheet.xlsx", 1, `["NAME","SCHOOL","DATE OF DEATH","CAUSE OF DEATH","First Nation/Community"]`))
-
+			AddRow(uint(1), filename, 1, `["NAME","SCHOOL","DATE OF DEATH","CAUSE OF DEATH","First Nation/Community"]`))
 	mock.ExpectQuery(`(?i)select.*from.*data_config.*where.*is_active.*lower\(file_name\)`).
 		WillReturnError(gorm.ErrRecordNotFound)
+}
+
+func expectChatRowsLookup(mock sqlmock.Sqlmock, rows ...string) {
+	result := sqlmock.NewRows([]string{"id", "row_data"})
+	for idx, row := range rows {
+		result.AddRow(uint(idx+1), row)
+	}
+	mock.ExpectQuery(`(?i)select.*id.*row_data.*from.*file_data.*where.*file_id.*version.*order.*id.*asc`).
+		WillReturnRows(result)
+}
+
+func jsonAnswer(answer string, matched *string, needsClarification bool, clarification string) *genai.GenerateContentResponse {
+	payload := map[string]any{
+		"answer":                 answer,
+		"matched_row_ref":        matched,
+		"needs_clarification":    needsClarification,
+		"clarification_question": clarification,
+	}
+	b, _ := json.Marshal(payload)
+
+	var out genai.GenerateContentResponse
+	_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":`+strconvQuote(string(b))+`}]}}]}`), &out)
+	return &out
+}
+
+func strconvQuote(v string) string {
+	b, _ := json.Marshal(v)
+	return string(b)
 }
 
 func Test_parseRateFromMime(t *testing.T) {
@@ -157,45 +160,237 @@ func TestChatService_Chat_FileNotFound(t *testing.T) {
 	}
 }
 
-func TestChatService_Chat_UsesVerifiedResultPrompt(t *testing.T) {
+func TestChatService_Chat_UsesContextCache(t *testing.T) {
 	db, mock, cleanup := newMockDBChatSvc(t)
 	defer cleanup()
 
-	expectChatDatasetQueries(mock)
-	ts := time.Now().UTC()
-	mock.ExpectQuery(`(?i)select.*from.*file_data fd.*left join.*file_data_normalized`).
-		WillReturnRows(sqlmock.NewRows([]string{
-			"row_id", "row_data", "row_updated_at", "row_data_normalized", "search_text", "canonical_name", "canonical_community", "canonical_school", "status", "source_updated_at",
-		}).
-			AddRow(uint(1), `{"NAME":"Alice","SCHOOL":"Shingwauk","DATE OF DEATH":"1890-05-06","CAUSE OF DEATH":"Drowned while crossing the river","First Nation/Community":"Garden River"}`, ts, `{"fields":{"NAME":{"normalized":"alice","tokens":["alice"],"role":"name"},"SCHOOL":{"normalized":"shingwauk","tokens":["shingwauk"],"role":"school"},"DATE OF DEATH":{"normalized":"1890 05 06","tokens":["1890","05","06"],"role":"date"},"CAUSE OF DEATH":{"normalized":"drowned while crossing the river","tokens":["drowned","crossing","river"],"role":"text"},"First Nation/Community":{"normalized":"garden river","tokens":["garden","river"],"role":"community"}},"names":["Alice"],"communities":["garden river"],"schools":["shingwauk"],"search_tokens":["alice","shingwauk","drowned","crossing","river","garden"]}`, "alice shingwauk drowned crossing river garden", "alice", "garden river", "shingwauk", "ready", ts))
-
-	old := genaiGenerateContentHook
-	genaiGenerateContentHook = plannerThenAnswerHook(
-		t,
-		`{"intent":"count_rows","search_terms":["drowning"],"filters":[{"field_id":"school","op":"eq","value":"Shingwauk"}],"limit":5}`,
-		`Yes. I found 1 recorded death connected to drowning at Shingwauk.`,
-		nil,
-		func(prompt string) {
-			if !strings.Contains(prompt, `"status": "ok"`) {
-				t.Fatalf("expected verified result status in prompt, got:\n%s", prompt)
-			}
-			if !strings.Contains(prompt, `"value": 1`) {
-				t.Fatalf("expected verified count in prompt, got:\n%s", prompt)
-			}
-			if !strings.Contains(prompt, `"CAUSE OF DEATH": "Drowned while crossing the river"`) && !strings.Contains(prompt, `"CAUSE OF DEATH":"Drowned while crossing the river"`) {
-				t.Fatalf("expected verified row fields in prompt, got:\n%s", prompt)
-			}
-		},
+	expectChatFileLookup(mock, "sheet.xlsx")
+	expectChatRowsLookup(mock,
+		`{"NAME":"Alice","SCHOOL":"Shingwauk","DATE OF DEATH":"1890-05-06","CAUSE OF DEATH":"Drowned while crossing the river","First Nation/Community":"Garden River"}`,
 	)
-	t.Cleanup(func() { genaiGenerateContentHook = old })
+
+	oldCreate := genaiCreateCachedContentHook
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiCreateCachedContentHook = oldCreate
+		genaiGenerateContentHook = oldGenerate
+	})
+
+	createCalls := 0
+	genaiCreateCachedContentHook = func(_ *genai.Client, _ context.Context, model string, config *genai.CreateCachedContentConfig) (*genai.CachedContent, error) {
+		createCalls++
+		if model != chatPrimaryModel {
+			t.Fatalf("unexpected cache model %q", model)
+		}
+		if config == nil || len(config.Contents) != 1 || len(config.Contents[0].Parts) != 1 {
+			t.Fatalf("unexpected cache config: %#v", config)
+		}
+		if !strings.Contains(config.Contents[0].Parts[0].Text, `"row_ref":"R1"`) {
+			t.Fatalf("expected row ref in cache body, got:\n%s", config.Contents[0].Parts[0].Text)
+		}
+		return &genai.CachedContent{
+			Name:       "projects/demo/locations/global/cachedContents/cache-1",
+			ExpireTime: time.Now().Add(time.Hour),
+		}, nil
+	}
+
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		if model != chatPrimaryModel {
+			t.Fatalf("unexpected generate model %q", model)
+		}
+		if config == nil || config.CachedContent == "" {
+			t.Fatalf("expected cached content config, got %#v", config)
+		}
+		if len(contents) == 0 || contents[0] == nil || len(contents[0].Parts) == 0 {
+			t.Fatalf("expected prompt contents, got %#v", contents)
+		}
+		prompt := contents[0].Parts[0].Text
+		if !strings.Contains(prompt, "stands on its own") {
+			t.Fatalf("expected standalone prompt instructions, got:\n%s", prompt)
+		}
+		return jsonAnswer("Yes. I found 1 recorded death connected to drowning at Shingwauk.", nil, false, ""), nil
+	}
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
 	result, err := cs.Chat("Did any children die from drowning at Shingwauk?", nil, "sheet.xlsx", nil)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
+	if createCalls != 1 {
+		t.Fatalf("expected 1 cache create call, got %d", createCalls)
+	}
 	if !strings.Contains(result.Answer, "Yes.") {
 		t.Fatalf("unexpected answer: %#v", result)
+	}
+}
+
+func TestChatService_Chat_ReusesContextCacheAndIgnoresStandaloneHistory(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	expectChatRowsLookup(mock,
+		`{"NAME":"Alice","SCHOOL":"Shingwauk","DATE OF DEATH":"1890-05-06","CAUSE OF DEATH":"Drowned while crossing the river","First Nation/Community":"Garden River"}`,
+	)
+	expectChatFileLookup(mock, "sheet.xlsx")
+
+	oldCreate := genaiCreateCachedContentHook
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiCreateCachedContentHook = oldCreate
+		genaiGenerateContentHook = oldGenerate
+	})
+
+	createCalls := 0
+	generateCalls := 0
+	genaiCreateCachedContentHook = func(_ *genai.Client, _ context.Context, _ string, _ *genai.CreateCachedContentConfig) (*genai.CachedContent, error) {
+		createCalls++
+		return &genai.CachedContent{
+			Name:       "projects/demo/locations/global/cachedContents/cache-1",
+			ExpireTime: time.Now().Add(time.Hour),
+		}, nil
+	}
+
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		generateCalls++
+		prompt := contents[0].Parts[0].Text
+		if generateCalls == 2 {
+			if !strings.Contains(prompt, "stands on its own") {
+				t.Fatalf("expected standalone prompt on second call, got:\n%s", prompt)
+			}
+			if strings.Contains(prompt, "Recent conversation:") {
+				t.Fatalf("did not expect recent conversation in fresh question prompt:\n%s", prompt)
+			}
+			if config == nil || config.CachedContent == "" {
+				t.Fatalf("expected cache reuse on second call, got %#v", config)
+			}
+		}
+		answer := "First answer."
+		if generateCalls == 2 {
+			answer = "Second answer."
+		}
+		return jsonAnswer(answer, nil, false, ""), nil
+	}
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	if _, err := cs.ChatForUser(77, "Who is Alice?", nil, "sheet.xlsx", nil); err != nil {
+		t.Fatalf("first chat err: %v", err)
+	}
+	if _, err := cs.ChatForUser(77, "How many records are in the data?", nil, "sheet.xlsx", nil); err != nil {
+		t.Fatalf("second chat err: %v", err)
+	}
+
+	if createCalls != 1 {
+		t.Fatalf("expected cache create once, got %d", createCalls)
+	}
+	if generateCalls != 2 {
+		t.Fatalf("expected generate twice, got %d", generateCalls)
+	}
+}
+
+func TestChatService_Chat_FallsBackToDirectPromptWhenCacheCreateFails(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	expectChatRowsLookup(mock, `{"NAME":"Alice","First Nation/Community":"Garden River"}`)
+
+	oldCreate := genaiCreateCachedContentHook
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiCreateCachedContentHook = oldCreate
+		genaiGenerateContentHook = oldGenerate
+	})
+
+	genaiCreateCachedContentHook = func(_ *genai.Client, _ context.Context, _ string, _ *genai.CreateCachedContentConfig) (*genai.CachedContent, error) {
+		return nil, errors.New("cache unavailable")
+	}
+
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		if config == nil || config.CachedContent != "" {
+			t.Fatalf("expected direct prompt fallback, got %#v", config)
+		}
+		prompt := contents[0].Parts[0].Text
+		if !strings.Contains(prompt, "DATA (only source of truth):") {
+			t.Fatalf("expected direct prompt with data, got:\n%s", prompt)
+		}
+		return jsonAnswer("No. I couldn't find any matching records in the available data.", nil, false, ""), nil
+	}
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	result, err := cs.Chat("Did any children die from drowning at Shingwauk?", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !strings.Contains(result.Answer, "No.") {
+		t.Fatalf("unexpected answer: %#v", result)
+	}
+}
+
+func TestChatService_Chat_ClarificationBudgetStopsLoops(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	expectChatRowsLookup(mock, `{"NAME":"John Smith","First Nation/Community":"Garden River"}`)
+	expectChatFileLookup(mock, "sheet.xlsx")
+	expectChatFileLookup(mock, "sheet.xlsx")
+
+	oldCreate := genaiCreateCachedContentHook
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiCreateCachedContentHook = oldCreate
+		genaiGenerateContentHook = oldGenerate
+	})
+
+	genaiCreateCachedContentHook = func(_ *genai.Client, _ context.Context, _ string, _ *genai.CreateCachedContentConfig) (*genai.CachedContent, error) {
+		return &genai.CachedContent{
+			Name:       "projects/demo/locations/global/cachedContents/cache-clarify",
+			ExpireTime: time.Now().Add(time.Hour),
+		}, nil
+	}
+
+	call := 0
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		call++
+		prompt := contents[0].Parts[0].Text
+		if call == 2 && !strings.Contains(prompt, "Original question:") {
+			t.Fatalf("expected original question in clarification reply prompt, got:\n%s", prompt)
+		}
+		switch call {
+		case 1:
+			return jsonAnswer("Which John do you mean?", nil, true, "Which John do you mean?"), nil
+		case 2:
+			return jsonAnswer("Which school John do you mean?", nil, true, "Which school John do you mean?"), nil
+		default:
+			return jsonAnswer("Could you clarify which John exactly?", nil, true, "Could you clarify which John exactly?"), nil
+		}
+	}
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+
+	first, err := cs.ChatForUser(22, "Tell me about John", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("first chat err: %v", err)
+	}
+	if first.Answer != "Which John do you mean?" {
+		t.Fatalf("unexpected first answer: %#v", first)
+	}
+
+	second, err := cs.ChatForUser(22, "Garden River", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("second chat err: %v", err)
+	}
+	if second.Answer != "Which school John do you mean?" {
+		t.Fatalf("unexpected second answer: %#v", second)
+	}
+
+	third, err := cs.ChatForUser(22, "the one at the school", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("third chat err: %v", err)
+	}
+	if third.Answer != "I can't determine that exactly from the available data." {
+		t.Fatalf("unexpected third answer: %#v", third)
 	}
 }
 
@@ -203,13 +398,8 @@ func TestChatService_Chat_AudioReadError(t *testing.T) {
 	db, mock, cleanup := newMockDBChatSvc(t)
 	defer cleanup()
 
-	expectChatDatasetQueries(mock)
-	ts := time.Now().UTC()
-	mock.ExpectQuery(`(?i)select.*from.*file_data fd.*left join.*file_data_normalized`).
-		WillReturnRows(sqlmock.NewRows([]string{
-			"row_id", "row_data", "row_updated_at", "row_data_normalized", "search_text", "canonical_name", "canonical_community", "canonical_school", "status", "source_updated_at",
-		}).
-			AddRow(uint(1), `{"NAME":"Alice"}`, ts, `{}`, "", "", "", "", "ready", ts))
+	expectChatFileLookup(mock, "sheet.xlsx")
+	expectChatRowsLookup(mock, `{"NAME":"Alice"}`)
 
 	oldRead := readAllHook
 	readAllHook = func(_ io.Reader) ([]byte, error) {
@@ -243,7 +433,7 @@ func TestGenerateWith429Fallback_UsesFallbackModel(t *testing.T) {
 	old := genaiGenerateContentHook
 	defer func() { genaiGenerateContentHook = old }()
 
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, model string, _ []*genai.Content) (*genai.GenerateContentResponse, error) {
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, model string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
 		if model == "gemini-2.5-flash" {
 			return nil, &googleapi.Error{Code: http.StatusTooManyRequests}
 		}
