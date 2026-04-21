@@ -49,10 +49,10 @@ func buildDatasetForQueryEngineTest(t *testing.T, rows []map[string]string) *cha
 
 func TestDeterministicChatPlan_GroupCountExtremeByYear(t *testing.T) {
 	dataset := buildDatasetForQueryEngineTest(t, []map[string]string{
-		{"NAME": "Alice", "SCHOOL": "Shingwauk", "DATE OF DEATH": "1890-05-06"},
-		{"NAME": "Beatrice", "SCHOOL": "Shingwauk", "DATE OF DEATH": "1890-06-01"},
-		{"NAME": "Charlotte", "SCHOOL": "Shingwauk", "DATE OF DEATH": "1891-01-04"},
-		{"NAME": "Dora", "SCHOOL": "Wawanosh", "DATE OF DEATH": "1891-02-10"},
+		{"NAME": "Alice", "SCHOOL": "Shingwauk, Sault Ste. Marie, ON", "PLACE OF DEATH": "Shingwauk", "DATE OF DEATH": "1890-05-06"},
+		{"NAME": "Beatrice", "SCHOOL": "Shingwauk, Sault Ste. Marie, ON", "PLACE OF DEATH": "Shingwauk", "DATE OF DEATH": "1890-06-01"},
+		{"NAME": "Charlotte", "SCHOOL": "Shingwauk, Sault Ste. Marie, ON", "PLACE OF DEATH": "Toronto", "DATE OF DEATH": "1891-01-04"},
+		{"NAME": "Dora", "SCHOOL": "Wawanosh", "PLACE OF DEATH": "Shingwauk", "DATE OF DEATH": "1891-02-10"},
 	})
 
 	question := "In what years did the highest number of deaths occur at Shingwauk?"
@@ -66,7 +66,7 @@ func TestDeterministicChatPlan_GroupCountExtremeByYear(t *testing.T) {
 	if plan.GroupByGranularity != "year" {
 		t.Fatalf("granularity = %q want year", plan.GroupByGranularity)
 	}
-	if len(plan.Filters) != 1 || plan.Filters[0].Value != "Shingwauk" {
+	if len(plan.Filters) != 1 || plan.Filters[0].FieldID != "school" || plan.Filters[0].Value != "Shingwauk, Sault Ste. Marie, ON" {
 		t.Fatalf("expected Shingwauk filter, got %+v", plan.Filters)
 	}
 
@@ -85,6 +85,90 @@ func TestDeterministicChatPlan_GroupCountExtremeByYear(t *testing.T) {
 	maxCount, ok := extractIntFromAny(valueMap["max_count"])
 	if !ok || maxCount != 2 {
 		t.Fatalf("unexpected max_count: %#v", valueMap["max_count"])
+	}
+}
+
+func TestDeterministicGroupedPlan_DoesNotInferGenericCommunityFilter(t *testing.T) {
+	dataset := buildDatasetForQueryEngineTest(t, []map[string]string{
+		{"STUDENT NAME": "Elijah", "COMMUNITY/RESERVE": "Walpole Island", "LOCATION OF DEATH": "Community", "DATE OF DEATH": "1890-05-06"},
+		{"STUDENT NAME": "Joseph", "COMMUNITY/RESERVE": "Walpole Island", "LOCATION OF DEATH": "Community", "DATE OF DEATH": "1890-06-01"},
+		{"STUDENT NAME": "Sampson", "COMMUNITY/RESERVE": "Walpole Island", "LOCATION OF DEATH": "Community", "DATE OF DEATH": "1890-07-01"},
+		{"STUDENT NAME": "Annie", "COMMUNITY/RESERVE": "Garden River", "LOCATION OF DEATH": "Hospital", "DATE OF DEATH": "1890-08-01"},
+	})
+
+	question := "What community / reserve had the most deaths? What are the names of those children?"
+	plan, ok := deterministicChatPlan(question, dataset, &chatSessionState{})
+	if !ok {
+		t.Fatal("expected deterministic plan")
+	}
+	if len(plan.Filters) != 0 {
+		t.Fatalf("expected no inferred value filters, got %+v", plan.Filters)
+	}
+	if len(plan.SearchTerms) != 0 {
+		t.Fatalf("expected no search terms, got %+v", plan.SearchTerms)
+	}
+
+	verified := executeChatPlan(plan, question, dataset, dataset.rows, &chatSessionState{})
+	if verified.Status != "ok" {
+		t.Fatalf("status = %q want ok (notes=%v)", verified.Status, verified.Notes)
+	}
+	valueMap, ok := verified.Value.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected value payload: %#v", verified.Value)
+	}
+	values := extractStringListFromAny(valueMap["winning_values"])
+	if len(values) != 1 || values[0] != "Walpole Island" {
+		t.Fatalf("unexpected winners: %#v", values)
+	}
+	maxCount, ok := extractIntFromAny(valueMap["max_count"])
+	if !ok || maxCount != 3 {
+		t.Fatalf("unexpected max_count: %#v", valueMap["max_count"])
+	}
+	names := extractStringListFromAny(valueMap["winner_names"])
+	if len(names) != 3 {
+		t.Fatalf("unexpected winner names: %#v", names)
+	}
+}
+
+func TestDeterministicCountPlan_MissingCommunityUsesIsEmpty(t *testing.T) {
+	rows := make([]map[string]string, 0, 12)
+	for i := 0; i < 8; i++ {
+		rows = append(rows, map[string]string{
+			"STUDENT NAME":      "Missing " + string(rune('A'+i)),
+			"COMMUNITY/RESERVE": "",
+			"LOCATION OF DEATH": "Community",
+			"DATE OF DEATH":     "1890-05-06",
+		})
+	}
+	for i := 0; i < 4; i++ {
+		rows = append(rows, map[string]string{
+			"STUDENT NAME":      "Present " + string(rune('A'+i)),
+			"COMMUNITY/RESERVE": "Walpole Island",
+			"LOCATION OF DEATH": "Community",
+			"DATE OF DEATH":     "1890-05-06",
+		})
+	}
+	dataset := buildDatasetForQueryEngineTest(t, rows)
+
+	question := "how many students does not have community/reserve"
+	plan, ok := deterministicChatPlan(question, dataset, &chatSessionState{})
+	if !ok {
+		t.Fatal("expected deterministic plan")
+	}
+	if len(plan.Filters) != 1 {
+		t.Fatalf("expected one filter, got %+v", plan.Filters)
+	}
+	if plan.Filters[0].FieldID != "community_reserve" || plan.Filters[0].Op != "is_empty" {
+		t.Fatalf("unexpected filter: %+v", plan.Filters[0])
+	}
+
+	verified := executeChatPlan(plan, question, dataset, dataset.rows, &chatSessionState{})
+	if verified.Status != "ok" {
+		t.Fatalf("status = %q want ok", verified.Status)
+	}
+	count, ok := verified.Value.(int)
+	if !ok || count != 8 {
+		t.Fatalf("count = %#v want 8", verified.Value)
 	}
 }
 
