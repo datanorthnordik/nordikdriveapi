@@ -186,6 +186,17 @@ func TestParseStructuredChatResponse_FallbackAnswerField(t *testing.T) {
 	}
 }
 
+func TestParseStructuredChatResponse_UserReportedTruncatedJSONString(t *testing.T) {
+	raw := ":\n\"{\\n  \\\"answer\\\": \\\"Based on the records, Walpole Island is the community that experienced the most deaths, with a total of\""
+	parsed, ok := parseStructuredChatResponse(raw)
+	if !ok {
+		t.Fatal("expected truncated wrapped answer extraction")
+	}
+	if parsed.Answer != "Based on the records, Walpole Island is the community that experienced the most deaths, with a total of" {
+		t.Fatalf("unexpected parsed answer: %#v", parsed)
+	}
+}
+
 func TestParseStructuredChatResponse_StripsAnswerLabel(t *testing.T) {
 	raw := "answer: Based on the records, Walpole Island had the most deaths."
 	parsed, ok := parseStructuredChatResponse(raw)
