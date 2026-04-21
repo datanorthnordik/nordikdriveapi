@@ -35,6 +35,7 @@ type ChatService struct {
 	Location  string
 
 	datasetCache sync.Map
+	contextCache sync.Map
 	sessionCache sync.Map
 }
 
@@ -70,8 +71,11 @@ Answer format:
 `
 
 var (
-	genaiGenerateContentHook = func(client *genai.Client, ctx context.Context, model string, contents []*genai.Content) (*genai.GenerateContentResponse, error) {
-		return client.Models.GenerateContent(ctx, model, contents, nil)
+	genaiGenerateContentHook = func(client *genai.Client, ctx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		return client.Models.GenerateContent(ctx, model, contents, config)
+	}
+	genaiCreateCachedContentHook = func(client *genai.Client, ctx context.Context, model string, config *genai.CreateCachedContentConfig) (*genai.CachedContent, error) {
+		return client.Caches.Create(ctx, model, config)
 	}
 
 	openMultipartFileHook = func(fh *multipart.FileHeader) (multipart.File, error) {
@@ -431,10 +435,17 @@ func (cs *ChatService) generateWith429Fallback(
 	ctx context.Context,
 	contents []*genai.Content,
 ) (*genai.GenerateContentResponse, string, error) {
-	primary := "gemini-2.5-flash"
-	fallback := "gemini-2.5-pro"
+	return cs.generateWithModelFallback(ctx, "gemini-2.5-flash", "gemini-2.5-pro", contents, nil)
+}
 
-	resp, err := genaiGenerateContentHook(cs.Client, ctx, primary, contents)
+func (cs *ChatService) generateWithModelFallback(
+	ctx context.Context,
+	primary string,
+	fallback string,
+	contents []*genai.Content,
+	config *genai.GenerateContentConfig,
+) (*genai.GenerateContentResponse, string, error) {
+	resp, err := genaiGenerateContentHook(cs.Client, ctx, primary, contents, config)
 	if err == nil {
 		return resp, primary, nil
 	}
@@ -442,7 +453,7 @@ func (cs *ChatService) generateWith429Fallback(
 		return nil, primary, err
 	}
 
-	resp2, err2 := genaiGenerateContentHook(cs.Client, ctx, fallback, contents)
+	resp2, err2 := genaiGenerateContentHook(cs.Client, ctx, fallback, contents, config)
 	if err2 == nil {
 		return resp2, fallback, nil
 	}

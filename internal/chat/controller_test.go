@@ -3,7 +3,6 @@ package chat
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -49,29 +48,25 @@ func TestChatController_Chat_Success200(t *testing.T) {
 	db, mock, cleanup := newMockDBChat(t)
 	defer cleanup()
 
-	expectChatDatasetQueries(mock)
-	ts := time.Now().UTC()
-	mock.ExpectQuery(`(?i)select.*from.*file_data fd.*left join.*file_data_normalized`).
-		WillReturnRows(sqlmock.NewRows([]string{
-			"row_id", "row_data", "row_updated_at", "row_data_normalized", "search_text", "canonical_name", "canonical_community", "canonical_school", "status", "source_updated_at",
-		}).
-			AddRow(uint(1), `{"NAME":"Alice","SCHOOL":"Shingwauk","DATE OF DEATH":"1890-05-06","CAUSE OF DEATH":"Drowned while crossing the river","First Nation/Community":"Garden River"}`, ts, `{"fields":{"NAME":{"normalized":"alice","tokens":["alice"],"role":"name"},"SCHOOL":{"normalized":"shingwauk","tokens":["shingwauk"],"role":"school"},"DATE OF DEATH":{"normalized":"1890 05 06","tokens":["1890","05","06"],"role":"date"},"CAUSE OF DEATH":{"normalized":"drowned while crossing the river","tokens":["drowned","crossing","river"],"role":"text"},"First Nation/Community":{"normalized":"garden river","tokens":["garden","river"],"role":"community"}},"names":["Alice"],"communities":["garden river"],"schools":["shingwauk"],"search_tokens":["alice","shingwauk","drowned","crossing","river","garden"]}`, "alice shingwauk drowned crossing river garden", "alice", "garden river", "shingwauk", "ready", ts))
+	expectChatFileLookup(mock, "sheet.xlsx")
+	expectChatRowsLookup(mock, `{"NAME":"Alice","First Nation/Community":"Garden River"}`)
 
+	oldCreate := genaiCreateCachedContentHook
 	oldGen := genaiGenerateContentHook
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content) (*genai.GenerateContentResponse, error) {
-		if len(contents) == 0 || contents[0] == nil || len(contents[0].Parts) == 0 {
-			t.Fatalf("expected contents with prompt text, got: %#v", contents)
-		}
-		prompt := contents[0].Parts[0].Text
-		var out genai.GenerateContentResponse
-		if strings.Contains(prompt, "VERIFIED RESULT (only source of truth):") {
-			_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"Yes. I found 1 recorded death connected to drowning at Shingwauk."}]}}]}`), &out)
-			return &out, nil
-		}
-		_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"intent\":\"count_rows\",\"search_terms\":[\"drowning\"],\"filters\":[{\"field_id\":\"school\",\"op\":\"eq\",\"value\":\"Shingwauk\"}],\"limit\":5}"}]}}]}`), &out)
-		return &out, nil
+	t.Cleanup(func() {
+		genaiCreateCachedContentHook = oldCreate
+		genaiGenerateContentHook = oldGen
+	})
+
+	genaiCreateCachedContentHook = func(_ *genai.Client, _ context.Context, _ string, _ *genai.CreateCachedContentConfig) (*genai.CachedContent, error) {
+		return &genai.CachedContent{
+			Name:       "projects/demo/locations/global/cachedContents/cache-1",
+			ExpireTime: time.Now().Add(time.Hour),
+		}, nil
 	}
-	t.Cleanup(func() { genaiGenerateContentHook = oldGen })
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		return jsonAnswer("Yes. I found 1 recorded death connected to drowning at Shingwauk.", nil, false, ""), nil
+	}
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
 	cc := NewChatController(cs)
