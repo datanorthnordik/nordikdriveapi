@@ -146,6 +146,57 @@ func Test_pcmToWav_defaults(t *testing.T) {
 	}
 }
 
+func TestFirstTextFromResp_ConcatenatesParts(t *testing.T) {
+	var resp genai.GenerateContentResponse
+	_ = json.Unmarshal([]byte(`{
+		"candidates":[
+			{"content":{"parts":[
+				{"text":"{\"answer\":\"Based on the records, Walpole Island"},
+				{"text":" had the most deaths.\"}"}
+			]}}
+		]
+	}`), &resp)
+
+	got := firstTextFromResp(&resp)
+	want := `{"answer":"Based on the records, Walpole Island had the most deaths."}`
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestParseStructuredChatResponse_WrappedJSONString(t *testing.T) {
+	raw := "\"{\\n  \\\"answer\\\": \\\"Based on the records, Walpole Island had the most deaths.\\\", \\\"matched_row_ref\\\": null, \\\"needs_clarification\\\": false, \\\"clarification_question\\\": null\\n}\""
+	parsed, ok := parseStructuredChatResponse(raw)
+	if !ok {
+		t.Fatal("expected wrapped JSON string to parse")
+	}
+	if parsed.Answer != "Based on the records, Walpole Island had the most deaths." {
+		t.Fatalf("unexpected parsed answer: %#v", parsed)
+	}
+}
+
+func TestParseStructuredChatResponse_FallbackAnswerField(t *testing.T) {
+	raw := "{\n  \"answer\": \"Based on the records, Walpole Island is the community that experienced the most deaths.\""
+	parsed, ok := parseStructuredChatResponse(raw)
+	if !ok {
+		t.Fatal("expected fallback answer extraction")
+	}
+	if parsed.Answer != "Based on the records, Walpole Island is the community that experienced the most deaths." {
+		t.Fatalf("unexpected parsed answer: %#v", parsed)
+	}
+}
+
+func TestParseStructuredChatResponse_StripsAnswerLabel(t *testing.T) {
+	raw := "answer: Based on the records, Walpole Island had the most deaths."
+	parsed, ok := parseStructuredChatResponse(raw)
+	if !ok {
+		t.Fatal("expected labeled answer to parse")
+	}
+	if parsed.Answer != "Based on the records, Walpole Island had the most deaths." {
+		t.Fatalf("unexpected parsed answer: %#v", parsed)
+	}
+}
+
 func TestChatService_Chat_FileNotFound(t *testing.T) {
 	db, mock, cleanup := newMockDBChatSvc(t)
 	defer cleanup()

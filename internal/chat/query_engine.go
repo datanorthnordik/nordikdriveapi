@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"mime/multipart"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -79,6 +80,11 @@ Rules for clarification:
 - When "needs_clarification" is true, set "clarification_question" to the exact short question to ask.
 - When "needs_clarification" is false, set "clarification_question" to null or an empty string.
 `
+
+var (
+	answerFieldRegex = regexp.MustCompile(`(?is)"answer"\s*:\s*"((?:\\.|[^"\\])*)"`)
+	answerLabelRegex = regexp.MustCompile(`(?is)^\s*(?:answer|response)\s*[:\-]\s*`)
+)
 
 type chatDatasetCacheEntry struct {
 	FileID           uint
@@ -797,31 +803,57 @@ func samePrompt(a, b string) bool {
 
 func parseStructuredChatResponse(raw string) (*chatStructuredResponse, bool) {
 	jsonText := extractJSONObjectCandidate(raw)
-	if jsonText == "" {
-		return nil, false
-	}
+	if jsonText != "" {
+		var structured chatStructuredResponse
+		if err := json.Unmarshal([]byte(jsonText), &structured); err == nil {
+			structured.Answer = sanitizeAnswerText(structured.Answer)
+			structured.ClarificationQuestion = strings.TrimSpace(structured.ClarificationQuestion)
+			if structured.MatchedRowRef != nil {
+				rowRef := normalizePromptRowRef(*structured.MatchedRowRef)
+				if rowRef == "" {
+					structured.MatchedRowRef = nil
+				} else {
+					structured.MatchedRowRef = &rowRef
+				}
+			}
 
-	var structured chatStructuredResponse
-	if err := json.Unmarshal([]byte(jsonText), &structured); err != nil {
-		return nil, false
-	}
-
-	structured.Answer = strings.TrimSpace(structured.Answer)
-	structured.ClarificationQuestion = strings.TrimSpace(structured.ClarificationQuestion)
-	if structured.MatchedRowRef != nil {
-		rowRef := normalizePromptRowRef(*structured.MatchedRowRef)
-		if rowRef == "" {
-			structured.MatchedRowRef = nil
-		} else {
-			structured.MatchedRowRef = &rowRef
+			if structured.Answer != "" || structured.NeedsClarification || structured.ClarificationQuestion != "" {
+				return &structured, true
+			}
 		}
 	}
 
-	if structured.Answer == "" && !structured.NeedsClarification && structured.ClarificationQuestion == "" {
+	fallback := parseStructuredChatResponseFallback(raw)
+	if fallback == nil {
 		return nil, false
 	}
+	return fallback, true
+}
 
-	return &structured, true
+func parseStructuredChatResponseFallback(raw string) *chatStructuredResponse {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+
+	if unwrapped, ok := unquoteJSONString(raw); ok {
+		if parsed, ok := parseStructuredChatResponse(unwrapped); ok {
+			return parsed
+		}
+	}
+
+	if matches := answerFieldRegex.FindStringSubmatch(raw); len(matches) == 2 {
+		answer := sanitizeAnswerText(decodeJSONStringLiteral(matches[1]))
+		if answer != "" {
+			return &chatStructuredResponse{Answer: answer}
+		}
+	}
+
+	answer := sanitizeAnswerText(raw)
+	if answer == "" || answer == raw {
+		return nil
+	}
+	return &chatStructuredResponse{Answer: answer}
 }
 
 func extractJSONObjectCandidate(raw string) string {
@@ -840,7 +872,14 @@ func extractJSONObjectCandidate(raw string) string {
 	}
 
 	if json.Valid([]byte(raw)) {
-		return raw
+		if strings.HasPrefix(raw, "{") {
+			return raw
+		}
+		var wrapped string
+		if err := json.Unmarshal([]byte(raw), &wrapped); err == nil {
+			return extractJSONObjectCandidate(wrapped)
+		}
+		return ""
 	}
 
 	start := strings.IndexByte(raw, '{')
@@ -854,6 +893,46 @@ func extractJSONObjectCandidate(raw string) string {
 		return ""
 	}
 	return candidate
+}
+
+func sanitizeAnswerText(answer string) string {
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		return ""
+	}
+
+	if unwrapped, ok := unquoteJSONString(answer); ok {
+		answer = strings.TrimSpace(unwrapped)
+	}
+
+	answer = answerLabelRegex.ReplaceAllString(answer, "")
+	answer = strings.TrimSpace(answer)
+	answer = strings.Trim(answer, "\"")
+	return strings.TrimSpace(answer)
+}
+
+func unquoteJSONString(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if len(raw) < 2 {
+		return "", false
+	}
+	if raw[0] != '"' || raw[len(raw)-1] != '"' {
+		return "", false
+	}
+
+	var unwrapped string
+	if err := json.Unmarshal([]byte(raw), &unwrapped); err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(unwrapped), true
+}
+
+func decodeJSONStringLiteral(raw string) string {
+	var decoded string
+	if err := json.Unmarshal([]byte(`"`+raw+`"`), &decoded); err == nil {
+		return decoded
+	}
+	return raw
 }
 
 func resolveMatchedRowRef(rowRef *string, rowRefToID map[string]int) *int {
