@@ -96,16 +96,12 @@ func expectChatRowsLookup(mock sqlmock.Sqlmock, rows ...string) {
 }
 
 func jsonAnswer(answer string, matched *string, needsClarification bool, clarification string) *genai.GenerateContentResponse {
-	payload := map[string]any{
-		"answer":                 answer,
-		"matched_row_ref":        matched,
-		"needs_clarification":    needsClarification,
-		"clarification_question": clarification,
+	text := answer
+	if needsClarification && strings.TrimSpace(clarification) != "" {
+		text = clarification
 	}
-	b, _ := json.Marshal(payload)
-
 	var out genai.GenerateContentResponse
-	_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":`+strconvQuote(string(b))+`}]}}]}`), &out)
+	_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":`+strconvQuote(text)+`}]}}]}`), &out)
 	return &out
 }
 
@@ -164,47 +160,35 @@ func TestFirstTextFromResp_ConcatenatesParts(t *testing.T) {
 	}
 }
 
-func TestParseStructuredChatResponse_WrappedJSONString(t *testing.T) {
-	raw := "\"{\\n  \\\"answer\\\": \\\"Based on the records, Walpole Island had the most deaths.\\\", \\\"matched_row_ref\\\": null, \\\"needs_clarification\\\": false, \\\"clarification_question\\\": null\\n}\""
-	parsed, ok := parseStructuredChatResponse(raw)
-	if !ok {
-		t.Fatal("expected wrapped JSON string to parse")
-	}
-	if parsed.Answer != "Based on the records, Walpole Island had the most deaths." {
-		t.Fatalf("unexpected parsed answer: %#v", parsed)
+func TestSanitizeAnswerText_WrappedJSONString(t *testing.T) {
+	raw := "\"{\\n  \\\"answer\\\": \\\"Based on the records, Walpole Island had the most deaths.\\\"\\n}\""
+	got := sanitizeAnswerText(raw)
+	if got != "Based on the records, Walpole Island had the most deaths." {
+		t.Fatalf("got %q", got)
 	}
 }
 
-func TestParseStructuredChatResponse_FallbackAnswerField(t *testing.T) {
+func TestSanitizeAnswerText_FallbackAnswerField(t *testing.T) {
 	raw := "{\n  \"answer\": \"Based on the records, Walpole Island is the community that experienced the most deaths.\""
-	parsed, ok := parseStructuredChatResponse(raw)
-	if !ok {
-		t.Fatal("expected fallback answer extraction")
-	}
-	if parsed.Answer != "Based on the records, Walpole Island is the community that experienced the most deaths." {
-		t.Fatalf("unexpected parsed answer: %#v", parsed)
+	got := sanitizeAnswerText(raw)
+	if got != "Based on the records, Walpole Island is the community that experienced the most deaths." {
+		t.Fatalf("got %q", got)
 	}
 }
 
-func TestParseStructuredChatResponse_UserReportedTruncatedJSONString(t *testing.T) {
+func TestSanitizeAnswerText_UserReportedTruncatedJSONString(t *testing.T) {
 	raw := ":\n\"{\\n  \\\"answer\\\": \\\"Based on the records, Walpole Island is the community that experienced the most deaths, with a total of\""
-	parsed, ok := parseStructuredChatResponse(raw)
-	if !ok {
-		t.Fatal("expected truncated wrapped answer extraction")
-	}
-	if parsed.Answer != "Based on the records, Walpole Island is the community that experienced the most deaths, with a total of" {
-		t.Fatalf("unexpected parsed answer: %#v", parsed)
+	got := sanitizeAnswerText(raw)
+	if got != "Based on the records, Walpole Island is the community that experienced the most deaths, with a total of" {
+		t.Fatalf("got %q", got)
 	}
 }
 
-func TestParseStructuredChatResponse_StripsAnswerLabel(t *testing.T) {
+func TestSanitizeAnswerText_StripsAnswerLabel(t *testing.T) {
 	raw := "answer: Based on the records, Walpole Island had the most deaths."
-	parsed, ok := parseStructuredChatResponse(raw)
-	if !ok {
-		t.Fatal("expected labeled answer to parse")
-	}
-	if parsed.Answer != "Based on the records, Walpole Island had the most deaths." {
-		t.Fatalf("unexpected parsed answer: %#v", parsed)
+	got := sanitizeAnswerText(raw)
+	if got != "Based on the records, Walpole Island had the most deaths." {
+		t.Fatalf("got %q", got)
 	}
 }
 
@@ -453,6 +437,59 @@ func TestChatService_Chat_ClarificationBudgetStopsLoops(t *testing.T) {
 	}
 	if third.Answer != "I can't determine that exactly from the available data." {
 		t.Fatalf("unexpected third answer: %#v", third)
+	}
+}
+
+func TestChatService_Chat_RetriesMalformedTruncatedResponse(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	expectChatRowsLookup(mock, `{"NAME":"Alice","First Nation/Community":"Garden River"}`)
+
+	oldCreate := genaiCreateCachedContentHook
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiCreateCachedContentHook = oldCreate
+		genaiGenerateContentHook = oldGenerate
+	})
+
+	genaiCreateCachedContentHook = func(_ *genai.Client, _ context.Context, _ string, _ *genai.CreateCachedContentConfig) (*genai.CachedContent, error) {
+		return &genai.CachedContent{
+			Name:       "projects/demo/locations/global/cachedContents/cache-1",
+			ExpireTime: time.Now().Add(time.Hour),
+		}, nil
+	}
+
+	call := 0
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		call++
+		if call == 2 {
+			if !strings.Contains(contents[0].Parts[0].Text, "previous response was malformed or truncated") {
+				t.Fatalf("expected repair retry prompt, got:\n%s", contents[0].Parts[0].Text)
+			}
+		}
+
+		raw := `{"answer":"Based on the records provided, the year with the highest number of deaths was 1913, when six students passed away. The years 1882 and 1906 also had a"}`
+		if call == 1 {
+			var out genai.GenerateContentResponse
+			_ = json.Unmarshal([]byte(`{"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":`+strconvQuote(raw)+`}]}}]}`), &out)
+			return &out, nil
+		}
+
+		return jsonAnswer("Based on the records provided, the year with the highest number of deaths was 1913, when six students passed away. The years 1882 and 1906 also had five deaths each.", nil, false, ""), nil
+	}
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	result, err := cs.Chat("In what years did the highest number of deaths occur?", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if call != 2 {
+		t.Fatalf("expected 2 generate calls, got %d", call)
+	}
+	if result.Answer != "Based on the records provided, the year with the highest number of deaths was 1913, when six students passed away. The years 1882 and 1906 also had five deaths each." {
+		t.Fatalf("unexpected answer: %#v", result)
 	}
 }
 

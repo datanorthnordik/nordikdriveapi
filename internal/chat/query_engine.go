@@ -59,31 +59,15 @@ Clarification rules:
 - If the prompt says no clarification budget remains, do not ask another clarification question. Instead say the records do not allow an exact answer.
 
 Output requirements:
-Return ONLY a single JSON object with this shape:
-{
-  "answer": "your natural-language answer",
-  "matched_row_ref": "R1" or "",
-  "needs_clarification": false,
-  "clarification_question": ""
-}
-
-Rules for matched_row_ref:
-- Set it only when the user's question is about a person and exactly one row is the best match.
-- You may also set it when your answer is based entirely on one single row, even if the question is not explicitly about a person.
-- If the answer depends on multiple rows, or more than one row could match, set matched_row_ref to null.
-- If a person's name appears misspelled but the intended single row is still clear from the data, you may still choose that row_ref.
-- Use only row_ref values that appear in the DATA.
-- Never invent, guess, or approximate a row_ref.
-
-Rules for clarification:
-- Set "needs_clarification" to true only when clarification is necessary.
-- When "needs_clarification" is true, set "clarification_question" to the exact short question to ask.
-- When "needs_clarification" is false, set "clarification_question" to an empty string.
+- Return ONLY the final answer text.
+- Do NOT return JSON.
+- Do NOT prefix the answer with labels like "answer:" or "response:".
+- If you need clarification, return only the short clarification question.
 `
 
 var (
-	answerFieldRegex = regexp.MustCompile(`(?is)"answer"\s*:\s*"((?:\\.|[^"\\])*)`)
 	answerLabelRegex = regexp.MustCompile(`(?is)^\s*(?:answer|response)\s*[:\-]\s*`)
+	answerFieldRegex = regexp.MustCompile(`(?is)"answer"\s*:\s*"((?:\\.|[^"\\])*)`)
 )
 
 type chatDatasetCacheEntry struct {
@@ -104,41 +88,14 @@ type cachedChatRow struct {
 }
 
 type preparedChatDataset struct {
-	CacheKey   string
-	CacheBody  string
-	RowRefToID map[string]int
+	CacheKey  string
+	CacheBody string
 }
 
 type chatContextCacheEntry struct {
 	Name      string
 	Model     string
 	ExpiresAt time.Time
-}
-
-type chatStructuredResponse struct {
-	Answer                string  `json:"answer"`
-	MatchedRowRef         *string `json:"matched_row_ref"`
-	NeedsClarification    bool    `json:"needs_clarification"`
-	ClarificationQuestion string  `json:"clarification_question"`
-}
-
-var chatResponseJSONSchema = map[string]any{
-	"type": "object",
-	"properties": map[string]any{
-		"answer": map[string]any{
-			"type": "string",
-		},
-		"matched_row_ref": map[string]any{
-			"type": "string",
-		},
-		"needs_clarification": map[string]any{
-			"type": "boolean",
-		},
-		"clarification_question": map[string]any{
-			"type": "string",
-		},
-	},
-	"required": []string{"answer", "matched_row_ref", "needs_clarification", "clarification_question"},
 }
 
 func (cs *ChatService) ChatForUser(userID int64, question string, audioFile *multipart.FileHeader, filename string, communities []string) (*ChatResult, error) {
@@ -182,12 +139,12 @@ func (cs *ChatService) ChatForUser(userID int64, question string, audioFile *mul
 	}
 
 	ctx := context.Background()
-	structured, err := cs.generateChatStructuredResponse(ctx, prepared, question, audioBytes, audioMime, session)
+	answerText, err := cs.generateChatAnswer(ctx, prepared, question, audioBytes, audioMime, session)
 	if err != nil {
 		return nil, err
 	}
 
-	result := finalizeChatStructuredResponse(question, questionNorm, prepared, session, structured)
+	result := finalizeChatAnswer(question, questionNorm, session, answerText)
 	cs.saveSession(userID, session)
 	return result, nil
 }
@@ -291,7 +248,6 @@ func (dataset *chatDatasetCacheEntry) preparedForCommunities(communities []strin
 	if cached, ok := actual.(*preparedChatDataset); ok {
 		return cached, nil
 	}
-
 	return prepared, nil
 }
 
@@ -313,16 +269,15 @@ func buildPreparedChatDataset(dataset *chatDatasetCacheEntry, communities []stri
 		}
 	}
 
-	promptJSON, rowRefToID, err := buildPromptJSONArray(dataset.rows, selectedIndexes)
+	promptJSON, err := buildPromptJSONArray(dataset.rows, selectedIndexes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal file data: %w", err)
 	}
 
 	cacheBody := buildChatCacheBody(dataset, communities, len(selectedIndexes), promptJSON)
 	return &preparedChatDataset{
-		CacheKey:   fmt.Sprintf("%d:%d:%d:%s", dataset.FileID, dataset.Version, dataset.ConfigAt.UnixNano(), chatCommunitiesCacheKey(communities)),
-		CacheBody:  cacheBody,
-		RowRefToID: rowRefToID,
+		CacheKey:  fmt.Sprintf("%d:%d:%d:%s", dataset.FileID, dataset.Version, dataset.ConfigAt.UnixNano(), chatCommunitiesCacheKey(communities)),
+		CacheBody: cacheBody,
 	}, nil
 }
 
@@ -352,24 +307,22 @@ func renderCommunityScope(communities []string) string {
 	return strings.Join(communities, ", ")
 }
 
-func buildPromptJSONArray(rows []cachedChatRow, indexes []int) (string, map[string]int, error) {
+func buildPromptJSONArray(rows []cachedChatRow, indexes []int) (string, error) {
 	if len(indexes) == 0 {
-		return "[]", map[string]int{}, nil
+		return "[]", nil
 	}
 
 	var b strings.Builder
-	rowRefToID := make(map[string]int, len(indexes))
 	b.WriteByte('[')
 	for idx, rowIndex := range indexes {
 		rowJSON := rows[rowIndex].RowJSON
 		if !json.Valid([]byte(rowJSON)) {
-			return "", nil, fmt.Errorf("invalid row json")
+			return "", fmt.Errorf("invalid row json")
 		}
 		if idx > 0 {
 			b.WriteByte(',')
 		}
 		rowRef := buildPromptRowRef(idx + 1)
-		rowRefToID[rowRef] = rows[rowIndex].RowID
 		b.WriteString(`{"row_ref":`)
 		b.WriteString(strconv.Quote(rowRef))
 		b.WriteString(`,"row_data":`)
@@ -377,7 +330,7 @@ func buildPromptJSONArray(rows []cachedChatRow, indexes []int) (string, map[stri
 		b.WriteByte('}')
 	}
 	b.WriteByte(']')
-	return b.String(), rowRefToID, nil
+	return b.String(), nil
 }
 
 func buildPromptRowRef(position int) string {
@@ -425,18 +378,17 @@ func loadOptionalAudio(audioFile *multipart.FileHeader) ([]byte, string, error) 
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to read audio file: %w", err)
 	}
-
 	return audioBytes, audioFile.Header.Get("Content-Type"), nil
 }
 
-func (cs *ChatService) generateChatStructuredResponse(
+func (cs *ChatService) generateChatAnswer(
 	ctx context.Context,
 	prepared *preparedChatDataset,
 	question string,
 	audioBytes []byte,
 	audioMime string,
 	session *chatSessionState,
-) (*chatStructuredResponse, error) {
+) (string, error) {
 	requestPrompt := buildChatTurnPrompt(question, session, len(audioBytes) > 0)
 	models := []string{chatPrimaryModel, chatFallbackModel}
 	var lastErr error
@@ -448,7 +400,12 @@ func (cs *ChatService) generateChatStructuredResponse(
 		}
 
 		for attempt := 0; attempt < attempts; attempt++ {
-			raw, err := cs.generateChatWithModel(ctx, model, prepared, requestPrompt, audioBytes, audioMime)
+			promptForAttempt := requestPrompt
+			if attempt > 0 {
+				promptForAttempt = buildRepairChatTurnPrompt(requestPrompt)
+			}
+
+			raw, resp, err := cs.generateChatWithModel(ctx, model, prepared, promptForAttempt, audioBytes, audioMime)
 			if err != nil {
 				lastErr = err
 				if modelIdx == 0 && isRateLimit429(err) {
@@ -460,32 +417,22 @@ func (cs *ChatService) generateChatStructuredResponse(
 				continue
 			}
 
-			structured, ok := parseStructuredChatResponse(raw)
-			if ok && !responseLooksMalformed(raw) {
-				return structured, nil
+			answer := sanitizeAnswerText(raw)
+			if answer != "" && !answerLooksTruncated(answer, firstFinishReason(resp)) {
+				return answer, nil
 			}
 
-			raw = strings.TrimSpace(raw)
+			lastErr = fmt.Errorf("model returned malformed or truncated response")
 			if attempt == attempts-1 {
-				if ok {
-					return structured, nil
-				}
-				if raw == "" {
-					lastErr = fmt.Errorf("no response from Gemini")
-				} else {
-					return &chatStructuredResponse{Answer: sanitizeAnswerText(raw)}, nil
-				}
+				break
 			}
-		}
-		if lastErr != nil && !isRateLimit429(lastErr) {
-			return nil, lastErr
 		}
 	}
 
 	if lastErr != nil {
-		return nil, lastErr
+		return "", lastErr
 	}
-	return nil, fmt.Errorf("no response from Gemini")
+	return "", fmt.Errorf("no response from Gemini")
 }
 
 func (cs *ChatService) generateChatWithModel(
@@ -495,15 +442,15 @@ func (cs *ChatService) generateChatWithModel(
 	requestPrompt string,
 	audioBytes []byte,
 	audioMime string,
-) (string, error) {
+) (string, *genai.GenerateContentResponse, error) {
 	cacheEntry, cacheErr := cs.ensureChatContextCache(ctx, model, prepared)
 	if cacheErr == nil {
-		raw, err := cs.generateChatRequest(ctx, model, requestPrompt, audioBytes, audioMime, newChatGenerateConfig(cacheEntry.Name))
+		raw, resp, err := cs.generateChatRequest(ctx, model, requestPrompt, audioBytes, audioMime, newChatGenerateConfig(cacheEntry.Name))
 		if err == nil {
-			return raw, nil
+			return raw, resp, nil
 		}
 		if isRateLimit429(err) {
-			return "", err
+			return "", nil, err
 		}
 		if isMissingCachedContentError(err) {
 			cs.contextCache.Delete(chatContextCacheKey(model, prepared.CacheKey))
@@ -525,7 +472,7 @@ func (cs *ChatService) generateChatRequest(
 	audioBytes []byte,
 	audioMime string,
 	config *genai.GenerateContentConfig,
-) (string, error) {
+) (string, *genai.GenerateContentResponse, error) {
 	parts := []*genai.Part{{Text: prompt}}
 	if len(audioBytes) > 0 {
 		audioMime = strings.TrimSpace(audioMime)
@@ -541,14 +488,14 @@ func (cs *ChatService) generateChatRequest(
 		{Role: "user", Parts: parts},
 	}, config)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	out := strings.TrimSpace(firstTextFromResp(resp))
 	if out == "" {
-		return "", fmt.Errorf("no response from Gemini")
+		return "", resp, fmt.Errorf("no response from Gemini")
 	}
-	return out, nil
+	return out, resp, nil
 }
 
 func (cs *ChatService) ensureChatContextCache(ctx context.Context, model string, prepared *preparedChatDataset) (*chatContextCacheEntry, error) {
@@ -675,8 +622,11 @@ func buildChatTurnPrompt(question string, session *chatSessionState, hasAudio bo
 		b.WriteString("[No typed question text provided. Use the attached audio if present.]")
 	}
 	b.WriteString("\n")
-
 	return b.String()
+}
+
+func buildRepairChatTurnPrompt(basePrompt string) string {
+	return strings.TrimSpace(basePrompt) + "\nIMPORTANT: Your previous response was malformed or truncated. Return the full answer again as plain text only. Do not prefix the answer with \"answer:\". Finish the answer in complete sentences."
 }
 
 func shouldUseSessionContext(questionNorm string, session *chatSessionState) bool {
@@ -737,12 +687,10 @@ func isLikelyClarificationReply(questionNorm string) bool {
 	if questionNorm == "" {
 		return false
 	}
-
 	words := strings.Fields(questionNorm)
 	if len(words) == 0 || len(words) > 6 {
 		return false
 	}
-
 	switch words[0] {
 	case "what", "when", "where", "who", "why", "how", "did", "does", "do", "is", "are", "was", "were", "can", "could", "would", "should":
 		return false
@@ -769,25 +717,15 @@ func normalizeSearchText(text string) string {
 			lastSpace = true
 		}
 	}
-
 	return strings.Join(strings.Fields(b.String()), " ")
 }
 
-func finalizeChatStructuredResponse(
-	question string,
-	questionNorm string,
-	prepared *preparedChatDataset,
-	session *chatSessionState,
-	structured *chatStructuredResponse,
-) *ChatResult {
-	answer := strings.TrimSpace(structured.Answer)
-	needsClarification := structured.NeedsClarification || strings.TrimSpace(structured.ClarificationQuestion) != ""
+func finalizeChatAnswer(question string, questionNorm string, session *chatSessionState, answer string) *ChatResult {
+	answer = sanitizeAnswerText(answer)
+	needsClarification := isClarificationQuestion(answer)
 
 	if needsClarification {
-		clarificationQuestion := strings.TrimSpace(structured.ClarificationQuestion)
-		if clarificationQuestion == "" {
-			clarificationQuestion = answer
-		}
+		clarificationQuestion := answer
 		if clarificationQuestion == "" {
 			clarificationQuestion = "Could you clarify that a little more?"
 		}
@@ -831,82 +769,46 @@ func finalizeChatStructuredResponse(
 		answer = "I couldn't find an answer in the available data."
 	}
 	session.registerTurn(question, answer)
-	return &ChatResult{
-		Answer:       answer,
-		MatchedRowID: resolveMatchedRowRef(structured.MatchedRowRef, prepared.RowRefToID),
-	}
+	return &ChatResult{Answer: answer}
 }
 
 func samePrompt(a, b string) bool {
 	return normalizeSearchText(a) == normalizeSearchText(b)
 }
 
-func newChatGenerateConfig(cachedContent string) *genai.GenerateContentConfig {
-	return &genai.GenerateContentConfig{
-		CachedContent:      cachedContent,
-		ResponseMIMEType:   "application/json",
-		ResponseJsonSchema: chatResponseJSONSchema,
-		MaxOutputTokens:    1536,
-		Temperature:        float32Ptr(0.1),
+func sanitizeAnswerText(answer string) string {
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		return ""
 	}
-}
 
-func parseStructuredChatResponse(raw string) (*chatStructuredResponse, bool) {
-	jsonText := extractJSONObjectCandidate(raw)
-	if jsonText != "" {
-		var structured chatStructuredResponse
-		if err := json.Unmarshal([]byte(jsonText), &structured); err == nil {
-			structured.Answer = sanitizeAnswerText(structured.Answer)
-			structured.ClarificationQuestion = strings.TrimSpace(structured.ClarificationQuestion)
-			if structured.MatchedRowRef != nil {
-				rowRef := normalizePromptRowRef(*structured.MatchedRowRef)
-				if rowRef == "" {
-					structured.MatchedRowRef = nil
-				} else {
-					structured.MatchedRowRef = &rowRef
-				}
-			}
+	answer = strings.Trim(answer, "`")
+	if unwrapped, ok := unquoteJSONString(answer); ok {
+		answer = strings.TrimSpace(unwrapped)
+	}
 
-			if structured.Answer != "" || structured.NeedsClarification || structured.ClarificationQuestion != "" {
-				return &structured, true
+	if jsonText := extractJSONObjectCandidate(answer); jsonText != "" {
+		var payload struct {
+			Answer string `json:"answer"`
+		}
+		if err := json.Unmarshal([]byte(jsonText), &payload); err == nil {
+			if extracted := strings.TrimSpace(payload.Answer); extracted != "" {
+				answer = extracted
 			}
 		}
 	}
 
-	fallback := parseStructuredChatResponseFallback(raw)
-	if fallback == nil {
-		return nil, false
-	}
-	return fallback, true
-}
-
-func parseStructuredChatResponseFallback(raw string) *chatStructuredResponse {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil
-	}
-
-	if unwrapped, ok := unquoteJSONString(raw); ok {
-		if parsed, ok := parseStructuredChatResponse(unwrapped); ok {
-			return parsed
+	if matches := answerFieldRegex.FindStringSubmatch(answer); len(matches) == 2 {
+		if extracted := strings.TrimSpace(decodeJSONStringLiteral(matches[1])); extracted != "" {
+			answer = extracted
 		}
+	} else if extracted, ok := extractPartialAnswerField(answer); ok {
+		answer = extracted
 	}
 
-	if matches := answerFieldRegex.FindStringSubmatch(raw); len(matches) == 2 {
-		answer := sanitizeAnswerText(decodeJSONStringLiteral(matches[1]))
-		if answer != "" {
-			return &chatStructuredResponse{Answer: answer}
-		}
-	}
-	if answer, ok := extractPartialAnswerField(raw); ok {
-		return &chatStructuredResponse{Answer: sanitizeAnswerText(answer)}
-	}
-
-	answer := sanitizeAnswerText(raw)
-	if answer == "" || answer == raw {
-		return nil
-	}
-	return &chatStructuredResponse{Answer: answer}
+	answer = answerLabelRegex.ReplaceAllString(answer, "")
+	answer = strings.Trim(answer, "\"")
+	return strings.TrimSpace(answer)
 }
 
 func extractJSONObjectCandidate(raw string) string {
@@ -948,45 +850,9 @@ func extractJSONObjectCandidate(raw string) string {
 	return candidate
 }
 
-func responseLooksMalformed(raw string) bool {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return true
-	}
-	if strings.HasPrefix(raw, "{") && strings.HasSuffix(raw, "}") && json.Valid([]byte(raw)) {
-		return false
-	}
-	if strings.HasPrefix(raw, "\"{") && strings.HasSuffix(raw, "}\"") && json.Valid([]byte(raw)) {
-		return false
-	}
-	if strings.Contains(raw, `"answer"`) || strings.Contains(raw, `\"answer\"`) {
-		return true
-	}
-	return false
-}
-
-func sanitizeAnswerText(answer string) string {
-	answer = strings.TrimSpace(answer)
-	if answer == "" {
-		return ""
-	}
-
-	if unwrapped, ok := unquoteJSONString(answer); ok {
-		answer = strings.TrimSpace(unwrapped)
-	}
-
-	answer = answerLabelRegex.ReplaceAllString(answer, "")
-	answer = strings.TrimSpace(answer)
-	answer = strings.Trim(answer, "\"")
-	return strings.TrimSpace(answer)
-}
-
 func unquoteJSONString(raw string) (string, bool) {
 	raw = strings.TrimSpace(raw)
-	if len(raw) < 2 {
-		return "", false
-	}
-	if raw[0] != '"' || raw[len(raw)-1] != '"' {
+	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
 		return "", false
 	}
 
@@ -1018,6 +884,7 @@ func extractPartialAnswerField(raw string) (string, bool) {
 		if colonIdx == -1 {
 			continue
 		}
+
 		rest = strings.TrimSpace(rest[colonIdx+1:])
 		if rest == "" {
 			continue
@@ -1078,39 +945,77 @@ func decodePartialJSONStringLiteral(raw string) string {
 	return replacer.Replace(raw)
 }
 
-func resolveMatchedRowRef(rowRef *string, rowRefToID map[string]int) *int {
-	if rowRef == nil {
-		return nil
+func newChatGenerateConfig(cachedContent string) *genai.GenerateContentConfig {
+	return &genai.GenerateContentConfig{
+		CachedContent:    cachedContent,
+		ResponseMIMEType: "text/plain",
+		MaxOutputTokens:  1536,
+		Temperature:      float32Ptr(0.1),
 	}
-
-	normalized := normalizePromptRowRef(*rowRef)
-	if normalized == "" {
-		return nil
-	}
-
-	rowID, ok := rowRefToID[normalized]
-	if !ok {
-		return nil
-	}
-
-	resolved := rowID
-	return &resolved
 }
 
-func normalizePromptRowRef(rowRef string) string {
-	rowRef = strings.ToUpper(strings.TrimSpace(rowRef))
-	if rowRef == "" {
-		return ""
+func firstFinishReason(resp *genai.GenerateContentResponse) genai.FinishReason {
+	if resp == nil || len(resp.Candidates) == 0 || resp.Candidates[0] == nil {
+		return genai.FinishReasonUnspecified
 	}
-	if !strings.HasPrefix(rowRef, "R") {
-		return ""
+	return resp.Candidates[0].FinishReason
+}
+
+func answerLooksTruncated(answer string, finishReason genai.FinishReason) bool {
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		return true
 	}
-	for _, r := range rowRef[1:] {
-		if !unicode.IsDigit(r) {
-			return ""
+	if finishReason == genai.FinishReasonMaxTokens {
+		return true
+	}
+	if strings.HasSuffix(answer, "...") || strings.HasSuffix(answer, "…") {
+		return true
+	}
+
+	lower := strings.ToLower(answer)
+	for _, suffix := range []string{
+		" a", " an", " the", " and", " or", " of", " with", " in", " at", " to", " from", " by", " for",
+		" had a", " had an", " had the", " also had a", " also had an", " also had the",
+	} {
+		if strings.HasSuffix(lower, suffix) {
+			return true
 		}
 	}
-	return rowRef
+
+	last := answer[len(answer)-1]
+	if last == ',' || last == ':' || last == ';' || last == '(' || last == '-' {
+		return true
+	}
+	return false
+}
+
+func isClarificationQuestion(answer string) bool {
+	answer = strings.TrimSpace(answer)
+	if answer == "" || !strings.HasSuffix(answer, "?") {
+		return false
+	}
+
+	lower := strings.ToLower(answer)
+	for _, prefix := range []string{
+		"which ",
+		"who ",
+		"what ",
+		"when ",
+		"where ",
+		"do you mean",
+		"did you mean",
+		"could you clarify",
+		"can you clarify",
+		"are you asking",
+		"would you like",
+		"do you want",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func isMissingCachedContentError(err error) bool {
