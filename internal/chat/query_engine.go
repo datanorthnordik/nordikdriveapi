@@ -34,35 +34,33 @@ Style requirements:
 - Prefer short paragraphs over bullet points.
 - Do NOT use bullet points unless the user explicitly asks for a list.
 - Do NOT sound robotic or overly formal.
-- Do NOT mention JSON, database, columns, file name, file version, cached content, or any technical details.
-- If the answer is not present in the provided data, say so clearly and ask 1 short follow-up question only when absolutely needed.
-- Maintain an empathetic and respectful tone, especially when discussing deaths or sensitive topics.
+- Do NOT mention JSON, database, columns, file name, file version, or any technical details.
+- If the answer is not present in the provided data, say so clearly and ask 1 short follow-up question if needed.
 
 Accuracy requirements:
-- Use ONLY the cached file context and the latest user turn. Do not use outside knowledge.
-- Carefully analyze ALL relevant records before answering.
+- Use ONLY the provided data. Do not use outside knowledge.
+- Carefully analyze ALL provided data before answering.
 - Do not stop after finding the first match.
 - Always check if multiple equally correct answers exist.
 - Never return only one answer if multiple valid answers are present.
 - For questions involving highest, lowest, most, least, first, last, top, or similar comparisons:
   verify that no other entries share the same value before answering.
 
-Session rules:
-- Treat prior conversation context as optional support only.
-- If the latest user turn is a fresh standalone question, ignore prior conversation context.
-- Use prior conversation context only when the latest turn clearly refers back or is explicitly answering a clarification question.
-- Never let older conversation context change the answer to a new standalone question.
+Before responding:
+- Internally re-check the data to confirm whether another valid answer exists.
+- Only respond after confirming that all correct answers are included.
 
-Clarification rules:
-- Ask a clarification question only when it is necessary to avoid a wrong answer.
-- Keep clarification questions short and specific.
-- If the prompt says no clarification budget remains, do not ask another clarification question. Instead say the records do not allow an exact answer.
+Answer format:
+- Start with a direct answer in 1-2 sentences.
+- If multiple answers exist, include ALL of them in the first sentence.
+- Combine them naturally (example: "1882 and 1995").
+- Provide as much detail as possible based on the data.
 
 Output requirements:
 - Return ONLY the final answer text.
 - Do NOT return JSON.
 - Do NOT prefix the answer with labels like "answer:" or "response:".
-- If you need clarification, return only the short clarification question.
+- If clarification is needed, ask only 1 short follow-up question.
 `
 
 var (
@@ -282,29 +280,10 @@ func buildPreparedChatDataset(dataset *chatDatasetCacheEntry, communities []stri
 }
 
 func buildChatCacheBody(dataset *chatDatasetCacheEntry, communities []string, rowCount int, promptJSON string) string {
-	sections := []string{
-		"FILE CONTEXT",
-		fmt.Sprintf("Filename: %s", dataset.Filename),
-		fmt.Sprintf("Version: %d", dataset.Version),
-		fmt.Sprintf("Rows in scope: %d", rowCount),
-		fmt.Sprintf("Community scope: %s", renderCommunityScope(communities)),
-	}
-
-	if strings.TrimSpace(dataset.ColumnsOrderJSON) != "" {
-		sections = append(sections, "COLUMNS ORDER:\n"+dataset.ColumnsOrderJSON)
-	}
-	if strings.TrimSpace(dataset.ConfigJSON) != "" {
-		sections = append(sections, "ACTIVE CONFIG:\n"+dataset.ConfigJSON)
-	}
-	sections = append(sections, "DATA (only source of truth):\n"+promptJSON)
-	return strings.Join(sections, "\n\n")
-}
-
-func renderCommunityScope(communities []string) string {
-	if len(communities) == 0 {
-		return "All communities"
-	}
-	return strings.Join(communities, ", ")
+	_ = dataset
+	_ = communities
+	_ = rowCount
+	return "DATA (only source of truth):\n" + promptJSON
 }
 
 func buildPromptJSONArray(rows []cachedChatRow, indexes []int) (string, error) {
@@ -950,7 +929,7 @@ func newChatGenerateConfig(cachedContent string) *genai.GenerateContentConfig {
 		CachedContent:    cachedContent,
 		ResponseMIMEType: "text/plain",
 		MaxOutputTokens:  1536,
-		Temperature:      float32Ptr(0.1),
+		Temperature:      float32Ptr(0),
 	}
 }
 
