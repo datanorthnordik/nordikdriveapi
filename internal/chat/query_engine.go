@@ -23,10 +23,9 @@ import (
 const (
 	chatPrimaryModel  = "gemini-2.5-pro"
 	chatFallbackModel = "gemini-2.5-flash"
-	chatContextTTL    = 24 * time.Hour
 )
 
-const chatCachedSystemInstruction = `
+const chatSystemInstruction = `
 You are a helpful assistant answering a community data question for a non-technical user.
 
 Style requirements:
@@ -88,12 +87,6 @@ type cachedChatRow struct {
 type preparedChatDataset struct {
 	CacheKey  string
 	CacheBody string
-}
-
-type chatContextCacheEntry struct {
-	Name      string
-	Model     string
-	ExpiresAt time.Time
 }
 
 func (cs *ChatService) ChatForUser(userID int64, question string, audioFile *multipart.FileHeader, filename string, communities []string) (*ChatResult, error) {
@@ -369,49 +362,27 @@ func (cs *ChatService) generateChatAnswer(
 	session *chatSessionState,
 ) (string, error) {
 	requestPrompt := buildChatTurnPrompt(question, session, len(audioBytes) > 0)
-	models := []string{chatPrimaryModel, chatFallbackModel}
-	var lastErr error
-
-	for modelIdx, model := range models {
-		attempts := 1
-		if modelIdx == 0 {
-			attempts = 2
+	raw, _, err := cs.generateChatWithModel(ctx, chatPrimaryModel, prepared, requestPrompt, audioBytes, audioMime)
+	if err == nil {
+		answer := sanitizeAnswerText(raw)
+		if answer != "" {
+			return answer, nil
 		}
-
-		for attempt := 0; attempt < attempts; attempt++ {
-			promptForAttempt := requestPrompt
-			if attempt > 0 {
-				promptForAttempt = buildRepairChatTurnPrompt(requestPrompt)
-			}
-
-			raw, resp, err := cs.generateChatWithModel(ctx, model, prepared, promptForAttempt, audioBytes, audioMime)
-			if err != nil {
-				lastErr = err
-				if modelIdx == 0 && isRateLimit429(err) {
-					break
-				}
-				if attempt == attempts-1 {
-					break
-				}
-				continue
-			}
-
-			answer := sanitizeAnswerText(raw)
-			if answer != "" && !answerLooksTruncated(answer, firstFinishReason(resp)) {
-				return answer, nil
-			}
-
-			lastErr = fmt.Errorf("model returned malformed or truncated response")
-			if attempt == attempts-1 {
-				break
-			}
-		}
+		return "", fmt.Errorf("no response from Gemini")
+	}
+	if !isRateLimit429(err) {
+		return "", err
 	}
 
-	if lastErr != nil {
-		return "", lastErr
+	raw, _, err = cs.generateChatWithModel(ctx, chatFallbackModel, prepared, requestPrompt, audioBytes, audioMime)
+	if err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf("no response from Gemini")
+	answer := sanitizeAnswerText(raw)
+	if answer == "" {
+		return "", fmt.Errorf("no response from Gemini")
+	}
+	return answer, nil
 }
 
 func (cs *ChatService) generateChatWithModel(
@@ -422,26 +393,12 @@ func (cs *ChatService) generateChatWithModel(
 	audioBytes []byte,
 	audioMime string,
 ) (string, *genai.GenerateContentResponse, error) {
-	cacheEntry, cacheErr := cs.ensureChatContextCache(ctx, model, prepared)
-	if cacheErr == nil {
-		raw, resp, err := cs.generateChatRequest(ctx, model, requestPrompt, audioBytes, audioMime, newChatGenerateConfig(cacheEntry.Name))
-		if err == nil {
-			return raw, resp, nil
-		}
-		if isRateLimit429(err) {
-			return "", nil, err
-		}
-		if isMissingCachedContentError(err) {
-			cs.contextCache.Delete(chatContextCacheKey(model, prepared.CacheKey))
-		}
-	}
-
 	directPrompt := buildDirectChatPrompt(prepared, requestPrompt)
-	return cs.generateChatRequest(ctx, model, directPrompt, audioBytes, audioMime, newChatGenerateConfig(""))
+	return cs.generateChatRequest(ctx, model, directPrompt, audioBytes, audioMime, newChatGenerateConfig())
 }
 
 func buildDirectChatPrompt(prepared *preparedChatDataset, requestPrompt string) string {
-	return strings.TrimSpace(chatCachedSystemInstruction) + "\n\n" + prepared.CacheBody + "\n\n" + requestPrompt
+	return strings.TrimSpace(chatSystemInstruction) + "\n\n" + prepared.CacheBody + "\n\n" + requestPrompt
 }
 
 func (cs *ChatService) generateChatRequest(
@@ -477,80 +434,12 @@ func (cs *ChatService) generateChatRequest(
 	return out, resp, nil
 }
 
-func (cs *ChatService) ensureChatContextCache(ctx context.Context, model string, prepared *preparedChatDataset) (*chatContextCacheEntry, error) {
-	cacheKey := chatContextCacheKey(model, prepared.CacheKey)
-	if cached, ok := cs.contextCache.Load(cacheKey); ok {
-		if entry, ok := cached.(*chatContextCacheEntry); ok {
-			if time.Now().UTC().Before(entry.ExpiresAt) {
-				return entry, nil
-			}
-			cs.contextCache.Delete(cacheKey)
-		}
-	}
-
-	config := &genai.CreateCachedContentConfig{
-		TTL:         chatContextTTL,
-		DisplayName: buildContextCacheDisplayName(model, prepared.CacheKey),
-		Contents: []*genai.Content{
-			{
-				Role: "user",
-				Parts: []*genai.Part{
-					{Text: prepared.CacheBody},
-				},
-			},
-		},
-		SystemInstruction: &genai.Content{
-			Parts: []*genai.Part{
-				{Text: strings.TrimSpace(chatCachedSystemInstruction)},
-			},
-		},
-	}
-
-	cachedContent, err := genaiCreateCachedContentHook(cs.Client, ctx, model, config)
-	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(cachedContent.Name) == "" {
-		return nil, fmt.Errorf("cached content created without a name")
-	}
-
-	expiresAt := cachedContent.ExpireTime.UTC()
-	if expiresAt.IsZero() {
-		expiresAt = time.Now().UTC().Add(chatContextTTL)
-	}
-
-	entry := &chatContextCacheEntry{
-		Name:      cachedContent.Name,
-		Model:     model,
-		ExpiresAt: expiresAt,
-	}
-	cs.contextCache.Store(cacheKey, entry)
-	return entry, nil
-}
-
-func chatContextCacheKey(model, preparedKey string) string {
-	return model + "|" + preparedKey
-}
-
-func buildContextCacheDisplayName(model, preparedKey string) string {
-	safe := strings.Map(func(r rune) rune {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			return r
-		}
-		return '-'
-	}, strings.ToLower(model+"-"+preparedKey))
-	if len(safe) > 120 {
-		safe = safe[:120]
-	}
-	return strings.Trim(safe, "-")
-}
-
 func buildChatTurnPrompt(question string, session *chatSessionState, hasAudio bool) string {
 	question = strings.TrimSpace(question)
 	questionNorm := normalizeSearchText(question)
 
 	var b strings.Builder
-	b.WriteString("Answer using only the cached file context.\n")
+	b.WriteString("Answer using only the provided data.\n")
 	if hasAudio {
 		b.WriteString("If audio is attached, use it only to understand the latest user question.\n")
 	}
@@ -602,10 +491,6 @@ func buildChatTurnPrompt(question string, session *chatSessionState, hasAudio bo
 	}
 	b.WriteString("\n")
 	return b.String()
-}
-
-func buildRepairChatTurnPrompt(basePrompt string) string {
-	return strings.TrimSpace(basePrompt) + "\nIMPORTANT: Your previous response was malformed or truncated. Return the full answer again as plain text only. Do not prefix the answer with \"answer:\". Finish the answer in complete sentences."
 }
 
 func shouldUseSessionContext(questionNorm string, session *chatSessionState) bool {
@@ -924,49 +809,12 @@ func decodePartialJSONStringLiteral(raw string) string {
 	return replacer.Replace(raw)
 }
 
-func newChatGenerateConfig(cachedContent string) *genai.GenerateContentConfig {
+func newChatGenerateConfig() *genai.GenerateContentConfig {
 	return &genai.GenerateContentConfig{
-		CachedContent:    cachedContent,
 		ResponseMIMEType: "text/plain",
 		MaxOutputTokens:  1536,
 		Temperature:      float32Ptr(0),
 	}
-}
-
-func firstFinishReason(resp *genai.GenerateContentResponse) genai.FinishReason {
-	if resp == nil || len(resp.Candidates) == 0 || resp.Candidates[0] == nil {
-		return genai.FinishReasonUnspecified
-	}
-	return resp.Candidates[0].FinishReason
-}
-
-func answerLooksTruncated(answer string, finishReason genai.FinishReason) bool {
-	answer = strings.TrimSpace(answer)
-	if answer == "" {
-		return true
-	}
-	if finishReason == genai.FinishReasonMaxTokens {
-		return true
-	}
-	if strings.HasSuffix(answer, "...") || strings.HasSuffix(answer, "…") {
-		return true
-	}
-
-	lower := strings.ToLower(answer)
-	for _, suffix := range []string{
-		" a", " an", " the", " and", " or", " of", " with", " in", " at", " to", " from", " by", " for",
-		" had a", " had an", " had the", " also had a", " also had an", " also had the",
-	} {
-		if strings.HasSuffix(lower, suffix) {
-			return true
-		}
-	}
-
-	last := answer[len(answer)-1]
-	if last == ',' || last == ':' || last == ';' || last == '(' || last == '-' {
-		return true
-	}
-	return false
 }
 
 func isClarificationQuestion(answer string) bool {
@@ -995,17 +843,6 @@ func isClarificationQuestion(answer string) bool {
 		}
 	}
 	return false
-}
-
-func isMissingCachedContentError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "cached") &&
-		(strings.Contains(msg, "not found") ||
-			strings.Contains(msg, "404") ||
-			strings.Contains(msg, "expired"))
 }
 
 func float32Ptr(v float32) *float32 {

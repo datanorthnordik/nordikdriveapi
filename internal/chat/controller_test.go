@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
@@ -51,20 +50,15 @@ func TestChatController_Chat_Success200(t *testing.T) {
 	expectChatFileLookup(mock, "sheet.xlsx")
 	expectChatRowsLookup(mock, `{"NAME":"Alice","First Nation/Community":"Garden River"}`)
 
-	oldCreate := genaiCreateCachedContentHook
 	oldGen := genaiGenerateContentHook
 	t.Cleanup(func() {
-		genaiCreateCachedContentHook = oldCreate
 		genaiGenerateContentHook = oldGen
 	})
 
-	genaiCreateCachedContentHook = func(_ *genai.Client, _ context.Context, _ string, _ *genai.CreateCachedContentConfig) (*genai.CachedContent, error) {
-		return &genai.CachedContent{
-			Name:       "projects/demo/locations/global/cachedContents/cache-1",
-			ExpireTime: time.Now().Add(time.Hour),
-		}, nil
-	}
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		if config == nil || config.CachedContent != "" {
+			t.Fatalf("expected direct prompt config, got %#v", config)
+		}
 		return jsonAnswer("Yes. I found 1 recorded death connected to drowning at Shingwauk.", nil, false, ""), nil
 	}
 

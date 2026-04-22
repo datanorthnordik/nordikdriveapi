@@ -35,16 +35,12 @@ type ChatService struct {
 	Location  string
 
 	datasetCache sync.Map
-	contextCache sync.Map
 	sessionCache sync.Map
 }
 
 var (
 	genaiGenerateContentHook = func(client *genai.Client, ctx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
 		return client.Models.GenerateContent(ctx, model, contents, config)
-	}
-	genaiCreateCachedContentHook = func(client *genai.Client, ctx context.Context, model string, config *genai.CreateCachedContentConfig) (*genai.CachedContent, error) {
-		return client.Caches.Create(ctx, model, config)
 	}
 
 	openMultipartFileHook = func(fh *multipart.FileHeader) (multipart.File, error) {
