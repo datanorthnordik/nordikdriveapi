@@ -35,7 +35,27 @@ func (s *AuthService) CreateUser(user Auth) (*Auth, error) {
 		return nil, err
 	}
 
+	s.triggerSignupEmailAsync(&user)
+
 	return &user, nil
+}
+
+var triggerSignupEmailHook = func(user Auth, mailer mailer.EmailSender) error {
+	body := BuildSignupEmailBody(user.FirstName, user.LastName, user.Email)
+	return mailer.SendOne(user.Email, "Your database access account has been created", body)
+}
+
+func (s *AuthService) triggerSignupEmailAsync(user *Auth) {
+	if user == nil || s.Mailer == nil {
+		return
+	}
+
+	userCopy := *user
+	go func() {
+		if err := triggerSignupEmailHook(userCopy, s.Mailer); err != nil {
+			log.Printf("signup email: send failed for user_id=%d email=%s err=%v", userCopy.ID, userCopy.Email, err)
+		}
+	}()
 }
 
 // func (s *AuthService) CreateAccess(access Access) (*Access, error) {
