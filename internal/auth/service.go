@@ -45,6 +45,11 @@ var triggerSignupEmailHook = func(user Auth, mailer mailer.EmailSender) error {
 	return mailer.SendOne(user.Email, "Your database access account has been created", body)
 }
 
+var triggerPasswordChangedEmailHook = func(user Auth, mailer mailer.EmailSender) error {
+	body := BuildPasswordChangedEmailBody(user.FirstName, user.LastName)
+	return mailer.SendOne(user.Email, "Your password has been changed", body)
+}
+
 func (s *AuthService) triggerSignupEmailAsync(user *Auth) {
 	if user == nil || s.Mailer == nil {
 		return
@@ -54,6 +59,19 @@ func (s *AuthService) triggerSignupEmailAsync(user *Auth) {
 	go func() {
 		if err := triggerSignupEmailHook(userCopy, s.Mailer); err != nil {
 			log.Printf("signup email: send failed for user_id=%d email=%s err=%v", userCopy.ID, userCopy.Email, err)
+		}
+	}()
+}
+
+func (s *AuthService) triggerPasswordChangedEmailAsync(user *Auth) {
+	if user == nil || s.Mailer == nil {
+		return
+	}
+
+	userCopy := *user
+	go func() {
+		if err := triggerPasswordChangedEmailHook(userCopy, s.Mailer); err != nil {
+			log.Printf("password changed email: send failed for user_id=%d email=%s err=%v", userCopy.ID, userCopy.Email, err)
 		}
 	}()
 }
@@ -174,6 +192,8 @@ func (s *AuthService) ResetPassword(email, code, newPassword string) (*Auth, err
 		Update("password", hashed).Error; err != nil {
 		return nil, err
 	}
+
+	s.triggerPasswordChangedEmailAsync(&user)
 
 	return &user, nil
 }
