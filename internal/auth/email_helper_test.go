@@ -31,3 +31,17 @@ func TestBuildSignupEmailBody_DefaultName(t *testing.T) {
 		t.Fatalf("expected default greeting, got %s", body)
 	}
 }
+
+func TestBuildPasswordChangedEmailBody(t *testing.T) {
+	body := BuildPasswordChangedEmailBody(" Athul ", " Narayanan ")
+
+	for _, want := range []string{
+		"Hi Athul Narayanan,",
+		"Your password has been changed.",
+		"If you did not make this change, please report it to the administrator immediately.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected body to contain %q, got %s", want, body)
+		}
+	}
+}

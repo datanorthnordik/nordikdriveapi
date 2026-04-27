@@ -485,6 +485,56 @@ func TestAuthService_ResetPassword_OK_UpdatesPassword(t *testing.T) {
 	}
 }
 
+func TestAuthService_ResetPassword_OK_TriggersPasswordChangedEmailAsync(t *testing.T) {
+	db := newTestDB(t)
+	if err := db.AutoMigrate(&Auth{}, &OTP{}); err != nil {
+		t.Fatalf("automigrate: %v", err)
+	}
+
+	if err := db.Create(&Auth{
+		FirstName: "A",
+		LastName:  "B",
+		Email:     "a@b.com",
+		Password:  "old",
+		Role:      "User",
+	}).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if err := db.Create(&OTP{Email: "a@b.com", Code: "111111", CreatedAt: time.Now()}).Error; err != nil {
+		t.Fatalf("seed otp: %v", err)
+	}
+
+	oldHook := triggerPasswordChangedEmailHook
+	defer func() {
+		triggerPasswordChangedEmailHook = oldHook
+	}()
+
+	done := make(chan Auth, 1)
+	triggerPasswordChangedEmailHook = func(user Auth, mailer mailer.EmailSender) error {
+		done <- user
+		return nil
+	}
+
+	svc := &AuthService{DB: db, Mailer: &mockMailer{}}
+
+	user, err := svc.ResetPassword("a@b.com", "111111", "123456")
+	if err != nil {
+		t.Fatalf("expected nil err, got: %v", err)
+	}
+	if user == nil || user.Email != "a@b.com" {
+		t.Fatalf("unexpected user: %+v", user)
+	}
+
+	select {
+	case emailedUser := <-done:
+		if emailedUser.Email != "a@b.com" || emailedUser.FirstName != "A" || emailedUser.LastName != "B" {
+			t.Fatalf("unexpected emailed user: %+v", emailedUser)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected password changed email hook to be called")
+	}
+}
+
 func TestAuthService_SendOTP_UserNotFound(t *testing.T) {
 	db := newTestDB(t)
 	if err := db.AutoMigrate(&OTP{}); err != nil {
