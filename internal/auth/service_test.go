@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"nordik-drive-api/config"
+	"nordik-drive-api/internal/mailer"
 	"regexp"
 	"strings"
 	"testing"
@@ -155,6 +156,52 @@ func TestAuthService_CreateUser_SetsDefaultRole_WhenEmpty(t *testing.T) {
 	}
 	if created.ID == 0 {
 		t.Fatalf("expected ID to be set")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+func TestAuthService_CreateUser_TriggersSignupEmailAsync(t *testing.T) {
+	db, mock := newMockGormPostgres(t)
+
+	mock.ExpectQuery(`INSERT INTO "users"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(3))
+
+	oldHook := triggerSignupEmailHook
+	defer func() {
+		triggerSignupEmailHook = oldHook
+	}()
+
+	done := make(chan Auth, 1)
+	triggerSignupEmailHook = func(user Auth, mailer mailer.EmailSender) error {
+		done <- user
+		return nil
+	}
+
+	svc := &AuthService{DB: db, Mailer: &mockMailer{}}
+
+	created, err := svc.CreateUser(Auth{
+		FirstName: "A",
+		LastName:  "B",
+		Email:     "a@b.com",
+		Password:  "hashed",
+	})
+	if err != nil {
+		t.Fatalf("expected nil err, got: %v", err)
+	}
+	if created.ID == 0 {
+		t.Fatalf("expected ID to be set")
+	}
+
+	select {
+	case emailedUser := <-done:
+		if emailedUser.Email != "a@b.com" || emailedUser.FirstName != "A" || emailedUser.LastName != "B" {
+			t.Fatalf("unexpected emailed user: %+v", emailedUser)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected signup email hook to be called")
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
