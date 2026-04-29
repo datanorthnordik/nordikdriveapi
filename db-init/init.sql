@@ -271,6 +271,8 @@ CREATE TABLE IF NOT EXISTS file_edit_request_details (
     field_name VARCHAR(255) NOT NULL,
     old_value TEXT,
     new_value TEXT,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    reviewer_comment TEXT NOT NULL DEFAULT '',
 
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

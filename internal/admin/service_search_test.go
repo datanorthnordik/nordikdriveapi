@@ -155,15 +155,15 @@ func TestAdminService_GetFileEditRequestDetails_OK(t *testing.T) {
 	as := &AdminService{DB: db}
 
 	mock.ExpectQuery(`(?i)file_edit_request_details`).
-		WillReturnRows(sqlmock.NewRows([]string{"field_key", "old_value", "new_value"}).
-			AddRow("firstname", "Old", "New").
-			AddRow("age", "", "30"))
+		WillReturnRows(sqlmock.NewRows([]string{"field_key", "old_value", "new_value", "status", "reviewer_comment"}).
+			AddRow("firstname", "Old", "New", "approved", "looks good").
+			AddRow("age", "", "30", "pending", ""))
 
 	out, err := as.GetFileEditRequestDetails(123)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if len(out) != 2 || out[0].FieldKey != "firstname" {
+	if len(out) != 2 || out[0].FieldKey != "firstname" || out[0].Status != "approved" || out[0].ReviewComment != "looks good" {
 		t.Fatalf("unexpected out: %#v", out)
 	}
 

@@ -104,15 +104,17 @@ type FileEditRequest struct {
 }
 
 type FileEditRequestDetails struct {
-	ID        uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	RequestID uint      `gorm:"not null" json:"request_id"`
-	FileID    uint      `gorm:"not null" json:"file_id"`
-	Filename  string    `gorm:"type:varchar(255);not null" json:"filename"`
-	RowID     int       `gorm:"not null" json:"row_id"`
-	FieldName string    `gorm:"type:varchar(255);not null" json:"field_name"`
-	OldValue  string    `gorm:"type:text" json:"old_value"`
-	NewValue  string    `gorm:"type:text" json:"new_value"`
-	CreatedAt time.Time `gorm:"autoCreateTime" json:"created_at"`
+	ID            uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	RequestID     uint      `gorm:"not null" json:"request_id"`
+	FileID        uint      `gorm:"not null" json:"file_id"`
+	Filename      string    `gorm:"type:varchar(255);not null" json:"filename"`
+	RowID         int       `gorm:"not null" json:"row_id"`
+	FieldName     string    `gorm:"type:varchar(255);not null" json:"field_name"`
+	OldValue      string    `gorm:"type:text" json:"old_value"`
+	NewValue      string    `gorm:"type:text" json:"new_value"`
+	Status        string    `gorm:"type:varchar(20);not null;default:'pending'" json:"status"`
+	ReviewComment string    `gorm:"type:text;column:reviewer_comment;not null;default:''" json:"reviewer_comment"`
+	CreatedAt     time.Time `gorm:"autoCreateTime" json:"created_at"`
 }
 
 type FileEditRequestWithUser struct {

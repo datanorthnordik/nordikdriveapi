@@ -1268,6 +1268,15 @@ func (fs *FileService) ReviewEditRequest(
 			return err
 		}
 
+		if err := tx.Model(&FileEditRequestDetails{}).
+			Where("request_id = ?", requestID).
+			Updates(map[string]interface{}{
+				"status":           status,
+				"reviewer_comment": reviewComment,
+			}).Error; err != nil {
+			return err
+		}
+
 		fs.triggerReviewEmailAsync(&req)
 
 		return nil

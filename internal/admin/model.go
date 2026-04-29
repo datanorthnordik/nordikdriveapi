@@ -94,9 +94,11 @@ type AdminChangeRow struct {
 }
 
 type AdminChangeDetailRow struct {
-	FieldKey string `json:"field_key"`
-	OldValue string `json:"old_value"`
-	NewValue string `json:"new_value"`
+	FieldKey      string `json:"field_key" gorm:"column:field_key"`
+	OldValue      string `json:"old_value" gorm:"column:old_value"`
+	NewValue      string `json:"new_value" gorm:"column:new_value"`
+	Status        string `json:"status" gorm:"column:status"`
+	ReviewComment string `json:"reviewer_comment" gorm:"column:reviewer_comment"`
 }
 
 type AdminPhotoRow struct {
@@ -140,15 +142,17 @@ type fileDataRow struct {
 
 // Matches YOUR struct fields/columns
 type fileEditRequestDetailsRow struct {
-	ID        uint      `gorm:"column:id"`
-	RequestID uint      `gorm:"column:request_id"`
-	FileID    uint      `gorm:"column:file_id"`
-	Filename  string    `gorm:"column:filename"`
-	RowID     int       `gorm:"column:row_id"`
-	FieldName string    `gorm:"column:field_name"`
-	OldValue  string    `gorm:"column:old_value"`
-	NewValue  string    `gorm:"column:new_value"`
-	CreatedAt time.Time `gorm:"column:created_at"`
+	ID            uint      `gorm:"column:id"`
+	RequestID     uint      `gorm:"column:request_id"`
+	FileID        uint      `gorm:"column:file_id"`
+	Filename      string    `gorm:"column:filename"`
+	RowID         int       `gorm:"column:row_id"`
+	FieldName     string    `gorm:"column:field_name"`
+	OldValue      string    `gorm:"column:old_value"`
+	NewValue      string    `gorm:"column:new_value"`
+	Status        string    `gorm:"column:status"`
+	ReviewComment string    `gorm:"column:reviewer_comment"`
+	CreatedAt     time.Time `gorm:"column:created_at"`
 }
 
 type exportRow struct {
