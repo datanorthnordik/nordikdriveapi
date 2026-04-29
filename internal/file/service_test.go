@@ -1438,8 +1438,8 @@ func TestFileService_GetEditRequests_AllBranches(t *testing.T) {
 	_ = db.Create(&u).Error
 
 	// seed pending + approved
-	r1 := FileEditRequest{UserID: uint(u.ID), Status: "pending", CreatedAt: time.Now(), FirstName: "E", LastName: "F", RowID: 0, IsEdited: true, Consent: true, FileID: 1}
-	r2 := FileEditRequest{UserID: uint(u.ID), Status: "approved", CreatedAt: time.Now().Add(-time.Hour), FirstName: "E2", LastName: "F2", RowID: 0, IsEdited: true, Consent: true, FileID: 1, ReviewComment: "approved after review"}
+	r1 := FileEditRequest{UserID: uint(u.ID), Status: "pending", CreatedAt: time.Now(), FirstName: "E", LastName: "F", RowID: 0, IsEdited: true, Consent: true, ArchiveConsent: true, FileID: 1}
+	r2 := FileEditRequest{UserID: uint(u.ID), Status: "approved", CreatedAt: time.Now().Add(-time.Hour), FirstName: "E2", LastName: "F2", RowID: 0, IsEdited: true, Consent: true, ArchiveConsent: false, FileID: 1, ReviewComment: "approved after review"}
 	_ = db.Create(&r1).Error
 	_ = db.Create(&r2).Error
 	_ = db.Exec("UPDATE file_edit_request SET reviewer_comment = NULL WHERE request_id = ?", r1.RequestID).Error
@@ -1455,6 +1455,9 @@ func TestFileService_GetEditRequests_AllBranches(t *testing.T) {
 	if out[0].ReviewComment != "" {
 		t.Fatalf("expected empty review comment for NULL db value, got %#v", out[0].ReviewComment)
 	}
+	if !out[0].ArchiveConsent {
+		t.Fatalf("expected archive consent to be returned")
+	}
 
 	// both filters => IN (...)
 	statusCSV := "approved, pending"
@@ -1468,6 +1471,9 @@ func TestFileService_GetEditRequests_AllBranches(t *testing.T) {
 	}
 	if out[1].Status != "approved" || out[1].ReviewComment != "approved after review" {
 		t.Fatalf("expected approved request to include review comment, got %#v", out[1])
+	}
+	if out[1].ArchiveConsent {
+		t.Fatalf("expected approved request archive consent to be false")
 	}
 
 	// garbage statusCSV => fallback pending
