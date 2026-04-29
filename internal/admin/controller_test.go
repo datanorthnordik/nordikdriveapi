@@ -150,7 +150,10 @@ func TestAdminController_GetFileEditRequestDetails_MissingID(t *testing.T) {
 
 func TestAdminController_GetFileEditRequestDetails_OK(t *testing.T) {
 	f := &fakeAdminService{
-		detailsResp: []AdminChangeDetailRow{{FieldKey: "a", OldValue: "x", NewValue: "y"}, {FieldKey: "b", OldValue: "", NewValue: "1"}},
+		detailsResp: []AdminChangeDetailRow{
+			{FieldKey: "a", OldValue: "x", NewValue: "y", Status: "approved", ReviewComment: "ok"},
+			{FieldKey: "b", OldValue: "", NewValue: "1", Status: "pending"},
+		},
 	}
 	ctrl := &AdminController{AdminService: f}
 	r := newTestRouter(ctrl)

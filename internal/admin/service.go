@@ -197,7 +197,9 @@ func (as *AdminService) GetFileEditRequestDetails(requestID uint) ([]AdminChange
 		Select(`
 			d.field_name AS field_key,
 			COALESCE(d.old_value,'') AS old_value,
-			COALESCE(d.new_value,'') AS new_value
+			COALESCE(d.new_value,'') AS new_value,
+			COALESCE(d.status,'pending') AS status,
+			COALESCE(d.reviewer_comment,'') AS reviewer_comment
 		`).
 		Where("d.request_id = ?", requestID).
 		Where("(COALESCE(d.old_value,'') <> '' OR COALESCE(d.new_value,'') <> '')").

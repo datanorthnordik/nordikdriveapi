@@ -1599,6 +1599,11 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 	if reqUpdated.Status != "approved" || reqUpdated.ReviewedBy == nil || *reqUpdated.ReviewedBy != 9 || reqUpdated.RowID == 0 {
 		t.Fatalf("unexpected updated request: %#v", reqUpdated)
 	}
+	var detailUpdated FileEditRequestDetails
+	_ = db.Where("id = ?", d1.ID).First(&detailUpdated).Error
+	if detailUpdated.Status != "approved" || detailUpdated.ReviewComment != "Test comment" {
+		t.Fatalf("unexpected updated detail review fields: %#v", detailUpdated)
+	}
 
 	// --- EDITED path errors + success ---
 	db = newTestDB(t)
@@ -1662,6 +1667,11 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 	_ = db.Where("request_id = ?", req.RequestID).First(&updatedReq).Error
 	if updatedReq.Status != "approved" || updatedReq.ReviewedBy == nil || *updatedReq.ReviewedBy != 9 {
 		t.Fatalf("unexpected req: %#v", updatedReq)
+	}
+	var updatedDetail FileEditRequestDetails
+	_ = db.Where("request_id = ?", req.RequestID).First(&updatedDetail).Error
+	if updatedDetail.Status != "approved" || updatedDetail.ReviewComment != "Test comment" {
+		t.Fatalf("unexpected detail review fields: %#v", updatedDetail)
 	}
 }
 
