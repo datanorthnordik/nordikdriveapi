@@ -1110,15 +1110,31 @@ func (fs *FileService) ReviewEditRequest(
 	}
 
 	return fs.DB.Transaction(func(tx *gorm.DB) error {
-		// 0) Update changed details (new_value) coming from UI
+		hasDetailStatuses := false
+
+		// 0) Update changed details coming from UI.
 		for _, upd := range updates {
 			if upd.ID == 0 {
 				return fmt.Errorf("update id is required")
 			}
 
+			detailUpdates := map[string]interface{}{
+				"new_value": upd.NewValue,
+			}
+
+			detailStatus := strings.ToLower(strings.TrimSpace(upd.Status))
+			if detailStatus != "" {
+				if detailStatus != "pending" && detailStatus != "approved" && detailStatus != "rejected" {
+					return fmt.Errorf("detail status must be pending, approved, or rejected")
+				}
+				hasDetailStatuses = true
+				detailUpdates["status"] = detailStatus
+				detailUpdates["reviewer_comment"] = strings.TrimSpace(upd.ReviewComment)
+			}
+
 			if err := tx.Model(&FileEditRequestDetails{}).
 				Where("id = ? AND request_id = ?", upd.ID, requestID).
-				Update("new_value", upd.NewValue).Error; err != nil {
+				Updates(detailUpdates).Error; err != nil {
 				return err
 			}
 		}
@@ -1129,7 +1145,18 @@ func (fs *FileService) ReviewEditRequest(
 			return err
 		}
 
-		// 2) Fetch all details for this request
+		if !hasDetailStatuses {
+			if err := tx.Model(&FileEditRequestDetails{}).
+				Where("request_id = ?", requestID).
+				Updates(map[string]interface{}{
+					"status":           status,
+					"reviewer_comment": reviewComment,
+				}).Error; err != nil {
+				return err
+			}
+		}
+
+		// 2) Fetch all details for this request after review fields are applied.
 		var allDetails []FileEditRequestDetails
 		if err := tx.Where("request_id = ?", requestID).Find(&allDetails).Error; err != nil {
 			return err
@@ -1141,12 +1168,22 @@ func (fs *FileService) ReviewEditRequest(
 				return fmt.Errorf("no request details found for request_id %d", requestID)
 			}
 
+			approvedDetails := make([]FileEditRequestDetails, 0, len(allDetails))
+			for _, detail := range allDetails {
+				if strings.ToLower(strings.TrimSpace(detail.Status)) == "approved" {
+					approvedDetails = append(approvedDetails, detail)
+				}
+			}
+			if len(approvedDetails) == 0 {
+				return fmt.Errorf("no approved request details found for request_id %d", requestID)
+			}
+
 			// 3) If is_edited=false => create new FileData row FIRST, use its ID as rowID
 			var finalRowID uint
 			if !req.IsEdited {
 				// Build row_data JSON from details (field -> new_value)
-				row := make(map[string]string, len(allDetails))
-				for _, d := range allDetails {
+				row := make(map[string]string, len(approvedDetails))
+				for _, d := range approvedDetails {
 					row[d.FieldName] = d.NewValue
 				}
 
@@ -1156,7 +1193,7 @@ func (fs *FileService) ReviewEditRequest(
 				}
 
 				// Create file_data row (row_id will be new FileData.ID)
-				fileID := allDetails[0].FileID
+				fileID := approvedDetails[0].FileID
 
 				fd := FileData{
 					FileID:     fileID,
@@ -1225,7 +1262,7 @@ func (fs *FileService) ReviewEditRequest(
 				}
 			} else {
 				// 4) Existing edit: update the existing file_data row
-				for _, det := range allDetails {
+				for _, det := range approvedDetails {
 					var fileData FileData
 					err := tx.Where("file_id = ? AND id = ?", det.FileID, det.RowID).First(&fileData).Error
 					if err != nil {
@@ -1263,15 +1300,6 @@ func (fs *FileService) ReviewEditRequest(
 			Updates(map[string]interface{}{
 				"status":           status,
 				"reviewed_by":      reviewedByID,
-				"reviewer_comment": reviewComment,
-			}).Error; err != nil {
-			return err
-		}
-
-		if err := tx.Model(&FileEditRequestDetails{}).
-			Where("request_id = ?", requestID).
-			Updates(map[string]interface{}{
-				"status":           status,
 				"reviewer_comment": reviewComment,
 			}).Error; err != nil {
 			return err

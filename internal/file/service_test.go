@@ -1675,6 +1675,87 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 	}
 }
 
+func TestFileService_ReviewEditRequest_UpdatesOnlyApprovedDetails(t *testing.T) {
+	db := newTestDB(t)
+	svc := &FileService{DB: db, Mailer: mailer.NewService("test@example.com", "key", "domain", "http://localhost")}
+
+	req := FileEditRequest{UserID: 1, Status: "pending", IsEdited: true, RowID: 123, FileID: 10}
+	if err := db.Create(&req).Error; err != nil {
+		t.Fatalf("seed request: %v", err)
+	}
+
+	approvedDetail := FileEditRequestDetails{
+		RequestID: req.RequestID,
+		FileID:    10,
+		Filename:  "f",
+		RowID:     123,
+		FieldName: "A",
+		OldValue:  "old-a",
+		NewValue:  "new-a",
+	}
+	rejectedDetail := FileEditRequestDetails{
+		RequestID: req.RequestID,
+		FileID:    10,
+		Filename:  "f",
+		RowID:     123,
+		FieldName: "B",
+		OldValue:  "old-b",
+		NewValue:  "new-b",
+	}
+	if err := db.Create(&approvedDetail).Error; err != nil {
+		t.Fatalf("seed approved detail: %v", err)
+	}
+	if err := db.Create(&rejectedDetail).Error; err != nil {
+		t.Fatalf("seed rejected detail: %v", err)
+	}
+	if err := db.Create(&FileData{
+		ID:      123,
+		FileID:  10,
+		RowData: datatypes.JSON([]byte(`{"A":"old-a","B":"old-b"}`)),
+		Version: 1,
+	}).Error; err != nil {
+		t.Fatalf("seed file data: %v", err)
+	}
+
+	err := svc.ReviewEditRequest(req.RequestID, "approved", "request reviewed", []FileEditRequestDetails{
+		{ID: approvedDetail.ID, NewValue: "approved-a", Status: "approved", ReviewComment: "ok"},
+		{ID: rejectedDetail.ID, NewValue: "rejected-b", Status: "rejected", ReviewComment: "do not use"},
+	}, 9)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+
+	var fileData FileData
+	if err := db.Where("id = ?", 123).First(&fileData).Error; err != nil {
+		t.Fatalf("load file data: %v", err)
+	}
+
+	var row map[string]string
+	if err := json.Unmarshal(fileData.RowData, &row); err != nil {
+		t.Fatalf("unmarshal row_data: %v", err)
+	}
+	if row["A"] != "approved-a" {
+		t.Fatalf("expected approved field to update, got row=%#v", row)
+	}
+	if row["B"] != "old-b" {
+		t.Fatalf("expected rejected field to stay unchanged, got row=%#v", row)
+	}
+
+	var details []FileEditRequestDetails
+	if err := db.Where("request_id = ?", req.RequestID).Order("id ASC").Find(&details).Error; err != nil {
+		t.Fatalf("load details: %v", err)
+	}
+	if len(details) != 2 {
+		t.Fatalf("expected 2 details, got %#v", details)
+	}
+	if details[0].Status != "approved" || details[0].ReviewComment != "ok" {
+		t.Fatalf("unexpected approved detail review fields: %#v", details[0])
+	}
+	if details[1].Status != "rejected" || details[1].ReviewComment != "do not use" {
+		t.Fatalf("unexpected rejected detail review fields: %#v", details[1])
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Photos/docs queries + ReviewPhotos
 // -----------------------------------------------------------------------------
