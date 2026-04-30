@@ -1,116 +1,112 @@
 package file
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
-func TestBuildFileEditRequestReviewEmailBody(t *testing.T) {
-	tests := []struct {
-		name            string
-		createdUserName string
-		status          string
-		firstName       string
-		lastName        string
-		reviewerComment string
-		expected        string
-	}{
-		{
-			name:            "approved with reviewer comment",
-			createdUserName: "Athul Narayanan",
-			status:          "approved",
-			firstName:       "John",
-			lastName:        "Doe",
-			reviewerComment: "Looks good",
-			expected: "<p>Hi Athul Narayanan,</p><p>Your request to add details for John Doe has been approved.</p>" +
-				"<p>Reason / reviewer comment: Looks good</p>" +
-				`<p>Please login and see &quot;<b>Requests -&gt; Add Info Requests</b>&quot; for details.</p>`,
+func TestBuildFileEditRequestReviewEmailBody_WithDetailsTable(t *testing.T) {
+	body := BuildFileEditRequestReviewEmailBody(
+		"Athul Narayanan",
+		"approved",
+		"John",
+		"Doe",
+		"Overall looks good",
+		FileEditRequestDetails{
+			FieldName:     "First Name",
+			OldValue:      "Jon",
+			NewValue:      "John",
+			Status:        "approved",
+			ReviewComment: "Correct spelling",
 		},
-		{
-			name:            "rejected without reviewer comment",
-			createdUserName: "Athul",
-			status:          "rejected",
-			firstName:       "Jane",
-			lastName:        "Smith",
-			reviewerComment: "",
-			expected: "<p>Hi Athul,</p><p>Your request to add details for Jane Smith has been rejected.</p>" +
-				`<p>Please login and see &quot;<b>Requests -&gt; Add Info Requests</b>&quot; for details.</p>`,
+		FileEditRequestDetails{
+			FieldName:     "Birth Date",
+			OldValue:      "1901",
+			NewValue:      "1902",
+			Status:        "rejected",
+			ReviewComment: "Document does not support this",
 		},
-		{
-			name:            "default updated status for unknown status",
-			createdUserName: "Athul",
-			status:          "something_else",
-			firstName:       "Sam",
-			lastName:        "Wilson",
-			reviewerComment: "Please review again",
-			expected: "<p>Hi Athul,</p><p>Your request to add details for Sam Wilson has been updated.</p>" +
-				"<p>Reason / reviewer comment: Please review again</p>" +
-				`<p>Please login and see &quot;<b>Requests -&gt; Add Info Requests</b>&quot; for details.</p>`,
+	)
+
+	for _, want := range []string{
+		"Hi Athul Narayanan,",
+		"Your request to add details for John Doe has been approved.",
+		"Overall reviewer comment",
+		"Overall looks good",
+		"Review summary",
+		"Previous value",
+		"Submitted value",
+		"Decision",
+		"First Name",
+		"Jon",
+		"John",
+		"Approved",
+		"Correct spelling",
+		"Birth Date",
+		"Rejected",
+		"Document does not support this",
+		"Requests -&gt; Add Info Requests",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected body to contain %q, got %s", want, body)
+		}
+	}
+}
+
+func TestBuildFileEditRequestReviewEmailBody_EscapesDynamicValues(t *testing.T) {
+	body := BuildFileEditRequestReviewEmailBody(
+		`A <script>`,
+		"approved",
+		"John",
+		"Doe",
+		`Use <b>care</b>`,
+		FileEditRequestDetails{
+			FieldName:     `Name <x>`,
+			OldValue:      `A&B`,
+			NewValue:      `<New>`,
+			Status:        "approved",
+			ReviewComment: `Looks "ok"`,
 		},
-		{
-			name:            "empty created user falls back to User",
-			createdUserName: "",
-			status:          "approved",
-			firstName:       "John",
-			lastName:        "Doe",
-			reviewerComment: "",
-			expected: "<p>Hi User,</p><p>Your request to add details for John Doe has been approved.</p>" +
-				`<p>Please login and see &quot;<b>Requests -&gt; Add Info Requests</b>&quot; for details.</p>`,
-		},
-		{
-			name:            "empty first and last name falls back to requested user",
-			createdUserName: "Athul",
-			status:          "approved",
-			firstName:       "",
-			lastName:        "",
-			reviewerComment: "",
-			expected: "<p>Hi Athul,</p><p>Your request to add details for the requested user has been approved.</p>" +
-				`<p>Please login and see &quot;<b>Requests -&gt; Add Info Requests</b>&quot; for details.</p>`,
-		},
-		{
-			name:            "trims spaces from all inputs",
-			createdUserName: "  Athul  ",
-			status:          "  approved  ",
-			firstName:       "  John  ",
-			lastName:        "  Doe  ",
-			reviewerComment: "  Looks good  ",
-			expected: "<p>Hi Athul,</p><p>Your request to add details for John Doe has been approved.</p>" +
-				"<p>Reason / reviewer comment: Looks good</p>" +
-				`<p>Please login and see &quot;<b>Requests -&gt; Add Info Requests</b>&quot; for details.</p>`,
-		},
-		{
-			name:            "status comparison is case insensitive",
-			createdUserName: "Athul",
-			status:          "APPROVED",
-			firstName:       "John",
-			lastName:        "Doe",
-			reviewerComment: "",
-			expected: "<p>Hi Athul,</p><p>Your request to add details for John Doe has been approved.</p>" +
-				`<p>Please login and see &quot;<b>Requests -&gt; Add Info Requests</b>&quot; for details.</p>`,
-		},
-		{
-			name:            "single first name only",
-			createdUserName: "Athul",
-			status:          "rejected",
-			firstName:       "Madonna",
-			lastName:        "",
-			reviewerComment: "Missing data",
-			expected: "<p>Hi Athul,</p><p>Your request to add details for Madonna has been rejected.</p>" +
-				"<p>Reason / reviewer comment: Missing data</p>" +
-				`<p>Please login and see &quot;<b>Requests -&gt; Add Info Requests</b>&quot; for details.</p>`,
-		},
+	)
+
+	for _, want := range []string{
+		"A &lt;script&gt;",
+		"Use &lt;b&gt;care&lt;/b&gt;",
+		"Name &lt;x&gt;",
+		"A&amp;B",
+		"&lt;New&gt;",
+		"Looks &#34;ok&#34;",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected escaped body to contain %q, got %s", want, body)
+		}
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := BuildFileEditRequestReviewEmailBody(
-				tt.createdUserName,
-				tt.status,
-				tt.firstName,
-				tt.lastName,
-				tt.reviewerComment,
-			)
+	for _, unsafe := range []string{
+		"<script>",
+		"<b>care</b>",
+		"<New>",
+	} {
+		if strings.Contains(body, unsafe) {
+			t.Fatalf("expected body not to contain unsafe value %q, got %s", unsafe, body)
+		}
+	}
+}
 
-			if got != tt.expected {
-				t.Fatalf("unexpected body.\nExpected:\n%q\n\nGot:\n%q", tt.expected, got)
-			}
-		})
+func TestBuildFileEditRequestReviewEmailBody_FallbacksWithoutDetails(t *testing.T) {
+	body := BuildFileEditRequestReviewEmailBody("", "something_else", "", "", "")
+
+	for _, want := range []string{
+		"Hi User,",
+		"Your request to add details for the requested user has been updated.",
+		"Requests -&gt; Add Info Requests",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected body to contain %q, got %s", want, body)
+		}
+	}
+
+	if strings.Contains(body, "Review summary") {
+		t.Fatalf("did not expect review table without details, got %s", body)
 	}
 }

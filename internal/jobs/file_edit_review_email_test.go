@@ -6,6 +6,7 @@ import (
 	"log"
 	"regexp"
 	"testing"
+	"time"
 
 	filehelper "nordik-drive-api/internal/file"
 	"nordik-drive-api/internal/mailer"
@@ -75,6 +76,50 @@ func fileEditSelectQueryRegex() string {
 
 func fileEditUpdateQueryRegex() string {
 	return regexp.QuoteMeta(`UPDATE "file_edit_request" SET "review_email_trigger_success"=$1 WHERE request_id = $2`)
+}
+
+func fileEditDetailsSelectQueryRegex() string {
+	return `(?s)SELECT\s+id,\s+request_id,\s+file_id,\s+filename,\s+row_id,\s+field_name,\s+COALESCE\(old_value, ''\) AS old_value,\s+COALESCE\(new_value, ''\) AS new_value,\s+COALESCE\(status, 'pending'\) AS status,\s+COALESCE\(reviewer_comment, ''\) AS reviewer_comment,\s+created_at\s+FROM "?file_edit_request_details"? WHERE request_id = \$1 ORDER BY id ASC`
+}
+
+func fileEditDetailRows(requestID uint) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{
+		"id",
+		"request_id",
+		"file_id",
+		"filename",
+		"row_id",
+		"field_name",
+		"old_value",
+		"new_value",
+		"status",
+		"reviewer_comment",
+		"created_at",
+	}).AddRow(
+		uint(1),
+		requestID,
+		uint(10),
+		"students.xlsx",
+		5,
+		"First Name",
+		"Jon",
+		"John",
+		"approved",
+		"Correct spelling",
+		time.Now(),
+	).AddRow(
+		uint(2),
+		requestID,
+		uint(10),
+		"students.xlsx",
+		5,
+		"Birth Date",
+		"1901",
+		"1902",
+		"rejected",
+		"Document does not support this",
+		time.Now(),
+	)
 }
 
 func TestNewFileEditReviewEmailJob(t *testing.T) {
@@ -193,6 +238,11 @@ func TestFileEditReviewEmailJob_Run_SendFailure_DoesNotUpdateFlag(t *testing.T) 
 		WithArgs("pending", false, 100).
 		WillReturnRows(rows)
 
+	mock.
+		ExpectQuery(fileEditDetailsSelectQueryRegex()).
+		WithArgs(uint(102)).
+		WillReturnRows(fileEditDetailRows(102))
+
 	job := &FileEditReviewEmailJob{
 		DB:        db,
 		Mailer:    mailerSvc,
@@ -222,6 +272,30 @@ func TestFileEditReviewEmailJob_Run_SendFailure_DoesNotUpdateFlag(t *testing.T) 
 		"John",
 		"Doe",
 		"Looks good",
+		filehelper.FileEditRequestDetails{
+			ID:            1,
+			RequestID:     102,
+			FileID:        10,
+			Filename:      "students.xlsx",
+			RowID:         5,
+			FieldName:     "First Name",
+			OldValue:      "Jon",
+			NewValue:      "John",
+			Status:        "approved",
+			ReviewComment: "Correct spelling",
+		},
+		filehelper.FileEditRequestDetails{
+			ID:            2,
+			RequestID:     102,
+			FileID:        10,
+			Filename:      "students.xlsx",
+			RowID:         5,
+			FieldName:     "Birth Date",
+			OldValue:      "1901",
+			NewValue:      "1902",
+			Status:        "rejected",
+			ReviewComment: "Document does not support this",
+		},
 	)
 	if call.Body != expectedBody {
 		t.Fatalf("unexpected body\nexpected: %q\ngot:      %q", expectedBody, call.Body)
@@ -255,6 +329,11 @@ func TestFileEditReviewEmailJob_Run_Success_UpdatesFlag(t *testing.T) {
 		WillReturnRows(rows)
 
 	mock.
+		ExpectQuery(fileEditDetailsSelectQueryRegex()).
+		WithArgs(uint(103)).
+		WillReturnRows(fileEditDetailRows(103))
+
+	mock.
 		ExpectExec(fileEditUpdateQueryRegex()).
 		WithArgs(true, 103).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -285,6 +364,30 @@ func TestFileEditReviewEmailJob_Run_Success_UpdatesFlag(t *testing.T) {
 		"John",
 		"Doe",
 		"Looks good",
+		filehelper.FileEditRequestDetails{
+			ID:            1,
+			RequestID:     103,
+			FileID:        10,
+			Filename:      "students.xlsx",
+			RowID:         5,
+			FieldName:     "First Name",
+			OldValue:      "Jon",
+			NewValue:      "John",
+			Status:        "approved",
+			ReviewComment: "Correct spelling",
+		},
+		filehelper.FileEditRequestDetails{
+			ID:            2,
+			RequestID:     103,
+			FileID:        10,
+			Filename:      "students.xlsx",
+			RowID:         5,
+			FieldName:     "Birth Date",
+			OldValue:      "1901",
+			NewValue:      "1902",
+			Status:        "rejected",
+			ReviewComment: "Document does not support this",
+		},
 	)
 	if call.Body != expectedBody {
 		t.Fatalf("unexpected body\nexpected: %q\ngot:      %q", expectedBody, call.Body)
@@ -318,9 +421,19 @@ func TestFileEditReviewEmailJob_Run_UpdateFlagFailure_Continues(t *testing.T) {
 		WillReturnRows(rows)
 
 	mock.
+		ExpectQuery(fileEditDetailsSelectQueryRegex()).
+		WithArgs(uint(104)).
+		WillReturnRows(fileEditDetailRows(104))
+
+	mock.
 		ExpectExec(fileEditUpdateQueryRegex()).
 		WithArgs(true, 104).
 		WillReturnError(errors.New("update failed"))
+
+	mock.
+		ExpectQuery(fileEditDetailsSelectQueryRegex()).
+		WithArgs(uint(105)).
+		WillReturnRows(fileEditDetailRows(105))
 
 	mock.
 		ExpectExec(fileEditUpdateQueryRegex()).
@@ -368,6 +481,11 @@ func TestFileEditReviewEmailJob_Run_BatchSizeLimit(t *testing.T) {
 		ExpectQuery(fileEditSelectQueryRegex()).
 		WithArgs("pending", false, 1).
 		WillReturnRows(rows)
+
+	mock.
+		ExpectQuery(fileEditDetailsSelectQueryRegex()).
+		WithArgs(uint(201)).
+		WillReturnRows(fileEditDetailRows(201))
 
 	mock.
 		ExpectExec(fileEditUpdateQueryRegex()).
