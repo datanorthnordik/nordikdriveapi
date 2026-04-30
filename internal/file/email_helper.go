@@ -7,8 +7,9 @@ import (
 )
 
 const (
-	ReviewStatusApproved = "approved"
-	ReviewStatusRejected = "rejected"
+	ReviewStatusApproved  = "approved"
+	ReviewStatusRejected  = "rejected"
+	ReviewStatusCompleted = "completed"
 )
 
 func BuildFileEditRequestReviewEmailBody(
@@ -36,14 +37,9 @@ func BuildFileEditRequestReviewEmailBody(
 
 	var headline string
 	switch status {
-	case ReviewStatusApproved:
+	case ReviewStatusCompleted:
 		headline = fmt.Sprintf(
-			"Your request to add details for %s has been approved.",
-			fullName,
-		)
-	case ReviewStatusRejected:
-		headline = fmt.Sprintf(
-			"Your request to add details for %s has been rejected.",
+			"Your request to add details for %s has been reviewed.",
 			fullName,
 		)
 	default:

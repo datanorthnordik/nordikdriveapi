@@ -8,7 +8,7 @@ import (
 func TestBuildFileEditRequestReviewEmailBody_WithDetailsTable(t *testing.T) {
 	body := BuildFileEditRequestReviewEmailBody(
 		"Athul Narayanan",
-		"approved",
+		"completed",
 		"John",
 		"Doe",
 		"Overall looks good",
@@ -30,7 +30,7 @@ func TestBuildFileEditRequestReviewEmailBody_WithDetailsTable(t *testing.T) {
 
 	for _, want := range []string{
 		"Hi Athul Narayanan,",
-		"Your request to add details for John Doe has been approved.",
+		"Your request to add details for John Doe has been reviewed.",
 		"Overall reviewer comment",
 		"Overall looks good",
 		"Review summary",
@@ -56,7 +56,7 @@ func TestBuildFileEditRequestReviewEmailBody_WithDetailsTable(t *testing.T) {
 func TestBuildFileEditRequestReviewEmailBody_EscapesDynamicValues(t *testing.T) {
 	body := BuildFileEditRequestReviewEmailBody(
 		`A <script>`,
-		"approved",
+		"completed",
 		"John",
 		"Doe",
 		`Use <b>care</b>`,

@@ -928,10 +928,15 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 	return &request, nil
 }
 
-func parseStatuses(csv string) []string {
+var validFileEditRequestStatuses = map[string]struct{}{
+	"pending":   {},
+	"completed": {},
+}
+
+func parseStatuses(csv string) ([]string, error) {
 	csv = strings.TrimSpace(csv)
 	if csv == "" {
-		return nil
+		return nil, nil
 	}
 
 	parts := strings.Split(csv, ",")
@@ -943,15 +948,18 @@ func parseStatuses(csv string) []string {
 		if s == "" {
 			continue
 		}
+		if _, ok := validFileEditRequestStatuses[s]; !ok {
+			return nil, fmt.Errorf("status must be pending or completed")
+		}
 		if !seen[s] {
 			seen[s] = true
 			out = append(out, s)
 		}
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, nil
 	}
-	return out
+	return out, nil
 }
 
 func (fs *FileService) GetEditRequests(statusCSV *string, userID *uint) ([]FileEditRequestWithUser, error) {
@@ -992,16 +1000,19 @@ func (fs *FileService) GetEditRequests(statusCSV *string, userID *uint) ([]FileE
 		Joins("JOIN users ON users.id = file_edit_request.user_id").
 		Order("file_edit_request.created_at DESC")
 
-	// ✅ Only if BOTH provided: filter by status IN (...) + user_id
-	if statusCSV != nil && strings.TrimSpace(*statusCSV) != "" && userID != nil && *userID > 0 {
-		statuses := parseStatuses(*statusCSV)
-		if len(statuses) > 0 {
-			q = q.Where("file_edit_request.user_id = ?", *userID).
-				Where("file_edit_request.status IN ?", statuses)
-		} else {
-			// If statusCSV was garbage like ",,,", just fall back to pending
-			q = q.Where("file_edit_request.status = ?", "pending")
+	var statuses []string
+	if statusCSV != nil && strings.TrimSpace(*statusCSV) != "" {
+		parsedStatuses, err := parseStatuses(*statusCSV)
+		if err != nil {
+			return nil, err
 		}
+		statuses = parsedStatuses
+	}
+
+	// ✅ Only if BOTH provided: filter by status IN (...) + user_id
+	if len(statuses) > 0 && userID != nil && *userID > 0 {
+		q = q.Where("file_edit_request.user_id = ?", *userID).
+			Where("file_edit_request.status IN ?", statuses)
 	} else {
 		// ✅ Default behavior: pending only (exactly like today)
 		q = q.Where("file_edit_request.status = ?", "pending")
@@ -1113,13 +1124,14 @@ func (fs *FileService) ReviewEditRequest(
 ) error {
 	status = strings.ToLower(strings.TrimSpace(status))
 	reviewComment = strings.TrimSpace(reviewComment)
+	defaultDetailStatus := ReviewStatusApproved
 
 	if requestID == 0 {
 		return fmt.Errorf("request_id is required")
 	}
 
-	if status != "approved" && status != "rejected" {
-		return fmt.Errorf("status must be either approved or rejected")
+	if status != "completed" {
+		return fmt.Errorf("status must be completed")
 	}
 
 	var reviewedRequest *FileEditRequest
@@ -1164,7 +1176,7 @@ func (fs *FileService) ReviewEditRequest(
 			if err := tx.Model(&FileEditRequestDetails{}).
 				Where("request_id = ?", requestID).
 				Updates(map[string]interface{}{
-					"status":           status,
+					"status":           defaultDetailStatus,
 					"reviewer_comment": reviewComment,
 				}).Error; err != nil {
 				return err
@@ -1177,22 +1189,15 @@ func (fs *FileService) ReviewEditRequest(
 			return err
 		}
 
-		// Only apply file changes if approved
-		if status == "approved" {
-			if len(allDetails) == 0 {
-				return fmt.Errorf("no request details found for request_id %d", requestID)
+		approvedDetails := make([]FileEditRequestDetails, 0, len(allDetails))
+		for _, detail := range allDetails {
+			if strings.ToLower(strings.TrimSpace(detail.Status)) == ReviewStatusApproved {
+				approvedDetails = append(approvedDetails, detail)
 			}
+		}
 
-			approvedDetails := make([]FileEditRequestDetails, 0, len(allDetails))
-			for _, detail := range allDetails {
-				if strings.ToLower(strings.TrimSpace(detail.Status)) == "approved" {
-					approvedDetails = append(approvedDetails, detail)
-				}
-			}
-			if len(approvedDetails) == 0 {
-				return fmt.Errorf("no approved request details found for request_id %d", requestID)
-			}
-
+		// Only approved detail rows are applied to file_data.
+		if len(approvedDetails) > 0 {
 			// 3) If is_edited=false => create new FileData row FIRST, use its ID as rowID
 			var finalRowID uint
 			if !req.IsEdited {

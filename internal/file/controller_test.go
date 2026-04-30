@@ -1125,7 +1125,7 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 		}
 	})
 
-	// ---------------- CreateEditRequest / GetEditRequests / ApproveEditRequest ----------------
+	// ---------------- CreateEditRequest / GetEditRequests / ReviewEditRequest ----------------
 
 	t.Run("CreateEditRequest - 400 bind error", func(t *testing.T) {
 		svc := &fakeFileService{}
@@ -1235,7 +1235,7 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 		fc := &FileController{FileService: svc, LogService: logSvc}
 		r := setupRouterForController(fc)
 
-		req := newJSONReq(http.MethodGet, "/api/file/edit/request?status=approved&user_id=1", nil, authHeaders)
+		req := newJSONReq(http.MethodGet, "/api/file/edit/request?status=completed&user_id=1", nil, authHeaders)
 		w := doReq(r, req)
 		assertStatus(t, w, http.StatusBadRequest)
 		requireContains(t, w.Body.String(), "get edits failed")
@@ -1247,12 +1247,12 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 		fc := &FileController{FileService: svc, LogService: logSvc}
 		r := setupRouterForController(fc)
 
-		req := newJSONReq(http.MethodGet, "/api/file/edit/request?status=approved,rejected&user_id=1", nil, authHeaders)
+		req := newJSONReq(http.MethodGet, "/api/file/edit/request?status=completed,pending&user_id=1", nil, authHeaders)
 		w := doReq(r, req)
 		assertStatus(t, w, http.StatusOK)
 	})
 
-	t.Run("ApproveEditRequest - 400 invalid input (bad json)", func(t *testing.T) {
+	t.Run("ReviewEditRequest - 400 invalid input (bad json)", func(t *testing.T) {
 		svc := &fakeFileService{}
 		logSvc := &fakeLogService{}
 		fc := &FileController{FileService: svc, LogService: logSvc}
@@ -1277,7 +1277,7 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 
 		body := map[string]any{
 			"request_id":       5,
-			"status":           "approved",
+			"status":           "completed",
 			"reviewer_comment": "looks good",
 			"updates":          []any{},
 		}
@@ -1289,7 +1289,7 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 		requireContains(t, w.Body.String(), "review failed")
 	})
 
-	t.Run("ReviewEditRequest - 200 approved", func(t *testing.T) {
+	t.Run("ReviewEditRequest - 200 completed", func(t *testing.T) {
 		svc := &fakeFileService{}
 		logSvc := &fakeLogService{}
 		fc := &FileController{FileService: svc, LogService: logSvc}
@@ -1297,8 +1297,8 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 
 		body := map[string]any{
 			"request_id":       99,
-			"status":           "approved",
-			"reviewer_comment": "approved",
+			"status":           "completed",
+			"reviewer_comment": "completed",
 			"updates":          []any{},
 		}
 
@@ -1306,7 +1306,7 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 		w := doReq(r, req)
 
 		assertStatus(t, w, http.StatusOK)
-		requireContains(t, w.Body.String(), "Request approved and file updated")
+		requireContains(t, w.Body.String(), "Request completed successfully")
 
 		if svc.Called["ReviewEditRequest"] != 1 {
 			t.Fatalf("expected ReviewEditRequest called once, got %+v", svc.Called)
