@@ -188,7 +188,7 @@ func TestFileEditReviewEmailJob_Run_EmptyEmailSkipped(t *testing.T) {
 		"email",
 		"created_user_name",
 	}).AddRow(
-		101, 1, "approved", "John", "Doe", "Looks good", "", "Athul Narayanan",
+		101, 1, "completed", "John", "Doe", "Looks good", "", "Athul Narayanan",
 	)
 
 	mock.
@@ -230,7 +230,7 @@ func TestFileEditReviewEmailJob_Run_SendFailure_DoesNotUpdateFlag(t *testing.T) 
 		"email",
 		"created_user_name",
 	}).AddRow(
-		102, 1, "approved", "John", "Doe", "Looks good", "athul@example.com", "Athul Narayanan",
+		102, 1, "completed", "John", "Doe", "Looks good", "athul@example.com", "Athul Narayanan",
 	)
 
 	mock.
@@ -268,7 +268,7 @@ func TestFileEditReviewEmailJob_Run_SendFailure_DoesNotUpdateFlag(t *testing.T) 
 
 	expectedBody := filehelper.BuildFileEditRequestReviewEmailBody(
 		"Athul Narayanan",
-		"approved",
+		"completed",
 		"John",
 		"Doe",
 		"Looks good",
@@ -320,7 +320,7 @@ func TestFileEditReviewEmailJob_Run_Success_UpdatesFlag(t *testing.T) {
 		"email",
 		"created_user_name",
 	}).AddRow(
-		103, 1, "approved", "John", "Doe", "Looks good", "  athul@example.com  ", "Athul Narayanan",
+		103, 1, "completed", "John", "Doe", "Looks good", "  athul@example.com  ", "Athul Narayanan",
 	)
 
 	mock.
@@ -360,7 +360,7 @@ func TestFileEditReviewEmailJob_Run_Success_UpdatesFlag(t *testing.T) {
 
 	expectedBody := filehelper.BuildFileEditRequestReviewEmailBody(
 		"Athul Narayanan",
-		"approved",
+		"completed",
 		"John",
 		"Doe",
 		"Looks good",
@@ -412,8 +412,8 @@ func TestFileEditReviewEmailJob_Run_UpdateFlagFailure_Continues(t *testing.T) {
 		"email",
 		"created_user_name",
 	}).
-		AddRow(104, 1, "approved", "John", "Doe", "First", "one@example.com", "Athul One").
-		AddRow(105, 2, "rejected", "Jane", "Smith", "Second", "two@example.com", "Athul Two")
+		AddRow(104, 1, "completed", "John", "Doe", "First", "one@example.com", "Athul One").
+		AddRow(105, 2, "completed", "Jane", "Smith", "Second", "two@example.com", "Athul Two")
 
 	mock.
 		ExpectQuery(fileEditSelectQueryRegex()).
@@ -474,7 +474,7 @@ func TestFileEditReviewEmailJob_Run_BatchSizeLimit(t *testing.T) {
 		"email",
 		"created_user_name",
 	}).AddRow(
-		201, 1, "approved", "John", "Doe", "First", "one@example.com", "Athul One",
+		201, 1, "completed", "John", "Doe", "First", "one@example.com", "Athul One",
 	)
 
 	mock.

@@ -398,15 +398,21 @@ func TestExcelImportShortDatePattern_DefaultAndEnvOverride(t *testing.T) {
 }
 
 func TestParseStatuses_AllBranches(t *testing.T) {
-	if got := parseStatuses("   "); got != nil {
+	if got, err := parseStatuses("   "); err != nil || got != nil {
 		t.Fatalf("expected nil, got %#v", got)
 	}
-	got := parseStatuses(" Pending, approved, pending,  ,REJECTED ")
-	if len(got) != 3 || got[0] != "pending" || got[1] != "approved" || got[2] != "rejected" {
+	got, err := parseStatuses(" Pending, completed, pending,  ,COMPLETED ")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 || got[0] != "pending" || got[1] != "completed" {
 		t.Fatalf("unexpected: %#v", got)
 	}
-	if got := parseStatuses(",,,   ,"); got != nil {
+	if got, err := parseStatuses(",,,   ,"); err != nil || got != nil {
 		t.Fatalf("expected nil for garbage, got %#v", got)
+	}
+	if _, err := parseStatuses("approved"); err == nil || err.Error() != "status must be pending or completed" {
+		t.Fatalf("expected invalid parent status error, got %v", err)
 	}
 }
 
@@ -1437,9 +1443,9 @@ func TestFileService_GetEditRequests_AllBranches(t *testing.T) {
 	u := UserForTest{Email: "u@b.com", Role: "User", FirstName: "U", LastName: "L"}
 	_ = db.Create(&u).Error
 
-	// seed pending + approved
+	// seed pending + completed
 	r1 := FileEditRequest{UserID: uint(u.ID), Status: "pending", CreatedAt: time.Now(), FirstName: "E", LastName: "F", RowID: 0, IsEdited: true, Consent: true, ArchiveConsent: true, FileID: 1}
-	r2 := FileEditRequest{UserID: uint(u.ID), Status: "approved", CreatedAt: time.Now().Add(-time.Hour), FirstName: "E2", LastName: "F2", RowID: 0, IsEdited: true, Consent: true, ArchiveConsent: false, FileID: 1, ReviewComment: "approved after review"}
+	r2 := FileEditRequest{UserID: uint(u.ID), Status: "completed", CreatedAt: time.Now().Add(-time.Hour), FirstName: "E2", LastName: "F2", RowID: 0, IsEdited: true, Consent: true, ArchiveConsent: false, FileID: 1, ReviewComment: "completed after review"}
 	_ = db.Create(&r1).Error
 	_ = db.Create(&r2).Error
 	_ = db.Exec("UPDATE file_edit_request SET reviewer_comment = NULL WHERE request_id = ?", r1.RequestID).Error
@@ -1460,7 +1466,7 @@ func TestFileService_GetEditRequests_AllBranches(t *testing.T) {
 	}
 
 	// both filters => IN (...)
-	statusCSV := "approved, pending"
+	statusCSV := "completed, pending"
 	uid := uint(u.ID)
 	out, err = svc.GetEditRequests(&statusCSV, &uid)
 	if err != nil || len(out) != 2 {
@@ -1469,11 +1475,11 @@ func TestFileService_GetEditRequests_AllBranches(t *testing.T) {
 	if out[0].Status != "pending" || out[0].ReviewComment != "" {
 		t.Fatalf("expected pending request first with empty review comment, got %#v", out[0])
 	}
-	if out[1].Status != "approved" || out[1].ReviewComment != "approved after review" {
-		t.Fatalf("expected approved request to include review comment, got %#v", out[1])
+	if out[1].Status != "completed" || out[1].ReviewComment != "completed after review" {
+		t.Fatalf("expected completed request to include review comment, got %#v", out[1])
 	}
 	if out[1].ArchiveConsent {
-		t.Fatalf("expected approved request archive consent to be false")
+		t.Fatalf("expected completed request archive consent to be false")
 	}
 
 	// garbage statusCSV => fallback pending
@@ -1481,6 +1487,11 @@ func TestFileService_GetEditRequests_AllBranches(t *testing.T) {
 	out, err = svc.GetEditRequests(&garb, &uid)
 	if err != nil || len(out) != 1 || out[0].Status != "pending" {
 		t.Fatalf("expected pending fallback, got %#v err=%v", out, err)
+	}
+
+	invalidStatus := "approved"
+	if _, err = svc.GetEditRequests(&invalidStatus, &uid); err == nil || err.Error() != "status must be pending or completed" {
+		t.Fatalf("expected invalid parent status error, got %v", err)
 	}
 
 	// scan error
@@ -1504,10 +1515,10 @@ func TestFileService_GetEditRequests_AllBranches(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// ApproveEditRequest (edited + not edited)
+// ReviewEditRequest (edited + not edited)
 // -----------------------------------------------------------------------------
 
-func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
+func TestFileService_ReviewEditRequest_AllBranches(t *testing.T) {
 	db := newTestDB(t)
 	svc := &FileService{DB: db, Mailer: mailer.NewService("test@example.com", "key", "domain", "http://localhost")}
 
@@ -1518,9 +1529,16 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 		return map[string]string{}, nil
 	}
 
+	if err := svc.ReviewEditRequest(1, "approved", "Test comment", nil, 9); err == nil || err.Error() != "status must be completed" {
+		t.Fatalf("expected approved parent status to be rejected, got %v", err)
+	}
+	if err := svc.ReviewEditRequest(1, "rejected", "Test comment", nil, 9); err == nil || err.Error() != "status must be completed" {
+		t.Fatalf("expected rejected parent status to be rejected, got %v", err)
+	}
+
 	// 0) update new_value error
 	_ = db.Migrator().DropTable(&FileEditRequestDetails{})
-	if err := svc.ReviewEditRequest(1, "approved", "Test comment", []FileEditRequestDetails{{ID: 1, NewValue: "x"}}, 9); err == nil {
+	if err := svc.ReviewEditRequest(1, "completed", "Test comment", []FileEditRequestDetails{{ID: 1, NewValue: "x"}}, 9); err == nil {
 		t.Fatalf("expected update new_value err")
 	}
 
@@ -1529,7 +1547,7 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 	svc = &FileService{DB: db, Mailer: mailer.NewService("test@example.com", "key", "domain", "http://localhost")}
 
 	// request not found
-	if err := svc.ReviewEditRequest(999, "approved", "Test comment", nil, 9); err == nil {
+	if err := svc.ReviewEditRequest(999, "completed", "Test comment", nil, 9); err == nil {
 		t.Fatalf("expected request not found err")
 	}
 
@@ -1537,7 +1555,7 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 	req := FileEditRequest{UserID: 1, Status: "pending", IsEdited: true, FirstName: "A", LastName: "B", FileID: 1}
 	_ = db.Create(&req).Error
 	_ = db.Migrator().DropTable(&FileEditRequestDetails{})
-	if err := svc.ReviewEditRequest(req.RequestID, "approved", "Test comment", nil, 9); err == nil {
+	if err := svc.ReviewEditRequest(req.RequestID, "completed", "Test comment", nil, 9); err == nil {
 		t.Fatalf("expected details fetch err")
 	}
 
@@ -1552,7 +1570,7 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 
 	// insert file_data error
 	_ = db.Migrator().DropTable(&FileData{})
-	if err := svc.ReviewEditRequest(req.RequestID, "approved", "Test comment", []FileEditRequestDetails{{ID: d1.ID, NewValue: "Y"}}, 9); err == nil {
+	if err := svc.ReviewEditRequest(req.RequestID, "completed", "Test comment", []FileEditRequestDetails{{ID: d1.ID, NewValue: "Y"}}, 9); err == nil {
 		t.Fatalf("expected insert file_data err")
 	}
 
@@ -1566,7 +1584,7 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 	_ = db.Create(&req).Error
 	_ = db.Create(&FileEditRequestDetails{RequestID: req.RequestID, FileID: 10, Filename: "f", RowID: 0, FieldName: "Name", OldValue: "", NewValue: "X"}).Error
 	_ = db.Create(&FileEditRequestPhoto{RequestID: req.RequestID, RowID: 0, FileID: 10, PhotoURL: "gs://nordik-drive-photos/requests/x.jpg", FileName: "x.jpg", DocumentType: "photos"}).Error
-	if err := svc.ReviewEditRequest(req.RequestID, "approved", "Test comment", nil, 9); err == nil {
+	if err := svc.ReviewEditRequest(req.RequestID, "completed", "Test comment", nil, 9); err == nil {
 		t.Fatalf("expected move folder err")
 	}
 
@@ -1590,13 +1608,13 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 	}
 	_ = db.Create(&photo).Error
 
-	if err := svc.ReviewEditRequest(req.RequestID, "approved", "Test comment", []FileEditRequestDetails{{ID: d1.ID, NewValue: "Y"}}, 9); err != nil {
+	if err := svc.ReviewEditRequest(req.RequestID, "completed", "Test comment", []FileEditRequestDetails{{ID: d1.ID, NewValue: "Y"}}, 9); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 
 	var reqUpdated FileEditRequest
 	_ = db.Where("request_id = ?", req.RequestID).First(&reqUpdated).Error
-	if reqUpdated.Status != "approved" || reqUpdated.ReviewedBy == nil || *reqUpdated.ReviewedBy != 9 || reqUpdated.RowID == 0 {
+	if reqUpdated.Status != "completed" || reqUpdated.ReviewedBy == nil || *reqUpdated.ReviewedBy != 9 || reqUpdated.RowID == 0 {
 		t.Fatalf("unexpected updated request: %#v", reqUpdated)
 	}
 	var detailUpdated FileEditRequestDetails
@@ -1614,7 +1632,7 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 
 	// file_data not found
 	_ = db.Create(&FileEditRequestDetails{RequestID: req.RequestID, FileID: 10, RowID: 123, FieldName: "A", NewValue: "X"}).Error
-	if err := svc.ReviewEditRequest(req.RequestID, "approved", "Test comment", nil, 9); err == nil {
+	if err := svc.ReviewEditRequest(req.RequestID, "completed", "Test comment", nil, 9); err == nil {
 		t.Fatalf("expected file_data not found")
 	}
 
@@ -1625,7 +1643,7 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 	_ = db.Create(&req).Error
 	_ = db.Create(&FileEditRequestDetails{RequestID: req.RequestID, FileID: 10, RowID: 123, FieldName: "A", NewValue: "X"}).Error
 	_ = db.Create(&FileData{ID: 123, FileID: 10, RowData: datatypes.JSON([]byte(`{bad`)), Version: 1}).Error
-	if err := svc.ReviewEditRequest(req.RequestID, "approved", "Test comment", nil, 9); err == nil {
+	if err := svc.ReviewEditRequest(req.RequestID, "completed", "Test comment", nil, 9); err == nil {
 		t.Fatalf("expected row_data parse error")
 	}
 
@@ -1637,7 +1655,7 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 	_ = db.Create(&FileEditRequestDetails{RequestID: req.RequestID, FileID: 10, RowID: 123, FieldName: "A", NewValue: "X"}).Error
 	_ = db.Create(&FileData{ID: 123, FileID: 10, RowData: datatypes.JSON([]byte(`{"A":"old"}`)), Version: 1}).Error
 	_ = db.Migrator().DropTable(&FileData{})
-	if err := svc.ReviewEditRequest(req.RequestID, "approved", "Test comment", nil, 9); err == nil {
+	if err := svc.ReviewEditRequest(req.RequestID, "completed", "Test comment", nil, 9); err == nil {
 		t.Fatalf("expected update file_data err")
 	}
 
@@ -1649,7 +1667,7 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 	_ = db.Create(&FileEditRequestDetails{RequestID: req.RequestID, FileID: 10, RowID: 123, FieldName: "A", NewValue: "X"}).Error
 	_ = db.Create(&FileData{ID: 123, FileID: 10, RowData: datatypes.JSON([]byte(`{"A":"old"}`)), Version: 1}).Error
 	_ = db.Migrator().DropTable(&FileEditRequest{})
-	if err := svc.ReviewEditRequest(req.RequestID, "approved", "Test comment", nil, 9); err == nil {
+	if err := svc.ReviewEditRequest(req.RequestID, "completed", "Test comment", nil, 9); err == nil {
 		t.Fatalf("expected status update err")
 	}
 
@@ -1660,12 +1678,12 @@ func TestFileService_ApproveEditRequest_AllBranches(t *testing.T) {
 	_ = db.Create(&req).Error
 	_ = db.Create(&FileEditRequestDetails{RequestID: req.RequestID, FileID: 10, RowID: 123, FieldName: "A", NewValue: "X"}).Error
 	_ = db.Create(&FileData{ID: 123, FileID: 10, RowData: datatypes.JSON([]byte(`{"A":"old","B":"keep"}`)), Version: 1}).Error
-	if err := svc.ReviewEditRequest(req.RequestID, "approved", "Test comment", nil, 9); err != nil {
+	if err := svc.ReviewEditRequest(req.RequestID, "completed", "Test comment", nil, 9); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 	var updatedReq FileEditRequest
 	_ = db.Where("request_id = ?", req.RequestID).First(&updatedReq).Error
-	if updatedReq.Status != "approved" || updatedReq.ReviewedBy == nil || *updatedReq.ReviewedBy != 9 {
+	if updatedReq.Status != "completed" || updatedReq.ReviewedBy == nil || *updatedReq.ReviewedBy != 9 {
 		t.Fatalf("unexpected req: %#v", updatedReq)
 	}
 	var updatedDetail FileEditRequestDetails
@@ -1717,7 +1735,7 @@ func TestFileService_ReviewEditRequest_UpdatesOnlyApprovedDetails(t *testing.T) 
 		t.Fatalf("seed file data: %v", err)
 	}
 
-	err := svc.ReviewEditRequest(req.RequestID, "approved", "request reviewed", []FileEditRequestDetails{
+	err := svc.ReviewEditRequest(req.RequestID, "completed", "request reviewed", []FileEditRequestDetails{
 		{ID: approvedDetail.ID, NewValue: "approved-a", Status: "approved", ReviewComment: "ok"},
 		{ID: rejectedDetail.ID, NewValue: "rejected-b", Status: "rejected", ReviewComment: "do not use"},
 	}, 9)
@@ -1753,6 +1771,65 @@ func TestFileService_ReviewEditRequest_UpdatesOnlyApprovedDetails(t *testing.T) 
 	}
 	if details[1].Status != "rejected" || details[1].ReviewComment != "do not use" {
 		t.Fatalf("unexpected rejected detail review fields: %#v", details[1])
+	}
+}
+
+func TestFileService_ReviewEditRequest_AllRejectedDetailsCompletesWithoutFileUpdate(t *testing.T) {
+	db := newTestDB(t)
+	svc := &FileService{DB: db, Mailer: mailer.NewService("test@example.com", "key", "domain", "http://localhost")}
+
+	req := FileEditRequest{UserID: 1, Status: "pending", IsEdited: true, RowID: 123, FileID: 10}
+	if err := db.Create(&req).Error; err != nil {
+		t.Fatalf("seed request: %v", err)
+	}
+
+	detail := FileEditRequestDetails{
+		RequestID: req.RequestID,
+		FileID:    10,
+		Filename:  "f",
+		RowID:     123,
+		FieldName: "A",
+		OldValue:  "old-a",
+		NewValue:  "new-a",
+	}
+	if err := db.Create(&detail).Error; err != nil {
+		t.Fatalf("seed detail: %v", err)
+	}
+	if err := db.Create(&FileData{
+		ID:      123,
+		FileID:  10,
+		RowData: datatypes.JSON([]byte(`{"A":"old-a"}`)),
+		Version: 1,
+	}).Error; err != nil {
+		t.Fatalf("seed file data: %v", err)
+	}
+
+	err := svc.ReviewEditRequest(req.RequestID, "completed", "review complete", []FileEditRequestDetails{
+		{ID: detail.ID, NewValue: "rejected-a", Status: "rejected", ReviewComment: "not supported"},
+	}, 9)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+
+	var updatedReq FileEditRequest
+	if err := db.Where("request_id = ?", req.RequestID).First(&updatedReq).Error; err != nil {
+		t.Fatalf("load request: %v", err)
+	}
+	if updatedReq.Status != "completed" {
+		t.Fatalf("expected request completed, got %#v", updatedReq)
+	}
+
+	var fileData FileData
+	if err := db.Where("id = ?", 123).First(&fileData).Error; err != nil {
+		t.Fatalf("load file data: %v", err)
+	}
+
+	var row map[string]string
+	if err := json.Unmarshal(fileData.RowData, &row); err != nil {
+		t.Fatalf("unmarshal row_data: %v", err)
+	}
+	if row["A"] != "old-a" {
+		t.Fatalf("expected rejected field to stay unchanged, got row=%#v", row)
 	}
 }
 

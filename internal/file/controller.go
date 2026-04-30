@@ -812,7 +812,7 @@ func (fc *FileController) GetEditRequests(c *gin.Context) {
 	}
 
 	// Query params:
-	// ?status=approved,rejected
+	// ?status=pending,completed
 	// ?user_id=26
 	statusRaw := strings.TrimSpace(c.Query("status"))
 	userIDRaw := strings.TrimSpace(c.Query("user_id"))
@@ -878,15 +878,7 @@ func (fc *FileController) ReviewEditRequest(c *gin.Context) {
 		return
 	}
 
-	message := "Request reviewed successfully"
-	switch strings.ToLower(strings.TrimSpace(input.Status)) {
-	case "approved":
-		message = "Request approved and file updated"
-	case "rejected":
-		message = "Request rejected successfully"
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": message})
+	c.JSON(http.StatusOK, gin.H{"message": "Request completed successfully"})
 }
 
 // POST /api/file/photos/review

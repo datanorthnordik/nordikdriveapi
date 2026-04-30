@@ -213,11 +213,11 @@ CREATE TABLE IF NOT EXISTS logs (
 );
 
 
-CREATE TABLE file_edit_request (
+CREATE TABLE IF NOT EXISTS file_edit_request (
     request_id SERIAL PRIMARY KEY,
     user_id INT NOT NULL,
     status VARCHAR(20) NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'approved', 'rejected')),
+        CHECK (status IN ('pending', 'completed')),
     firstname VARCHAR(100),
     lastname VARCHAR(100),
     consent BOOLEAN DEFAULT FALSE,
@@ -232,6 +232,17 @@ CREATE TABLE file_edit_request (
     uploader_community TEXT[] NOT NULL DEFAULT '{}'::text[],
     review_email_trigger_success BOOLEAN NOT NULL DEFAULT FALSE
 );
+
+ALTER TABLE file_edit_request
+DROP CONSTRAINT IF EXISTS file_edit_request_status_check;
+
+UPDATE file_edit_request
+SET status = 'completed'
+WHERE status IN ('approved', 'rejected');
+
+ALTER TABLE file_edit_request
+ADD CONSTRAINT file_edit_request_status_check
+CHECK (status IN ('pending', 'completed'));
 
 
 CREATE TABLE file_edit_request_photos (
@@ -276,6 +287,25 @@ CREATE TABLE IF NOT EXISTS file_edit_request_details (
 
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE file_edit_request_details
+ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'pending';
+
+ALTER TABLE file_edit_request_details
+ADD COLUMN IF NOT EXISTS reviewer_comment TEXT NOT NULL DEFAULT '';
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'file_edit_request_details_status_check'
+    ) THEN
+        ALTER TABLE file_edit_request_details
+        ADD CONSTRAINT file_edit_request_details_status_check
+        CHECK (status IN ('pending', 'approved', 'rejected'));
+    END IF;
+END $$;
 
 
 CREATE INDEX idx_logs_user_id ON logs(user_id);

@@ -66,7 +66,7 @@ func TestAdminService_searchChanges_NoDetailFilters_AggByFile(t *testing.T) {
 			"requested_by", "reviewed_by",
 			"consent", "change_count", "created_at",
 		}).AddRow(
-			uint(10), "PENDING", uint(5), "fileA.xlsx",
+			uint(10), "pending", uint(5), "fileA.xlsx",
 			"fn", "ln",
 			[]byte("{c1,c2}"), []byte("{u1}"),
 			"Req User", "App User",
@@ -120,7 +120,7 @@ func TestAdminService_searchChanges_WithDetailFilters_AggByField(t *testing.T) {
 			"requested_by", "reviewed_by",
 			"consent", "change_count", "created_at",
 		}).AddRow(
-			uint(11), "APPROVED", uint(9), "fileB.xlsx",
+			uint(11), "completed", uint(9), "fileB.xlsx",
 			"A", "B",
 			[]byte("{}"), []byte("{}"),
 			"Req", "App",
