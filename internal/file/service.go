@@ -1046,7 +1046,12 @@ var formSubmissionGoHook = func(fn func()) {
 	go fn()
 }
 
-var triggerFormSubmissionReviewEmailHook = func(fileedit *FileEditRequest, user auth.Auth, mailer mailer.EmailSender) error {
+var triggerFormSubmissionReviewEmailHook = func(
+	fileedit *FileEditRequest,
+	user auth.Auth,
+	details []FileEditRequestDetails,
+	mailer mailer.EmailSender,
+) error {
 
 	createdUser := fmt.Sprintf("%s %s", user.FirstName, user.LastName)
 	body := BuildFileEditRequestReviewEmailBody(
@@ -1055,6 +1060,7 @@ var triggerFormSubmissionReviewEmailHook = func(fileedit *FileEditRequest, user 
 		fileedit.FirstName,
 		fileedit.LastName,
 		fileedit.ReviewComment,
+		details...,
 	)
 
 	err := mailer.SendOne(
@@ -1081,7 +1087,14 @@ func (fs *FileService) triggerReviewEmailAsync(fileedit *FileEditRequest) {
 			return
 		}
 
-		if err := triggerFormSubmissionReviewEmailHook(fileedit, user, fs.Mailer); err != nil {
+		var details []FileEditRequestDetails
+		if err := fs.DB.Where("request_id = ?", fileedit.RequestID).
+			Order("id ASC").
+			Find(&details).Error; err != nil {
+			return
+		}
+
+		if err := triggerFormSubmissionReviewEmailHook(fileedit, user, details, fs.Mailer); err != nil {
 			return
 		}
 
@@ -1109,7 +1122,9 @@ func (fs *FileService) ReviewEditRequest(
 		return fmt.Errorf("status must be either approved or rejected")
 	}
 
-	return fs.DB.Transaction(func(tx *gorm.DB) error {
+	var reviewedRequest *FileEditRequest
+
+	if err := fs.DB.Transaction(func(tx *gorm.DB) error {
 		hasDetailStatuses := false
 
 		// 0) Update changed details coming from UI.
@@ -1305,10 +1320,19 @@ func (fs *FileService) ReviewEditRequest(
 			return err
 		}
 
-		fs.triggerReviewEmailAsync(&req)
+		req.Status = status
+		req.ReviewComment = reviewComment
+		req.ReviewedBy = &reviewedByID
+		reviewedRequest = &req
 
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+
+	fs.triggerReviewEmailAsync(reviewedRequest)
+
+	return nil
 }
 
 func (fs *FileService) GetPhotosByRequest(requestID uint) ([]FileEditRequestPhoto, error) {

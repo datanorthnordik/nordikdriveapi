@@ -75,12 +75,21 @@ func (j *FileEditReviewEmailJob) Run() error {
 			continue
 		}
 
+		details, err := j.fileEditRequestDetails(row.RequestID)
+		if err != nil {
+			if j.Logger != nil {
+				j.Logger.Printf("file edit review email job: failed to fetch details for request_id=%d err=%v", row.RequestID, err)
+			}
+			continue
+		}
+
 		body := filehelper.BuildFileEditRequestReviewEmailBody(
 			row.CreatedUserName,
 			row.Status,
 			row.FirstName,
 			row.LastName,
 			row.ReviewComment,
+			details...,
 		)
 
 		if err := j.Mailer.SendOne(email, "Update to your submission", body); err != nil {
@@ -106,4 +115,32 @@ func (j *FileEditReviewEmailJob) Run() error {
 	}
 
 	return nil
+}
+
+func (j *FileEditReviewEmailJob) fileEditRequestDetails(requestID uint) ([]filehelper.FileEditRequestDetails, error) {
+	var details []filehelper.FileEditRequestDetails
+
+	err := j.DB.
+		Table("file_edit_request_details").
+		Select(`
+			id,
+			request_id,
+			file_id,
+			filename,
+			row_id,
+			field_name,
+			COALESCE(old_value, '') AS old_value,
+			COALESCE(new_value, '') AS new_value,
+			COALESCE(status, 'pending') AS status,
+			COALESCE(reviewer_comment, '') AS reviewer_comment,
+			created_at
+		`).
+		Where("request_id = ?", requestID).
+		Order("id ASC").
+		Scan(&details).Error
+	if err != nil {
+		return nil, err
+	}
+
+	return details, nil
 }
