@@ -395,7 +395,7 @@ func (fs *FileService) GetAllFiles(userID uint, role string) ([]FileWithUser, er
 			FROM file f
 			LEFT JOIN users u ON u.id = f.inserted_by
 			LEFT JOIN file_access fa ON f.id = fa.file_id AND fa.user_id = ?
-			WHERE f.private = false OR (fa.user_id = ? AND f.is_delete = ?)
+			WHERE (f.private = false OR fa.user_id = ?) AND f.is_delete = ?
 		`, userID, userID, false).
 		Scan(&files).Error
 
