@@ -410,7 +410,7 @@ func (fs *FileService) GetFileData(filename string, version int) ([]FileData, er
 	var file File
 
 	// Fetch file by filename
-	if err := fs.DB.Where("filename = ? AND is_delete = ?", filename, false).First(&file).Error; err != nil {
+	if err := fs.DB.Where("filename = ?", filename).First(&file).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
