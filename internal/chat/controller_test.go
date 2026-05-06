@@ -56,10 +56,10 @@ func TestChatController_Chat_Success200(t *testing.T) {
 	})
 
 	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-		if config == nil || config.CachedContent != "" {
-			t.Fatalf("expected direct prompt config, got %#v", config)
+		if config != nil {
+			t.Fatalf("expected nil config, got %#v", config)
 		}
-		return jsonAnswer("Yes. I found 1 recorded death connected to drowning at Shingwauk.", nil, false, ""), nil
+		return jsonStructuredAnswer("Yes. I found 1 recorded death connected to drowning at Shingwauk.", nil), nil
 	}
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}

@@ -35,7 +35,6 @@ type ChatService struct {
 	Location  string
 
 	datasetCache sync.Map
-	sessionCache sync.Map
 }
 
 var (
@@ -66,15 +65,10 @@ func firstTextFromResp(genResp *genai.GenerateContentResponse) string {
 		if candidate.Content == nil {
 			continue
 		}
-		var b strings.Builder
 		for _, part := range candidate.Content.Parts {
-			if strings.TrimSpace(part.Text) == "" {
-				continue
+			if strings.TrimSpace(part.Text) != "" {
+				return part.Text
 			}
-			b.WriteString(part.Text)
-		}
-		if strings.TrimSpace(b.String()) != "" {
-			return b.String()
 		}
 	}
 	return ""
@@ -116,10 +110,6 @@ func (cs *ChatService) generateFromPrompt(
 	}
 
 	return out, usedModel, nil
-}
-
-func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, filename string, communities []string) (*ChatResult, error) {
-	return cs.ChatForUser(0, question, audioFile, filename, communities)
 }
 
 func (cs *ChatService) DescribeRow(rowID int) (string, error) {

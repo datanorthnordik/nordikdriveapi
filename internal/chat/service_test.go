@@ -69,6 +69,7 @@ func makeAudioFileHeader(t *testing.T, contentType string, data []byte) *multipa
 type textprotoMIMEHeader map[string][]string
 
 func (h textprotoMIMEHeader) Set(k, v string) { h[k] = []string{v} }
+
 func (h textprotoMIMEHeader) toHeader() map[string][]string {
 	out := map[string][]string{}
 	for k, v := range h {
@@ -78,11 +79,9 @@ func (h textprotoMIMEHeader) toHeader() map[string][]string {
 }
 
 func expectChatFileLookup(mock sqlmock.Sqlmock, filename string) {
-	mock.ExpectQuery(`(?i)select.*from.*file.*where.*filename.*order.*version.*desc.*limit`).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "filename", "version", "columns_order"}).
-			AddRow(uint(1), filename, 1, `["NAME","SCHOOL","DATE OF DEATH","CAUSE OF DEATH","First Nation/Community"]`))
-	mock.ExpectQuery(`(?i)select.*from.*data_config.*where.*is_active.*lower\(file_name\)`).
-		WillReturnError(gorm.ErrRecordNotFound)
+	mock.ExpectQuery(`(?i)select.*id.*version.*from.*file.*where.*filename.*order.*version.*desc.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "version"}).
+			AddRow(uint(1), 1))
 }
 
 func expectChatRowsLookup(mock sqlmock.Sqlmock, rows ...string) {
@@ -94,11 +93,23 @@ func expectChatRowsLookup(mock sqlmock.Sqlmock, rows ...string) {
 		WillReturnRows(result)
 }
 
-func jsonAnswer(answer string, matched *string, needsClarification bool, clarification string) *genai.GenerateContentResponse {
-	text := answer
-	if needsClarification && strings.TrimSpace(clarification) != "" {
-		text = clarification
+func jsonStructuredAnswer(answer string, matchedRowRef *string) *genai.GenerateContentResponse {
+	payload := map[string]any{
+		"answer":          answer,
+		"matched_row_ref": nil,
 	}
+	if matchedRowRef != nil {
+		payload["matched_row_ref"] = *matchedRowRef
+	}
+
+	text, _ := json.Marshal(payload)
+
+	var out genai.GenerateContentResponse
+	_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":`+strconvQuote(string(text))+`}]}}]}`), &out)
+	return &out
+}
+
+func rawAnswer(text string) *genai.GenerateContentResponse {
 	var out genai.GenerateContentResponse
 	_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":`+strconvQuote(text)+`}]}}]}`), &out)
 	return &out
@@ -141,53 +152,44 @@ func Test_pcmToWav_defaults(t *testing.T) {
 	}
 }
 
-func TestFirstTextFromResp_ConcatenatesParts(t *testing.T) {
+func TestFirstTextFromResp_ReturnsFirstNonEmptyPart(t *testing.T) {
 	var resp genai.GenerateContentResponse
 	_ = json.Unmarshal([]byte(`{
 		"candidates":[
 			{"content":{"parts":[
-				{"text":"{\"answer\":\"Based on the records, Walpole Island"},
-				{"text":" had the most deaths.\"}"}
+				{"text":"first"},
+				{"text":"second"}
 			]}}
 		]
 	}`), &resp)
 
-	got := firstTextFromResp(&resp)
-	want := `{"answer":"Based on the records, Walpole Island had the most deaths."}`
-	if got != want {
-		t.Fatalf("got %q want %q", got, want)
-	}
-}
-
-func TestSanitizeAnswerText_WrappedJSONString(t *testing.T) {
-	raw := "\"{\\n  \\\"answer\\\": \\\"Based on the records, Walpole Island had the most deaths.\\\"\\n}\""
-	got := sanitizeAnswerText(raw)
-	if got != "Based on the records, Walpole Island had the most deaths." {
+	if got := firstTextFromResp(&resp); got != "first" {
 		t.Fatalf("got %q", got)
 	}
 }
 
-func TestSanitizeAnswerText_FallbackAnswerField(t *testing.T) {
-	raw := "{\n  \"answer\": \"Based on the records, Walpole Island is the community that experienced the most deaths.\""
-	got := sanitizeAnswerText(raw)
-	if got != "Based on the records, Walpole Island is the community that experienced the most deaths." {
-		t.Fatalf("got %q", got)
+func TestResolveChatResponse_ParsesMatchedRowID(t *testing.T) {
+	rowRef := "r2"
+	answer, matchedRowID := resolveChatResponse(
+		`{"answer":"Alice attended Shingwauk.","matched_row_ref":"`+rowRef+`"}`,
+		map[string]int{"R1": 11, "R2": 22},
+	)
+
+	if answer != "Alice attended Shingwauk." {
+		t.Fatalf("answer = %q", answer)
+	}
+	if matchedRowID == nil || *matchedRowID != 22 {
+		t.Fatalf("matched row = %#v", matchedRowID)
 	}
 }
 
-func TestSanitizeAnswerText_UserReportedTruncatedJSONString(t *testing.T) {
-	raw := ":\n\"{\\n  \\\"answer\\\": \\\"Based on the records, Walpole Island is the community that experienced the most deaths, with a total of\""
-	got := sanitizeAnswerText(raw)
-	if got != "Based on the records, Walpole Island is the community that experienced the most deaths, with a total of" {
-		t.Fatalf("got %q", got)
+func TestResolveChatResponse_FallsBackToRawText(t *testing.T) {
+	answer, matchedRowID := resolveChatResponse("Plain text answer.", map[string]int{"R1": 11})
+	if answer != "Plain text answer." {
+		t.Fatalf("answer = %q", answer)
 	}
-}
-
-func TestSanitizeAnswerText_StripsAnswerLabel(t *testing.T) {
-	raw := "answer: Based on the records, Walpole Island had the most deaths."
-	got := sanitizeAnswerText(raw)
-	if got != "Based on the records, Walpole Island had the most deaths." {
-		t.Fatalf("got %q", got)
+	if matchedRowID != nil {
+		t.Fatalf("matched row = %#v", matchedRowID)
 	}
 }
 
@@ -195,8 +197,8 @@ func TestChatService_Chat_FileNotFound(t *testing.T) {
 	db, mock, cleanup := newMockDBChatSvc(t)
 	defer cleanup()
 
-	mock.ExpectQuery(`(?i)select.*from.*file.*where.*filename.*order.*version.*desc.*limit`).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "filename", "version", "columns_order"}))
+	mock.ExpectQuery(`(?i)select.*id.*version.*from.*file.*where.*filename.*order.*version.*desc.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "version"}))
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
 	_, err := cs.Chat("q", nil, "missing.xlsx", nil)
@@ -205,14 +207,12 @@ func TestChatService_Chat_FileNotFound(t *testing.T) {
 	}
 }
 
-func TestChatService_Chat_UsesDirectPrompt(t *testing.T) {
+func TestChatService_Chat_UsesStructuredPrompt(t *testing.T) {
 	db, mock, cleanup := newMockDBChatSvc(t)
 	defer cleanup()
 
 	expectChatFileLookup(mock, "sheet.xlsx")
-	expectChatRowsLookup(mock,
-		`{"NAME":"Alice","SCHOOL":"Shingwauk","DATE OF DEATH":"1890-05-06","CAUSE OF DEATH":"Drowned while crossing the river","First Nation/Community":"Garden River"}`,
-	)
+	expectChatRowsLookup(mock, `{"NAME":"Alice","First Nation/Community":"Garden River"}`)
 
 	oldGenerate := genaiGenerateContentHook
 	t.Cleanup(func() {
@@ -220,23 +220,28 @@ func TestChatService_Chat_UsesDirectPrompt(t *testing.T) {
 	})
 
 	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-		if model != chatPrimaryModel {
+		if model != "gemini-2.5-flash" {
 			t.Fatalf("unexpected generate model %q", model)
 		}
-		if config == nil || config.CachedContent != "" {
-			t.Fatalf("expected direct prompt config, got %#v", config)
+		if config != nil {
+			t.Fatalf("expected nil config, got %#v", config)
 		}
 		if len(contents) == 0 || contents[0] == nil || len(contents[0].Parts) == 0 {
 			t.Fatalf("expected prompt contents, got %#v", contents)
 		}
+
 		prompt := contents[0].Parts[0].Text
-		if !strings.Contains(prompt, "DATA (only source of truth):") {
-			t.Fatalf("expected full data in prompt, got:\n%s", prompt)
+		if !strings.Contains(prompt, "Structured output requirements:") {
+			t.Fatalf("expected structured output instructions, got:\n%s", prompt)
 		}
-		if !strings.Contains(prompt, "stands on its own") {
-			t.Fatalf("expected standalone prompt instructions, got:\n%s", prompt)
+		if !strings.Contains(prompt, `"matched_row_ref": "R1" or null`) {
+			t.Fatalf("expected matched_row_ref guidance, got:\n%s", prompt)
 		}
-		return jsonAnswer("Yes. I found 1 recorded death connected to drowning at Shingwauk.", nil, false, ""), nil
+		if !strings.Contains(prompt, `"row_ref":"R1"`) {
+			t.Fatalf("expected prompt to include row refs, got:\n%s", prompt)
+		}
+
+		return jsonStructuredAnswer("Yes. I found 1 recorded death connected to drowning at Shingwauk.", nil), nil
 	}
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
@@ -244,62 +249,15 @@ func TestChatService_Chat_UsesDirectPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if !strings.Contains(result.Answer, "Yes.") {
+	if result.Answer != "Yes. I found 1 recorded death connected to drowning at Shingwauk." {
 		t.Fatalf("unexpected answer: %#v", result)
 	}
-}
-
-func TestChatService_Chat_IgnoresStandaloneHistoryOnSecondDirectPrompt(t *testing.T) {
-	db, mock, cleanup := newMockDBChatSvc(t)
-	defer cleanup()
-
-	expectChatFileLookup(mock, "sheet.xlsx")
-	expectChatRowsLookup(mock,
-		`{"NAME":"Alice","SCHOOL":"Shingwauk","DATE OF DEATH":"1890-05-06","CAUSE OF DEATH":"Drowned while crossing the river","First Nation/Community":"Garden River"}`,
-	)
-	expectChatFileLookup(mock, "sheet.xlsx")
-
-	oldGenerate := genaiGenerateContentHook
-	t.Cleanup(func() {
-		genaiGenerateContentHook = oldGenerate
-	})
-
-	generateCalls := 0
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-		generateCalls++
-		prompt := contents[0].Parts[0].Text
-		if config == nil || config.CachedContent != "" {
-			t.Fatalf("expected direct prompt config, got %#v", config)
-		}
-		if generateCalls == 2 {
-			if !strings.Contains(prompt, "stands on its own") {
-				t.Fatalf("expected standalone prompt on second call, got:\n%s", prompt)
-			}
-			if strings.Contains(prompt, "Recent conversation:") {
-				t.Fatalf("did not expect recent conversation in fresh question prompt:\n%s", prompt)
-			}
-		}
-		answer := "First answer."
-		if generateCalls == 2 {
-			answer = "Second answer."
-		}
-		return jsonAnswer(answer, nil, false, ""), nil
-	}
-
-	cs := &ChatService{DB: db, Client: &genai.Client{}}
-	if _, err := cs.ChatForUser(77, "Who is Alice?", nil, "sheet.xlsx", nil); err != nil {
-		t.Fatalf("first chat err: %v", err)
-	}
-	if _, err := cs.ChatForUser(77, "How many records are in the data?", nil, "sheet.xlsx", nil); err != nil {
-		t.Fatalf("second chat err: %v", err)
-	}
-
-	if generateCalls != 2 {
-		t.Fatalf("expected generate twice, got %d", generateCalls)
+	if result.MatchedRowID != nil {
+		t.Fatalf("unexpected matched row: %#v", result.MatchedRowID)
 	}
 }
 
-func TestChatService_Chat_UsesFullDataPrompt(t *testing.T) {
+func TestChatService_Chat_ReturnsMatchedRowID(t *testing.T) {
 	db, mock, cleanup := newMockDBChatSvc(t)
 	defer cleanup()
 
@@ -311,130 +269,25 @@ func TestChatService_Chat_UsesFullDataPrompt(t *testing.T) {
 		genaiGenerateContentHook = oldGenerate
 	})
 
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-		if config == nil || config.CachedContent != "" {
-			t.Fatalf("expected direct prompt config, got %#v", config)
+	rowRef := "R1"
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		if config != nil {
+			t.Fatalf("expected nil config, got %#v", config)
 		}
-		prompt := contents[0].Parts[0].Text
-		if !strings.Contains(prompt, "DATA (only source of truth):") {
-			t.Fatalf("expected direct prompt with data, got:\n%s", prompt)
-		}
-		return jsonAnswer("No. I couldn't find any matching records in the available data.", nil, false, ""), nil
+		return jsonStructuredAnswer("Alice is from Garden River.", &rowRef), nil
 	}
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
-	result, err := cs.Chat("Did any children die from drowning at Shingwauk?", nil, "sheet.xlsx", nil)
+	result, err := cs.Chat("Who is Alice?", nil, "sheet.xlsx", nil)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if !strings.Contains(result.Answer, "No.") {
-		t.Fatalf("unexpected answer: %#v", result)
+	if result.MatchedRowID == nil || *result.MatchedRowID != 1 {
+		t.Fatalf("unexpected matched row: %#v", result.MatchedRowID)
 	}
 }
 
-func TestChatService_Chat_ClarificationBudgetStopsLoops(t *testing.T) {
-	db, mock, cleanup := newMockDBChatSvc(t)
-	defer cleanup()
-
-	expectChatFileLookup(mock, "sheet.xlsx")
-	expectChatRowsLookup(mock, `{"NAME":"John Smith","First Nation/Community":"Garden River"}`)
-	expectChatFileLookup(mock, "sheet.xlsx")
-	expectChatFileLookup(mock, "sheet.xlsx")
-
-	oldGenerate := genaiGenerateContentHook
-	t.Cleanup(func() {
-		genaiGenerateContentHook = oldGenerate
-	})
-
-	call := 0
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-		call++
-		if config == nil || config.CachedContent != "" {
-			t.Fatalf("expected direct prompt config, got %#v", config)
-		}
-		prompt := contents[0].Parts[0].Text
-		if call == 2 && !strings.Contains(prompt, "Original question:") {
-			t.Fatalf("expected original question in clarification reply prompt, got:\n%s", prompt)
-		}
-		switch call {
-		case 1:
-			return jsonAnswer("Which John do you mean?", nil, true, "Which John do you mean?"), nil
-		case 2:
-			return jsonAnswer("Which school John do you mean?", nil, true, "Which school John do you mean?"), nil
-		default:
-			return jsonAnswer("Could you clarify which John exactly?", nil, true, "Could you clarify which John exactly?"), nil
-		}
-	}
-
-	cs := &ChatService{DB: db, Client: &genai.Client{}}
-
-	first, err := cs.ChatForUser(22, "Tell me about John", nil, "sheet.xlsx", nil)
-	if err != nil {
-		t.Fatalf("first chat err: %v", err)
-	}
-	if first.Answer != "Which John do you mean?" {
-		t.Fatalf("unexpected first answer: %#v", first)
-	}
-
-	second, err := cs.ChatForUser(22, "Garden River", nil, "sheet.xlsx", nil)
-	if err != nil {
-		t.Fatalf("second chat err: %v", err)
-	}
-	if second.Answer != "Which school John do you mean?" {
-		t.Fatalf("unexpected second answer: %#v", second)
-	}
-
-	third, err := cs.ChatForUser(22, "the one at the school", nil, "sheet.xlsx", nil)
-	if err != nil {
-		t.Fatalf("third chat err: %v", err)
-	}
-	if third.Answer != "I can't determine that exactly from the available data." {
-		t.Fatalf("unexpected third answer: %#v", third)
-	}
-}
-
-func TestChatService_Chat_SanitizesJSONLikeAnswerWithoutRetry(t *testing.T) {
-	db, mock, cleanup := newMockDBChatSvc(t)
-	defer cleanup()
-
-	expectChatFileLookup(mock, "sheet.xlsx")
-	expectChatRowsLookup(mock, `{"NAME":"Alice","First Nation/Community":"Garden River"}`)
-
-	oldGenerate := genaiGenerateContentHook
-	t.Cleanup(func() {
-		genaiGenerateContentHook = oldGenerate
-	})
-
-	call := 0
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-		call++
-		if config == nil || config.CachedContent != "" {
-			t.Fatalf("expected direct prompt config, got %#v", config)
-		}
-		if !strings.Contains(contents[0].Parts[0].Text, "DATA (only source of truth):") {
-			t.Fatalf("expected prompt to include data, got:\n%s", contents[0].Parts[0].Text)
-		}
-
-		raw := `{"answer":"Based on the records provided, the year with the highest number of deaths was 1913, when six students passed away. The years 1882 and 1906 also had a"}`
-		var out genai.GenerateContentResponse
-		_ = json.Unmarshal([]byte(`{"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":`+strconvQuote(raw)+`}]}}]}`), &out)
-		return &out, nil
-	}
-
-	cs := &ChatService{DB: db, Client: &genai.Client{}}
-	result, err := cs.Chat("In what years did the highest number of deaths occur?", nil, "sheet.xlsx", nil)
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if call != 1 {
-		t.Fatalf("expected 1 generate call, got %d", call)
-	}
-	if result.Answer != "Based on the records provided, the year with the highest number of deaths was 1913, when six students passed away. The years 1882 and 1906 also had a" {
-		t.Fatalf("unexpected answer: %#v", result)
-	}
-}
-
-func TestChatService_Chat_FallsBackToFlashOn429(t *testing.T) {
+func TestChatService_Chat_FallsBackToProOn429(t *testing.T) {
 	db, mock, cleanup := newMockDBChatSvc(t)
 	defer cleanup()
 
@@ -447,16 +300,16 @@ func TestChatService_Chat_FallsBackToFlashOn429(t *testing.T) {
 	})
 
 	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, model string, _ []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-		if model == chatPrimaryModel {
+		if config != nil {
+			t.Fatalf("expected nil config, got %#v", config)
+		}
+		if model == "gemini-2.5-flash" {
 			return nil, &googleapi.Error{Code: http.StatusTooManyRequests}
 		}
-		if model != chatFallbackModel {
+		if model != "gemini-2.5-pro" {
 			t.Fatalf("unexpected fallback model %q", model)
 		}
-		if config == nil || config.CachedContent != "" {
-			t.Fatalf("expected direct prompt request on fallback, got %#v", config)
-		}
-		return jsonAnswer("Based on the records provided, the highest number of deaths occurred in 1913.", nil, false, ""), nil
+		return jsonStructuredAnswer("Based on the records provided, the highest number of deaths occurred in 1913.", nil), nil
 	}
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
@@ -508,13 +361,14 @@ func TestGenerateWith429Fallback_UsesFallbackModel(t *testing.T) {
 	old := genaiGenerateContentHook
 	defer func() { genaiGenerateContentHook = old }()
 
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, model string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, model string, _ []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		if config != nil {
+			t.Fatalf("expected nil config, got %#v", config)
+		}
 		if model == "gemini-2.5-flash" {
 			return nil, &googleapi.Error{Code: http.StatusTooManyRequests}
 		}
-		var out genai.GenerateContentResponse
-		_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":"fallback ok"}]}}]}`), &out)
-		return &out, nil
+		return rawAnswer("fallback ok"), nil
 	}
 
 	cs := &ChatService{Client: &genai.Client{}}
