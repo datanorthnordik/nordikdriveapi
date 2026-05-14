@@ -504,6 +504,11 @@ func (as *AdminService) DownloadUpdates(mode Mode, clauses []Clause, format stri
 	}
 
 	for _, d := range details {
+		// Rejected detail rows are not applied to file_data, so skip them in exports too.
+		if strings.EqualFold(strings.TrimSpace(d.Status), "rejected") {
+			continue
+		}
+
 		rk := rowKey{FileID: d.FileID, RowID: d.RowID}
 
 		if rowUpdates[rk] == nil {
@@ -683,7 +688,7 @@ func (as *AdminService) DownloadUpdates(mode Mode, clauses []Clause, format stri
 func (as *AdminService) loadDetailsForRequests(requestIDs []uint) ([]fileEditRequestDetailsRow, error) {
 	var rows []fileEditRequestDetailsRow
 	err := as.DB.Table("file_edit_request_details").
-		Select("id, request_id, file_id, filename, row_id, field_name, old_value, new_value, created_at").
+		Select("id, request_id, file_id, filename, row_id, field_name, old_value, new_value, COALESCE(status, 'pending') AS status, COALESCE(reviewer_comment, '') AS reviewer_comment, created_at").
 		Where("request_id IN ?", requestIDs).
 		Order("file_id ASC, row_id ASC, id ASC").
 		Scan(&rows).Error
