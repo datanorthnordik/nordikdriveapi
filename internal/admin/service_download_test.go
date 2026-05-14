@@ -119,7 +119,7 @@ func Test_DownloadUpdates_SkipsRejectedDetailFields(t *testing.T) {
 
 	createdAt := time.Now()
 
-	mock.ExpectQuery(`(?i)from\s+file_edit_request_details`).
+	mock.ExpectQuery(`(?i)from\s+"?file_edit_request_details"?`).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "request_id", "file_id", "filename", "row_id", "field_name",
 			"old_value", "new_value", "status", "reviewer_comment", "created_at",
@@ -134,7 +134,7 @@ func Test_DownloadUpdates_SkipsRejectedDetailFields(t *testing.T) {
 	mock.ExpectQuery(`(?i)coalesce\(max\(version\),\s*0\)`).
 		WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(3))
 
-	mock.ExpectQuery(`(?i)select\s+id,\s*file_id,\s*version,\s*row_data\s+from\s+file_data`).
+	mock.ExpectQuery(`(?i)select\s+id,\s*file_id,\s*version,\s*row_data\s+from\s+"?file_data"?`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "version", "row_data"}).
 			AddRow(uint(12), uint(7), 3, []byte(`{"Name":"Old Name","Secret":"Original Secret"}`)))
 
