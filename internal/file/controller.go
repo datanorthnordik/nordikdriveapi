@@ -1,6 +1,7 @@
 package file
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -680,7 +681,11 @@ func (fc *FileController) ReplaceFile(c *gin.Context) {
 
 	err = fc.FileService.ReplaceFiles(file, replaceFileInput.Id, uint(userID))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		status := http.StatusBadRequest
+		if errors.Is(err, ErrFileOperationBlocked) {
+			status = http.StatusConflict
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -733,7 +738,11 @@ func (fc *FileController) RevertFile(c *gin.Context) {
 	}
 
 	if err := fc.FileService.RevertFile(input.Filename, input.Version, uint(userID)); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		status := http.StatusInternalServerError
+		if errors.Is(err, ErrFileOperationBlocked) {
+			status = http.StatusConflict
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
 
