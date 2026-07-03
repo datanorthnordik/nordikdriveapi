@@ -44,7 +44,12 @@ func main() {
 	r := gin.Default()
 
 	r.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"http://localhost:3000", "http://34.145.18.109/", "https://nordik-drive-react-724838782318.us-west1.run.app"},
+		AllowOrigins: []string{
+			"http://localhost:3000",
+			"http://34.145.18.109/",
+			"https://nordik-drive-react-724838782318.us-west1.run.app",
+			"https://nordik-drive-react-prod-724838782318.us-west1.run.app",
+		},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
 		AllowCredentials: true,
