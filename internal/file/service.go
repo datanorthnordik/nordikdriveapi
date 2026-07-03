@@ -276,6 +276,10 @@ func (fs *FileService) ReplaceFiles(uploadedFile *multipart.FileHeader, fileID u
 		return fmt.Errorf("file not found: %w", err)
 	}
 
+	if err := fs.ensureNoOpenRequestsForFile(existing, "replace"); err != nil {
+		return err
+	}
+
 	f, err := uploadedFile.Open()
 	if err != nil {
 		return err
@@ -666,6 +670,10 @@ func (fs *FileService) RevertFile(filename string, version int, userID uint) err
 	var file File
 	if err := fs.DB.Where("filename = ?", filename).First(&file).Error; err != nil {
 		return fmt.Errorf("file not found: %w", err)
+	}
+
+	if err := fs.ensureNoOpenRequestsForFile(file, "revert"); err != nil {
+		return err
 	}
 
 	// get target version from file_version

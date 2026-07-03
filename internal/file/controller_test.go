@@ -166,11 +166,33 @@ func (b *badReplaceSvc) ReplaceFiles(uploadedFile *multipart.FileHeader, fileID 
 	return errors.New("replace failed")
 }
 
+type blockedReplaceSvc struct{ *fakeFileService }
+
+func (b *blockedReplaceSvc) ReplaceFiles(uploadedFile *multipart.FileHeader, fileID uint, userID uint) error {
+	b.bump("ReplaceFiles")
+	return &FileOperationBlockedError{
+		Operation:            "replace",
+		Filename:             "a.csv",
+		FileEditRequestCount: 1,
+	}
+}
+
 type badRevertSvc struct{ *fakeFileService }
 
 func (b *badRevertSvc) RevertFile(filename string, version int, userID uint) error {
 	b.bump("RevertFile")
 	return errors.New("revert failed")
+}
+
+type blockedRevertSvc struct{ *fakeFileService }
+
+func (b *blockedRevertSvc) RevertFile(filename string, version int, userID uint) error {
+	b.bump("RevertFile")
+	return &FileOperationBlockedError{
+		Operation:           "revert",
+		Filename:            filename,
+		FormSubmissionCount: 1,
+	}
 }
 
 type badCreateReqSvc struct{ *fakeFileService }
@@ -1012,6 +1034,22 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 		requireContains(t, w.Body.String(), "replace failed")
 	})
 
+	t.Run("ReplaceFile - 409 blocked by open requests", func(t *testing.T) {
+		base := &fakeFileService{}
+		svc := &blockedReplaceSvc{fakeFileService: base}
+		logSvc := &fakeLogService{}
+		fc := &FileController{FileService: svc, LogService: logSvc}
+		r := setupRouterForController(fc)
+
+		req := newMultipartReq(http.MethodPost, "/api/file/replace",
+			map[string][]string{"id": {"1"}},
+			"file", "x.csv", []byte("x"), authHeaders,
+		)
+		w := doReq(r, req)
+		assertStatus(t, w, http.StatusConflict)
+		requireContains(t, w.Body.String(), "open file edit request")
+	})
+
 	t.Run("ReplaceFile - 401 invalid communities (forced)", func(t *testing.T) {
 		svc := &fakeFileService{}
 		logSvc := &fakeLogService{}
@@ -1084,6 +1122,20 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 		w := doReq(r, req)
 		assertStatus(t, w, http.StatusInternalServerError)
 		requireContains(t, w.Body.String(), "revert failed")
+	})
+
+	t.Run("RevertFile - 409 blocked by open requests", func(t *testing.T) {
+		base := &fakeFileService{}
+		svc := &blockedRevertSvc{fakeFileService: base}
+		logSvc := &fakeLogService{}
+		fc := &FileController{FileService: svc, LogService: logSvc}
+		r := setupRouterForController(fc)
+
+		body := map[string]any{"filename": "a.csv", "version": 2}
+		req := newJSONReq(http.MethodPost, "/api/file/revert", body, authHeaders)
+		w := doReq(r, req)
+		assertStatus(t, w, http.StatusConflict)
+		requireContains(t, w.Body.String(), "open form submission request")
 	})
 
 	t.Run("RevertFile - 401 invalid communities (forced)", func(t *testing.T) {
