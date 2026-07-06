@@ -32,6 +32,7 @@ const (
 	defaultVersionReconciliationMaxJobs    = 5
 	defaultVersionReconciliationThreshold  = 45.0
 	defaultVersionReconciliationMargin     = 8.0
+	defaultVersionReconciliationLeaseTTL   = 15 * time.Minute
 	maxVersionReconciliationAttempts       = 10
 	maxGenericFieldScore                   = 12.0
 	maxGenericFieldWeight                  = 3.0
@@ -39,6 +40,7 @@ const (
 )
 
 var ErrFileVersionTransitionInProgress = errors.New("file version transition already in progress")
+var ErrFileVersionTargetVersionConflict = errors.New("file version target version conflict")
 
 type FileVersionTransitionError struct {
 	FileID   uint
@@ -65,6 +67,29 @@ func (e *FileVersionTransitionError) Error() string {
 
 func (e *FileVersionTransitionError) Is(target error) bool {
 	return target == ErrFileVersionTransitionInProgress
+}
+
+type FileVersionTargetVersionConflictError struct {
+	FileID         uint
+	FileVersionID  uint
+	TargetVersion  int
+	ConflictingIDs []uint
+}
+
+func (e *FileVersionTargetVersionConflictError) Error() string {
+	if e == nil {
+		return "file version target version conflict"
+	}
+	return fmt.Sprintf(
+		"file %d target version %d conflicts with existing version rows %v",
+		e.FileID,
+		e.TargetVersion,
+		e.ConflictingIDs,
+	)
+}
+
+func (e *FileVersionTargetVersionConflictError) Is(target error) bool {
+	return target == ErrFileVersionTargetVersionConflict
 }
 
 type FileVersionReconciliationJob struct {
@@ -208,10 +233,56 @@ func EnsureFileVersionTransitionIdleByID(db *gorm.DB, fileID uint) error {
 	return ensureFileVersionTransitionIdleWithDB(db, fileID)
 }
 
+func preferredFileVersionQuery(db *gorm.DB, fileID uint, version int) *gorm.DB {
+	query := db.Where("file_id = ? AND version = ?", fileID, version)
+	if db != nil && db.Migrator().HasTable(&FileVersion{}) && db.Migrator().HasColumn(&FileVersion{}, "reconciliation_status") {
+		query = query.Order(
+			fmt.Sprintf(
+				"CASE reconciliation_status WHEN '%s' THEN 0 WHEN '%s' THEN 1 ELSE 2 END ASC",
+				fileVersionStatusReady,
+				fileVersionStatusProcessing,
+			),
+		)
+	}
+	return query.Order("created_at DESC").Order("id DESC")
+}
+
+func nextFileVersionNumber(tx *gorm.DB, fileID uint, currentVersion int) (int, error) {
+	maxVersion := currentVersion
+
+	var maxFileVersion int
+	if err := tx.Model(&FileVersion{}).
+		Where("file_id = ?", fileID).
+		Select("COALESCE(MAX(version), 0)").
+		Scan(&maxFileVersion).Error; err != nil {
+		return 0, err
+	}
+	if maxFileVersion > maxVersion {
+		maxVersion = maxFileVersion
+	}
+
+	var maxDataVersion int
+	if err := tx.Model(&FileData{}).
+		Where("file_id = ?", fileID).
+		Select("COALESCE(MAX(version), 0)").
+		Scan(&maxDataVersion).Error; err != nil {
+		return 0, err
+	}
+	if maxDataVersion > maxVersion {
+		maxVersion = maxDataVersion
+	}
+
+	if maxVersion < 0 {
+		maxVersion = 0
+	}
+
+	return maxVersion + 1, nil
+}
+
 func ensureFileVersionTransitionIdleWithDB(db *gorm.DB, fileID uint) error {
 	var blockedVersion FileVersion
 	err := db.
-		Where("file_id = ? AND reconciliation_status <> ?", fileID, fileVersionStatusReady).
+		Where("file_id = ? AND reconciliation_status = ?", fileID, fileVersionStatusProcessing).
 		Order("version DESC").
 		First(&blockedVersion).Error
 	if err == nil {
@@ -286,6 +357,9 @@ func RunVersionReconciliationJobs(db *gorm.DB, options VersionReconciliationRunO
 	if db == nil {
 		return nil, fmt.Errorf("db not initialized")
 	}
+	if err := recoverStaleVersionReconciliationJobs(db); err != nil {
+		return nil, err
+	}
 
 	maxJobs := options.MaxJobs
 	if maxJobs <= 0 {
@@ -303,7 +377,7 @@ func RunVersionReconciliationJobs(db *gorm.DB, options VersionReconciliationRunO
 		}
 
 		result.Claimed++
-		if err := processVersionReconciliationJob(db, job); err != nil {
+		if err := processVersionReconciliationJobSafely(db, job); err != nil {
 			retryable, markErr := markVersionReconciliationJobFailure(db, job, err)
 			if markErr != nil {
 				return nil, markErr
@@ -323,6 +397,91 @@ func RunVersionReconciliationJobs(db *gorm.DB, options VersionReconciliationRunO
 	}
 
 	return result, nil
+}
+
+func recoverStaleVersionReconciliationJobs(db *gorm.DB) error {
+	staleBefore := time.Now().Add(-defaultVersionReconciliationLeaseTTL)
+
+	var staleJobs []FileVersionReconciliationJob
+	if err := db.
+		Where("status = ? AND COALESCE(started_at, updated_at, created_at) <= ?", reconciliationJobStatusProcessing, staleBefore).
+		Order("id ASC").
+		Find(&staleJobs).Error; err != nil {
+		return err
+	}
+
+	for i := range staleJobs {
+		if err := recoverStaleVersionReconciliationJob(db, &staleJobs[i], staleBefore); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func recoverStaleVersionReconciliationJob(db *gorm.DB, staleJob *FileVersionReconciliationJob, staleBefore time.Time) error {
+	if staleJob == nil {
+		return nil
+	}
+
+	now := time.Now()
+	return db.Transaction(func(tx *gorm.DB) error {
+		var current FileVersionReconciliationJob
+		if err := tx.
+			Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ?", staleJob.ID).
+			First(&current).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+
+		if current.Status != reconciliationJobStatusProcessing {
+			return nil
+		}
+
+		referenceTime := current.UpdatedAt
+		if current.StartedAt != nil && !current.StartedAt.IsZero() {
+			referenceTime = *current.StartedAt
+		}
+		if referenceTime.After(staleBefore) {
+			return nil
+		}
+
+		recoveryMessage := fmt.Sprintf(
+			"reconciliation worker lease expired after %s without completion; retrying automatically",
+			defaultVersionReconciliationLeaseTTL,
+		)
+		jobUpdates := map[string]any{
+			"last_error":   recoveryMessage,
+			"started_at":   nil,
+			"completed_at": nil,
+		}
+		versionUpdates := map[string]any{
+			"reconciliation_error": recoveryMessage,
+		}
+
+		if current.Attempts >= maxVersionReconciliationAttempts {
+			jobUpdates["status"] = reconciliationJobStatusFailed
+			jobUpdates["completed_at"] = now
+			versionUpdates["reconciliation_status"] = fileVersionStatusFailed
+		} else {
+			jobUpdates["status"] = reconciliationJobStatusPending
+			jobUpdates["available_at"] = now
+			versionUpdates["reconciliation_status"] = fileVersionStatusProcessing
+		}
+
+		if err := tx.Model(&FileVersionReconciliationJob{}).
+			Where("id = ? AND status = ?", current.ID, reconciliationJobStatusProcessing).
+			Updates(jobUpdates).Error; err != nil {
+			return err
+		}
+
+		return tx.Model(&FileVersion{}).
+			Where("id = ?", current.FileVersionID).
+			Updates(versionUpdates).Error
+	})
 }
 
 func claimNextVersionReconciliationJob(db *gorm.DB) (*FileVersionReconciliationJob, bool, error) {
@@ -385,6 +544,9 @@ func markVersionReconciliationJobCompleted(db *gorm.DB, jobID uint) error {
 func markVersionReconciliationJobFailure(db *gorm.DB, job *FileVersionReconciliationJob, runErr error) (bool, error) {
 	now := time.Now()
 	retryable := job.Attempts < maxVersionReconciliationAttempts
+	if errors.Is(runErr, ErrFileVersionTargetVersionConflict) {
+		retryable = false
+	}
 
 	jobUpdates := map[string]any{
 		"last_error": runErr.Error(),
@@ -430,10 +592,23 @@ func versionReconciliationRetryDelay(attempts int) time.Duration {
 	return delay
 }
 
+func processVersionReconciliationJobSafely(db *gorm.DB, job *FileVersionReconciliationJob) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("panic while processing file version reconciliation job %d: %v", job.ID, recovered)
+		}
+	}()
+
+	return processVersionReconciliationJob(db, job)
+}
+
 func processVersionReconciliationJob(db *gorm.DB, job *FileVersionReconciliationJob) error {
 	return db.Transaction(func(tx *gorm.DB) error {
 		var file File
 		if err := tx.Where("id = ?", job.FileID).First(&file).Error; err != nil {
+			return err
+		}
+		if err := ensureTargetVersionHasNoConflicts(tx, job); err != nil {
 			return err
 		}
 
@@ -468,6 +643,30 @@ func processVersionReconciliationJob(db *gorm.DB, job *FileVersionReconciliation
 
 		return nil
 	})
+}
+
+func ensureTargetVersionHasNoConflicts(tx *gorm.DB, job *FileVersionReconciliationJob) error {
+	if job == nil {
+		return nil
+	}
+
+	var conflicts []uint
+	if err := tx.Model(&FileVersion{}).
+		Where("file_id = ? AND version = ? AND id <> ?", job.FileID, job.TargetVersion, job.FileVersionID).
+		Order("id ASC").
+		Pluck("id", &conflicts).Error; err != nil {
+		return err
+	}
+	if len(conflicts) == 0 {
+		return nil
+	}
+
+	return &FileVersionTargetVersionConflictError{
+		FileID:         job.FileID,
+		FileVersionID:  job.FileVersionID,
+		TargetVersion:  job.TargetVersion,
+		ConflictingIDs: conflicts,
+	}
 }
 
 func loadSourceRowsForReconciliation(tx *gorm.DB, fileID uint, sourceVersion int) ([]versionRowDescriptor, error) {
