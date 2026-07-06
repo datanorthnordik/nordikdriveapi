@@ -10,6 +10,10 @@ import (
 
 const (
 	fileEditRequestStatusCompleted = "completed"
+	fileEditRequestStatusPending   = "pending"
+	formSubmissionStatusPending    = "pending"
+	formSubmissionStatusNeedsMore  = "needs more information"
+	formSubmissionStatusApproved   = "approved"
 	formSubmissionStatusRejected   = "rejected"
 )
 
@@ -76,7 +80,11 @@ func ensureNoOpenRequestsForFileWithDB(db *gorm.DB, file File, operation string)
 	var fileEditRequestCount int64
 	if err := db.
 		Table((&FileEditRequest{}).TableName()).
-		Where("file_id = ? AND LOWER(TRIM(CAST(status AS TEXT))) <> ?", file.ID, fileEditRequestStatusCompleted).
+		Where(
+			"file_id = ? AND LOWER(TRIM(COALESCE(CAST(status AS TEXT), ''))) IN ?",
+			file.ID,
+			[]string{fileEditRequestStatusPending},
+		).
 		Count(&fileEditRequestCount).Error; err != nil {
 		return err
 	}
@@ -84,7 +92,11 @@ func ensureNoOpenRequestsForFileWithDB(db *gorm.DB, file File, operation string)
 	var formSubmissionCount int64
 	if err := db.
 		Table("form_submissions").
-		Where("file_id = ? AND LOWER(TRIM(CAST(status AS TEXT))) <> ?", file.ID, formSubmissionStatusRejected).
+		Where(
+			"file_id = ? AND LOWER(TRIM(COALESCE(CAST(status AS TEXT), ''))) IN ?",
+			file.ID,
+			[]string{formSubmissionStatusPending, formSubmissionStatusNeedsMore},
+		).
 		Count(&formSubmissionCount).Error; err != nil {
 		return err
 	}
