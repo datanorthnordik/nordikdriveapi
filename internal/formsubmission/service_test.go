@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	filehelper "nordik-drive-api/internal/file"
 	"nordik-drive-api/internal/mailer"
 	"strings"
 	"testing"
@@ -292,6 +293,32 @@ func TestUpsert_ValidationErrors(t *testing.T) {
 				t.Fatalf("expected error containing %q, got %v", tc.want, err)
 			}
 		})
+	}
+}
+
+func TestUpsert_BlockedDuringVersionTransition(t *testing.T) {
+	svc := newTestService(t)
+	if err := svc.DB.AutoMigrate(&filehelper.FileVersion{}); err != nil {
+		t.Fatalf("migrate file version: %v", err)
+	}
+	if err := svc.DB.Create(&filehelper.FileVersion{
+		FileID:               10,
+		Filename:             "people.csv",
+		Version:              2,
+		ReconciliationStatus: "processing",
+	}).Error; err != nil {
+		t.Fatalf("seed pending version: %v", err)
+	}
+
+	_, err := svc.Upsert(&SaveFormSubmissionRequest{
+		FileID:    10,
+		RowID:     20,
+		FileName:  "people.csv",
+		FormKey:   "boarding",
+		FormLabel: "Boarding",
+	}, 1)
+	if !errors.Is(err, filehelper.ErrFileVersionTransitionInProgress) {
+		t.Fatalf("expected transition conflict, got %v", err)
 	}
 }
 

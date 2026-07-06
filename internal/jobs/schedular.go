@@ -54,6 +54,17 @@ func NewScheduler(
 		return nil, fmt.Errorf("failed to register file data normalization cron: %w", err)
 	}
 
+	fileVersionReconciliationJob := NewFileVersionReconciliationJob(db, logger)
+
+	_, err = c.AddFunc("*/1 * * * *", func() {
+		if err := fileVersionReconciliationJob.Run(); err != nil && logger != nil {
+			logger.Printf("file version reconciliation cron failed: %v", err)
+		}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to register file version reconciliation cron: %w", err)
+	}
+
 	return &Scheduler{cron: c}, nil
 }
 

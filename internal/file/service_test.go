@@ -50,9 +50,11 @@ type UserForTest struct {
 func (UserForTest) TableName() string { return "users" }
 
 type FormSubmissionForTest struct {
-	ID     int64  `gorm:"primaryKey;column:id"`
-	FileID uint   `gorm:"column:file_id"`
-	Status string `gorm:"column:status"`
+	ID       int64  `gorm:"primaryKey;column:id"`
+	FileID   uint   `gorm:"column:file_id"`
+	RowID    int64  `gorm:"column:row_id"`
+	FileName string `gorm:"column:file_name"`
+	Status   string `gorm:"column:status"`
 }
 
 func (FormSubmissionForTest) TableName() string { return "form_submissions" }
@@ -722,6 +724,20 @@ func TestFileService_ReplaceFiles_AllBranches(t *testing.T) {
 		t.Fatalf("expected parse error")
 	}
 
+	// blocked while another transition is already queued
+	if err := db.Create(&FileVersion{
+		FileID:               f.ID,
+		Filename:             f.Filename,
+		Version:              2,
+		ReconciliationStatus: fileVersionStatusProcessing,
+	}).Error; err != nil {
+		t.Fatalf("seed queued version: %v", err)
+	}
+	fh = fileHeaderFromBytes(t, "file", "ok.csv", csvBytes([]string{"h1"}, [][]string{{"v1"}}))
+	if err := svc.ReplaceFiles(fh, f.ID, 1); !errors.Is(err, ErrFileVersionTransitionInProgress) {
+		t.Fatalf("expected transition in progress err, got %v", err)
+	}
+
 	// force Save error by dropping table
 	fh = fileHeaderFromBytes(t, "file", "ok.csv", csvBytes([]string{"h1"}, [][]string{{"v1"}}))
 	if err := db.Migrator().DropTable(&File{}); err != nil {
@@ -781,6 +797,37 @@ func TestFileService_ReplaceFiles_AllBranches(t *testing.T) {
 	if err := db.First(&updated, f.ID).Error; err != nil {
 		t.Fatalf("fetch updated: %v", err)
 	}
+	if updated.Version != 1 || updated.Rows != 0 {
+		t.Fatalf("unexpected queued file state: %#v", updated)
+	}
+	if string(updated.ColumnsOrder) != `["old_col"]` {
+		t.Fatalf("expected current file columns order unchanged before reconciliation, got %s", string(updated.ColumnsOrder))
+	}
+
+	var queuedJobs int64
+	if err := db.Model(&FileVersionReconciliationJob{}).Where("file_id = ?", f.ID).Count(&queuedJobs).Error; err != nil {
+		t.Fatalf("count queued jobs: %v", err)
+	}
+	if queuedJobs != 1 {
+		t.Fatalf("expected 1 queued reconciliation job, got %d", queuedJobs)
+	}
+
+	var v []FileVersion
+	_ = db.Where("file_id = ?", f.ID).Find(&v).Error
+	if len(v) != 1 || v[0].Version != 2 || v[0].InsertedBy != 77 || v[0].ReconciliationStatus != fileVersionStatusProcessing {
+		t.Fatalf("unexpected queued version rows: %#v", v)
+	}
+	if string(v[0].ColumnsOrder) != `["h1","h2"]` {
+		t.Fatalf("expected queued version columns order, got %s", string(v[0].ColumnsOrder))
+	}
+
+	if _, err := RunVersionReconciliationJobs(db, VersionReconciliationRunOptions{MaxJobs: 1}); err != nil {
+		t.Fatalf("run reconciliation jobs: %v", err)
+	}
+
+	if err := db.First(&updated, f.ID).Error; err != nil {
+		t.Fatalf("fetch reconciled file: %v", err)
+	}
 	if updated.Version != 2 || updated.Rows != 1 {
 		t.Fatalf("unexpected updated file: %#v", updated)
 	}
@@ -788,10 +835,9 @@ func TestFileService_ReplaceFiles_AllBranches(t *testing.T) {
 		t.Fatalf("expected updated file columns order, got %s", string(updated.ColumnsOrder))
 	}
 
-	var v []FileVersion
 	_ = db.Where("file_id = ?", f.ID).Find(&v).Error
-	if len(v) != 1 || v[0].Version != 2 || v[0].InsertedBy != 77 {
-		t.Fatalf("unexpected version rows: %#v", v)
+	if len(v) != 1 || v[0].Version != 2 || v[0].InsertedBy != 77 || v[0].ReconciliationStatus != fileVersionStatusReady {
+		t.Fatalf("unexpected reconciled version rows: %#v", v)
 	}
 	if string(v[0].ColumnsOrder) != `["h1","h2"]` {
 		t.Fatalf("expected version columns order, got %s", string(v[0].ColumnsOrder))
@@ -1112,6 +1158,19 @@ func TestFileService_RevertFile_AllBranches(t *testing.T) {
 		t.Fatalf("expected target not found")
 	}
 
+	// blocked while another transition is already queued
+	if err := db.Create(&FileVersion{
+		FileID:               f.ID,
+		Filename:             f.Filename,
+		Version:              3,
+		ReconciliationStatus: fileVersionStatusProcessing,
+	}).Error; err != nil {
+		t.Fatalf("seed queued version: %v", err)
+	}
+	if err := svc.RevertFile("f1", 1, 1); !errors.Is(err, ErrFileVersionTransitionInProgress) {
+		t.Fatalf("expected transition in progress err, got %v", err)
+	}
+
 	// seed target version + file_data
 	_ = db.Create(&FileVersion{FileID: f.ID, Filename: "f1", Version: 1, Rows: 1, Size: 0.5, Private: false, ColumnsOrder: datatypes.JSON([]byte(`["a"]`))}).Error
 	_ = db.Create(&FileData{FileID: f.ID, Version: 1, RowData: datatypes.JSON([]byte(`{"a":"1"}`))}).Error
@@ -1176,6 +1235,23 @@ func TestFileService_RevertFile_AllBranches(t *testing.T) {
 	}
 	var updated File
 	_ = db.Where("filename = ?", "f2").First(&updated).Error
+	if updated.Version != 2 || updated.Rows != 2 || updated.Private != true {
+		t.Fatalf("unexpected queued file state: %#v", updated)
+	}
+
+	var queuedVersion FileVersion
+	if err := db.Where("file_id = ? AND version = ?", f.ID, 3).First(&queuedVersion).Error; err != nil {
+		t.Fatalf("expected queued version row: %v", err)
+	}
+	if queuedVersion.ReconciliationStatus != fileVersionStatusProcessing {
+		t.Fatalf("expected queued version to be processing, got %#v", queuedVersion)
+	}
+
+	if _, err := RunVersionReconciliationJobs(db, VersionReconciliationRunOptions{MaxJobs: 1}); err != nil {
+		t.Fatalf("run reconciliation jobs: %v", err)
+	}
+
+	_ = db.Where("filename = ?", "f2").First(&updated).Error
 	if updated.Version != 3 || updated.Rows != 1 || updated.Private != true {
 		t.Fatalf("unexpected updated file: %#v", updated)
 	}
@@ -1194,6 +1270,412 @@ func TestFileService_RevertFile_AllBranches(t *testing.T) {
 	if string(latestVersion.ColumnsOrder) != `["a","b"]` {
 		t.Fatalf("expected reverted version columns order, got %s", string(latestVersion.ColumnsOrder))
 	}
+}
+
+func TestFileService_ReviewEditRequest_AddInformationUsesCurrentVersionAndUpdatesColumnsOrder(t *testing.T) {
+	db := newTestDB(t)
+	svc := &FileService{DB: db, Mailer: mailer.NewService("test@example.com", "key", "domain", "http://localhost")}
+
+	prevMove := moveGCSFolderHook
+	t.Cleanup(func() { moveGCSFolderHook = prevMove })
+	moveGCSFolderHook = func(bucket, src, dst string) (map[string]string, error) {
+		return map[string]string{}, nil
+	}
+
+	file := File{
+		Filename:     "people.csv",
+		Version:      3,
+		Rows:         0,
+		ColumnsOrder: datatypes.JSON([]byte(`["First Names","Last Names"]`)),
+	}
+	if err := db.Create(&file).Error; err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	if err := db.Create(&FileVersion{
+		FileID:               file.ID,
+		Filename:             file.Filename,
+		Version:              3,
+		Rows:                 0,
+		ColumnsOrder:         datatypes.JSON([]byte(`["First Names","Last Names"]`)),
+		ReconciliationStatus: fileVersionStatusReady,
+	}).Error; err != nil {
+		t.Fatalf("seed file version: %v", err)
+	}
+
+	req := FileEditRequest{
+		UserID:    1,
+		Status:    "pending",
+		IsEdited:  false,
+		FirstName: "Athul",
+		LastName:  "N",
+		RowID:     0,
+		FileID:    file.ID,
+	}
+	if err := db.Create(&req).Error; err != nil {
+		t.Fatalf("seed request: %v", err)
+	}
+	details := []FileEditRequestDetails{
+		{RequestID: req.RequestID, FileID: file.ID, Filename: file.Filename, RowID: 0, FieldName: "First Names", NewValue: "Athul"},
+		{RequestID: req.RequestID, FileID: file.ID, Filename: file.Filename, RowID: 0, FieldName: "Last Names", NewValue: "N"},
+		{RequestID: req.RequestID, FileID: file.ID, Filename: file.Filename, RowID: 0, FieldName: "Middle Names", NewValue: "S"},
+	}
+	if err := db.Create(&details).Error; err != nil {
+		t.Fatalf("seed details: %v", err)
+	}
+
+	if err := svc.ReviewEditRequest(req.RequestID, "completed", "looks good", nil, 9); err != nil {
+		t.Fatalf("review request: %v", err)
+	}
+
+	var addedRows []FileData
+	if err := db.Where("file_id = ? AND version = ?", file.ID, 3).Order("id ASC").Find(&addedRows).Error; err != nil {
+		t.Fatalf("load added rows: %v", err)
+	}
+	if len(addedRows) != 1 {
+		t.Fatalf("expected 1 current-version added row, got %d", len(addedRows))
+	}
+
+	var row map[string]string
+	if err := json.Unmarshal(addedRows[0].RowData, &row); err != nil {
+		t.Fatalf("unmarshal added row: %v", err)
+	}
+	if row["Middle Names"] != "S" {
+		t.Fatalf("expected middle name in added row, got %#v", row)
+	}
+
+	var updatedFile File
+	if err := db.First(&updatedFile, file.ID).Error; err != nil {
+		t.Fatalf("reload file: %v", err)
+	}
+	if updatedFile.Rows != 1 {
+		t.Fatalf("expected file rows to update, got %#v", updatedFile)
+	}
+	if string(updatedFile.ColumnsOrder) != `["First Names","Last Names","Middle Names"]` {
+		t.Fatalf("unexpected file columns order: %s", string(updatedFile.ColumnsOrder))
+	}
+
+	var updatedVersion FileVersion
+	if err := db.Where("file_id = ? AND version = ?", file.ID, 3).First(&updatedVersion).Error; err != nil {
+		t.Fatalf("reload file version: %v", err)
+	}
+	if updatedVersion.Rows != 1 {
+		t.Fatalf("expected file version rows to update, got %#v", updatedVersion)
+	}
+	if string(updatedVersion.ColumnsOrder) != `["First Names","Last Names","Middle Names"]` {
+		t.Fatalf("unexpected file version columns order: %s", string(updatedVersion.ColumnsOrder))
+	}
+}
+
+func TestFileService_VersionReconciliation_ReplaceAndRevert(t *testing.T) {
+	t.Run("replace matches duplicate names by school and carries forward legacy rows", func(t *testing.T) {
+		db := newTestDB(t)
+		svc := &FileService{DB: db}
+
+		file := File{
+			Filename:     "people.csv",
+			Version:      1,
+			Rows:         3,
+			ColumnsOrder: datatypes.JSON([]byte(`["First Names","Last Names","School","Middle Names"]`)),
+		}
+		if err := db.Create(&file).Error; err != nil {
+			t.Fatalf("seed file: %v", err)
+		}
+		if err := db.Create(&FileVersion{
+			FileID:               file.ID,
+			Filename:             file.Filename,
+			Version:              1,
+			Rows:                 3,
+			ColumnsOrder:         file.ColumnsOrder,
+			ReconciliationStatus: fileVersionStatusReady,
+		}).Error; err != nil {
+			t.Fatalf("seed current version: %v", err)
+		}
+
+		alphaRow := FileData{FileID: file.ID, Version: 1, RowData: datatypes.JSON([]byte(`{"First Names":"Athul","Last Names":"N","School":"Alpha","Middle Names":"s"}`))}
+		betaRow := FileData{FileID: file.ID, Version: 1, RowData: datatypes.JSON([]byte(`{"First Names":"Athul","Last Names":"N","School":"Beta"}`))}
+		legacyRow := FileData{FileID: file.ID, Version: 1, RowData: datatypes.JSON([]byte(`{"First Names":"Legacy","Last Names":"Person"}`))}
+		for _, row := range []*FileData{&alphaRow, &betaRow, &legacyRow} {
+			if err := db.Create(row).Error; err != nil {
+				t.Fatalf("seed file data: %v", err)
+			}
+		}
+
+		editReq := FileEditRequest{UserID: 1, Status: "completed", IsEdited: true, RowID: int(alphaRow.ID), FileID: file.ID}
+		if err := db.Create(&editReq).Error; err != nil {
+			t.Fatalf("seed edit request: %v", err)
+		}
+		if err := db.Create(&FileEditRequestDetails{
+			RequestID: editReq.RequestID,
+			FileID:    file.ID,
+			Filename:  file.Filename,
+			RowID:     int(alphaRow.ID),
+			FieldName: "Middle Names",
+			NewValue:  "s",
+			Status:    "approved",
+		}).Error; err != nil {
+			t.Fatalf("seed edit detail: %v", err)
+		}
+
+		legacyReq := FileEditRequest{UserID: 1, Status: "completed", IsEdited: false, RowID: int(legacyRow.ID), FileID: file.ID, FirstName: "Legacy", LastName: "Person"}
+		if err := db.Create(&legacyReq).Error; err != nil {
+			t.Fatalf("seed legacy request: %v", err)
+		}
+		if err := db.Create(&FileEditRequestDetails{
+			RequestID: legacyReq.RequestID,
+			FileID:    file.ID,
+			Filename:  file.Filename,
+			RowID:     int(legacyRow.ID),
+			FieldName: "First Names",
+			NewValue:  "Legacy",
+			Status:    "approved",
+		}).Error; err != nil {
+			t.Fatalf("seed legacy detail: %v", err)
+		}
+
+		photo := FileEditRequestPhoto{RequestID: editReq.RequestID, RowID: int(betaRow.ID), FileID: file.ID, PhotoURL: "gs://bucket/photos/beta.jpg", FileName: "beta.jpg", DocumentType: "photos"}
+		if err := db.Create(&photo).Error; err != nil {
+			t.Fatalf("seed photo: %v", err)
+		}
+
+		form := FormSubmissionForTest{FileID: file.ID, RowID: int64(betaRow.ID), FileName: file.Filename, Status: "rejected"}
+		if err := db.Create(&form).Error; err != nil {
+			t.Fatalf("seed form submission: %v", err)
+		}
+
+		fh := fileHeaderFromBytes(t, "file", "people.csv", csvBytes(
+			[]string{"Last Names", "First Names", "School"},
+			[][]string{
+				{"N", "Athul", "Beta"},
+				{"N", "Athul", "Alpha"},
+			},
+		))
+		if err := svc.ReplaceFiles(fh, file.ID, 42); err != nil {
+			t.Fatalf("queue replace: %v", err)
+		}
+
+		if _, err := RunVersionReconciliationJobs(db, VersionReconciliationRunOptions{MaxJobs: 1}); err != nil {
+			t.Fatalf("run reconciliation jobs: %v", err)
+		}
+
+		var updatedFile File
+		if err := db.First(&updatedFile, file.ID).Error; err != nil {
+			t.Fatalf("reload file: %v", err)
+		}
+		if updatedFile.Version != 2 || updatedFile.Rows != 3 {
+			t.Fatalf("unexpected reconciled file: %#v", updatedFile)
+		}
+		if string(updatedFile.ColumnsOrder) != `["Last Names","First Names","School","Middle Names"]` {
+			t.Fatalf("unexpected reconciled columns order: %s", string(updatedFile.ColumnsOrder))
+		}
+
+		var versionTwoRows []FileData
+		if err := db.Where("file_id = ? AND version = ?", file.ID, 2).Order("id ASC").Find(&versionTwoRows).Error; err != nil {
+			t.Fatalf("load version 2 rows: %v", err)
+		}
+		if len(versionTwoRows) != 3 {
+			t.Fatalf("expected 3 version 2 rows, got %d", len(versionTwoRows))
+		}
+
+		rowBySchool := make(map[string]FileData)
+		var legacyVersionTwoRow FileData
+		for _, row := range versionTwoRows {
+			var payload map[string]string
+			if err := json.Unmarshal(row.RowData, &payload); err != nil {
+				t.Fatalf("unmarshal reconciled row: %v", err)
+			}
+			if payload["School"] != "" {
+				rowBySchool[payload["School"]] = row
+			}
+			if payload["First Names"] == "Legacy" && payload["Last Names"] == "Person" {
+				legacyVersionTwoRow = row
+			}
+			if payload["School"] == "Alpha" && payload["Middle Names"] != "s" {
+				t.Fatalf("expected approved middle name to be replayed, got %#v", payload)
+			}
+		}
+		if rowBySchool["Beta"].ID == 0 || rowBySchool["Alpha"].ID == 0 {
+			t.Fatalf("expected both duplicate-name rows to remain in version 2")
+		}
+		if legacyVersionTwoRow.ID == 0 {
+			t.Fatalf("expected legacy row to be carried forward")
+		}
+
+		var updatedPhoto FileEditRequestPhoto
+		if err := db.First(&updatedPhoto, photo.ID).Error; err != nil {
+			t.Fatalf("reload photo: %v", err)
+		}
+		if updatedPhoto.RowID != int(rowBySchool["Beta"].ID) {
+			t.Fatalf("expected photo to relink to beta row, got %#v", updatedPhoto)
+		}
+
+		var updatedForm FormSubmissionForTest
+		if err := db.First(&updatedForm, form.ID).Error; err != nil {
+			t.Fatalf("reload form submission: %v", err)
+		}
+		if updatedForm.RowID != int64(rowBySchool["Beta"].ID) || updatedForm.FileName != file.Filename {
+			t.Fatalf("expected form submission to relink to beta row, got %#v", updatedForm)
+		}
+
+		var updatedLegacyReq FileEditRequest
+		if err := db.First(&updatedLegacyReq, legacyReq.RequestID).Error; err != nil {
+			t.Fatalf("reload legacy request: %v", err)
+		}
+		if updatedLegacyReq.RowID != int(legacyVersionTwoRow.ID) {
+			t.Fatalf("expected legacy request to relink to carried row, got %#v", updatedLegacyReq)
+		}
+
+		var lineageCount int64
+		if err := db.Model(&FileRowLineage{}).Where("file_id = ? AND target_version = ?", file.ID, 2).Count(&lineageCount).Error; err != nil {
+			t.Fatalf("count lineage rows: %v", err)
+		}
+		if lineageCount != 3 {
+			t.Fatalf("expected lineage for all source rows, got %d", lineageCount)
+		}
+	})
+
+	t.Run("revert replays approved edits and carries forward legacy rows", func(t *testing.T) {
+		db := newTestDB(t)
+		svc := &FileService{DB: db}
+
+		file := File{
+			Filename:     "people.csv",
+			Version:      2,
+			Rows:         3,
+			ColumnsOrder: datatypes.JSON([]byte(`["First Names","Last Names","School","Middle Names"]`)),
+		}
+		if err := db.Create(&file).Error; err != nil {
+			t.Fatalf("seed file: %v", err)
+		}
+		if err := db.Create(&FileVersion{
+			FileID:               file.ID,
+			Filename:             file.Filename,
+			Version:              1,
+			Rows:                 2,
+			ColumnsOrder:         datatypes.JSON([]byte(`["First Names","Last Names","School"]`)),
+			ReconciliationStatus: fileVersionStatusReady,
+		}).Error; err != nil {
+			t.Fatalf("seed historical version: %v", err)
+		}
+		if err := db.Create(&FileVersion{
+			FileID:               file.ID,
+			Filename:             file.Filename,
+			Version:              2,
+			Rows:                 3,
+			ColumnsOrder:         file.ColumnsOrder,
+			ReconciliationStatus: fileVersionStatusReady,
+		}).Error; err != nil {
+			t.Fatalf("seed current version: %v", err)
+		}
+
+		_ = db.Create(&FileData{FileID: file.ID, Version: 1, RowData: datatypes.JSON([]byte(`{"First Names":"Athul","Last Names":"N","School":"Alpha"}`))}).Error
+		_ = db.Create(&FileData{FileID: file.ID, Version: 1, RowData: datatypes.JSON([]byte(`{"First Names":"Athul","Last Names":"N","School":"Beta"}`))}).Error
+
+		alphaCurrent := FileData{FileID: file.ID, Version: 2, RowData: datatypes.JSON([]byte(`{"First Names":"Athul","Last Names":"N","School":"Alpha","Middle Names":"s"}`))}
+		betaCurrent := FileData{FileID: file.ID, Version: 2, RowData: datatypes.JSON([]byte(`{"First Names":"Athul","Last Names":"N","School":"Beta"}`))}
+		legacyCurrent := FileData{FileID: file.ID, Version: 2, RowData: datatypes.JSON([]byte(`{"First Names":"Legacy","Last Names":"Person"}`))}
+		for _, row := range []*FileData{&alphaCurrent, &betaCurrent, &legacyCurrent} {
+			if err := db.Create(row).Error; err != nil {
+				t.Fatalf("seed current row: %v", err)
+			}
+		}
+
+		editReq := FileEditRequest{UserID: 1, Status: "completed", IsEdited: true, RowID: int(alphaCurrent.ID), FileID: file.ID}
+		if err := db.Create(&editReq).Error; err != nil {
+			t.Fatalf("seed edit request: %v", err)
+		}
+		if err := db.Create(&FileEditRequestDetails{
+			RequestID: editReq.RequestID,
+			FileID:    file.ID,
+			Filename:  file.Filename,
+			RowID:     int(alphaCurrent.ID),
+			FieldName: "Middle Names",
+			NewValue:  "s",
+			Status:    "approved",
+		}).Error; err != nil {
+			t.Fatalf("seed edit detail: %v", err)
+		}
+
+		legacyReq := FileEditRequest{UserID: 1, Status: "completed", IsEdited: false, RowID: int(legacyCurrent.ID), FileID: file.ID, FirstName: "Legacy", LastName: "Person"}
+		if err := db.Create(&legacyReq).Error; err != nil {
+			t.Fatalf("seed legacy request: %v", err)
+		}
+		if err := db.Create(&FileEditRequestDetails{
+			RequestID: legacyReq.RequestID,
+			FileID:    file.ID,
+			Filename:  file.Filename,
+			RowID:     int(legacyCurrent.ID),
+			FieldName: "First Names",
+			NewValue:  "Legacy",
+			Status:    "approved",
+		}).Error; err != nil {
+			t.Fatalf("seed legacy detail: %v", err)
+		}
+
+		photo := FileEditRequestPhoto{RequestID: editReq.RequestID, RowID: int(betaCurrent.ID), FileID: file.ID, PhotoURL: "gs://bucket/photos/beta.jpg", FileName: "beta.jpg", DocumentType: "photos"}
+		if err := db.Create(&photo).Error; err != nil {
+			t.Fatalf("seed photo: %v", err)
+		}
+
+		if err := svc.RevertFile(file.Filename, 1, 77); err != nil {
+			t.Fatalf("queue revert: %v", err)
+		}
+		if _, err := RunVersionReconciliationJobs(db, VersionReconciliationRunOptions{MaxJobs: 1}); err != nil {
+			t.Fatalf("run reconciliation jobs: %v", err)
+		}
+
+		var updatedFile File
+		if err := db.First(&updatedFile, file.ID).Error; err != nil {
+			t.Fatalf("reload file: %v", err)
+		}
+		if updatedFile.Version != 3 || updatedFile.Rows != 3 {
+			t.Fatalf("unexpected reverted file: %#v", updatedFile)
+		}
+
+		var versionThreeRows []FileData
+		if err := db.Where("file_id = ? AND version = ?", file.ID, 3).Order("id ASC").Find(&versionThreeRows).Error; err != nil {
+			t.Fatalf("load version 3 rows: %v", err)
+		}
+		if len(versionThreeRows) != 3 {
+			t.Fatalf("expected 3 version 3 rows, got %d", len(versionThreeRows))
+		}
+
+		rowBySchool := make(map[string]FileData)
+		var legacyVersionThreeRow FileData
+		for _, row := range versionThreeRows {
+			var payload map[string]string
+			if err := json.Unmarshal(row.RowData, &payload); err != nil {
+				t.Fatalf("unmarshal reverted row: %v", err)
+			}
+			if payload["School"] != "" {
+				rowBySchool[payload["School"]] = row
+			}
+			if payload["First Names"] == "Legacy" && payload["Last Names"] == "Person" {
+				legacyVersionThreeRow = row
+			}
+			if payload["School"] == "Alpha" && payload["Middle Names"] != "s" {
+				t.Fatalf("expected approved middle name after revert, got %#v", payload)
+			}
+		}
+		if legacyVersionThreeRow.ID == 0 {
+			t.Fatalf("expected legacy row to be carried forward on revert")
+		}
+
+		var updatedPhoto FileEditRequestPhoto
+		if err := db.First(&updatedPhoto, photo.ID).Error; err != nil {
+			t.Fatalf("reload photo: %v", err)
+		}
+		if updatedPhoto.RowID != int(rowBySchool["Beta"].ID) {
+			t.Fatalf("expected photo to relink to beta row after revert, got %#v", updatedPhoto)
+		}
+
+		var updatedLegacyReq FileEditRequest
+		if err := db.First(&updatedLegacyReq, legacyReq.RequestID).Error; err != nil {
+			t.Fatalf("reload legacy request: %v", err)
+		}
+		if updatedLegacyReq.RowID != int(legacyVersionThreeRow.ID) {
+			t.Fatalf("expected legacy request to relink after revert, got %#v", updatedLegacyReq)
+		}
+	})
 }
 
 func TestFileService_BlocksFileMutationsWhenOpenRequestsExist(t *testing.T) {

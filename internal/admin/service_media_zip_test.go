@@ -360,3 +360,50 @@ func Test_StreamMediaZip_CopyError(t *testing.T) {
 		t.Fatalf("unmet expectations: %v", err)
 	}
 }
+
+func Test_StreamMediaZip_DeduplicatesSameMediaObject(t *testing.T) {
+	db, mock, cleanup := newMockDBForZip(t)
+	defer cleanup()
+
+	as := &AdminService{DB: db}
+
+	mock.ExpectQuery(`(?i)file_edit_request_photos`).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "request_id", "row_id", "photo_url", "file_name", "document_type", "document_category",
+			"user_id", "user_first", "user_last",
+		}).
+			AddRow(uint(1), uint(10), 5, "gs://mybucket/photos/a.jpg", "a.jpg", "photos", "", uint(9), "A", "B").
+			AddRow(uint(2), uint(11), 7, "gs://mybucket/photos/a.jpg", "a.jpg", "photos", "", uint(9), "A", "B"))
+
+	fake := &fakeGCS{
+		objects: map[string]map[string]any{
+			"mybucket": {
+				path.Clean("photos/a.jpg"): []byte("AAA"),
+			},
+		},
+	}
+	old := newGCSClientHook
+	newGCSClientHook = func(ctx context.Context) (gcsClient, error) { return fake, nil }
+	t.Cleanup(func() { newGCSClientHook = old })
+
+	var out bytes.Buffer
+	err := as.StreamMediaZip(context.Background(), &out, AdminDownloadMediaRequest{
+		RequestIDs:   []uint{10, 11},
+		DocumentType: "photos",
+	})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+
+	zr, err := zip.NewReader(bytes.NewReader(out.Bytes()), int64(out.Len()))
+	if err != nil {
+		t.Fatalf("zip read: %v", err)
+	}
+	if len(zr.File) != 1 {
+		t.Fatalf("expected 1 deduplicated zip entry, got %d", len(zr.File))
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}

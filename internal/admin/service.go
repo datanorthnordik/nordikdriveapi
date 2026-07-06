@@ -984,6 +984,7 @@ func (as *AdminService) StreamMediaZip(ctx context.Context, out io.Writer, req A
 	if err != nil {
 		return err
 	}
+	rows = dedupeMediaZipRows(rows)
 	if len(rows) == 0 {
 		return fmt.Errorf("no media found for the selected filters")
 	}
@@ -1121,6 +1122,31 @@ func (as *AdminService) loadMediaRows(requestIDs []uint, docType string, onlyApp
 	}
 
 	return out, nil
+}
+
+func dedupeMediaZipRows(rows []mediaZipRow) []mediaZipRow {
+	if len(rows) < 2 {
+		return rows
+	}
+
+	seen := make(map[string]struct{}, len(rows))
+	out := make([]mediaZipRow, 0, len(rows))
+	for _, row := range rows {
+		keyParts := []string{
+			strings.ToLower(strings.TrimSpace(row.DocumentType)),
+			strings.TrimSpace(row.PhotoURL),
+		}
+		if keyParts[1] == "" {
+			keyParts = append(keyParts, strings.TrimSpace(row.FileName))
+		}
+		key := strings.Join(keyParts, "|")
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, row)
+	}
+	return out
 }
 
 // Folder logic based on flags

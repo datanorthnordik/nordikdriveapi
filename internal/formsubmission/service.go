@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	filehelper "nordik-drive-api/internal/file"
 	"path"
 	"strings"
 	"sync"
@@ -334,6 +335,9 @@ func (s *FormSubmissionService) Upsert(req *SaveFormSubmissionRequest, userId in
 	}
 	if strings.TrimSpace(req.FormLabel) == "" {
 		return nil, errors.New("form_label is required")
+	}
+	if err := filehelper.EnsureFileVersionTransitionIdleByID(s.DB, uint(req.FileID)); err != nil {
+		return nil, err
 	}
 
 	formKey := strings.TrimSpace(req.FormKey)
