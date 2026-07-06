@@ -1764,7 +1764,7 @@ func TestFileService_BlocksFileMutationsWhenOpenRequestsExist(t *testing.T) {
 		}
 	})
 
-	t.Run("replace blocked by active parent form submission status", func(t *testing.T) {
+	t.Run("replace allowed when form submission is already approved", func(t *testing.T) {
 		db := newTestDB(t)
 		svc := &FileService{DB: db}
 
@@ -1781,11 +1781,8 @@ func TestFileService_BlocksFileMutationsWhenOpenRequestsExist(t *testing.T) {
 
 		fh := fileHeaderFromBytes(t, "file", "replace.csv", csvBytes([]string{"a"}, [][]string{{"1"}}))
 		err := svc.ReplaceFiles(fh, file.ID, 1)
-		if !errors.Is(err, ErrFileOperationBlocked) {
-			t.Fatalf("expected open request block, got %v", err)
-		}
-		if !strings.Contains(err.Error(), "open form submission request") {
-			t.Fatalf("unexpected error message: %v", err)
+		if err != nil {
+			t.Fatalf("expected approved submission not to block replace, got %v", err)
 		}
 	})
 
@@ -1839,13 +1836,68 @@ func TestFileService_BlocksFileMutationsWhenOpenRequestsExist(t *testing.T) {
 		}
 	})
 
-	t.Run("revert blocked by legacy parent file edit status", func(t *testing.T) {
+	t.Run("revert allowed when form submissions are approved or rejected", func(t *testing.T) {
+		db := newTestDB(t)
+		svc := &FileService{DB: db}
+
+		file := File{Filename: "revert-reviewed-form-guard.csv", Version: 1}
+		if err := db.Create(&file).Error; err != nil {
+			t.Fatalf("seed file: %v", err)
+		}
+		if err := db.Create(&FileVersion{
+			FileID:               file.ID,
+			Filename:             file.Filename,
+			Version:              1,
+			Rows:                 1,
+			ColumnsOrder:         datatypes.JSON([]byte(`["a"]`)),
+			ReconciliationStatus: fileVersionStatusReady,
+		}).Error; err != nil {
+			t.Fatalf("seed file version: %v", err)
+		}
+		if err := db.Create(&FileData{
+			FileID:  file.ID,
+			Version: 1,
+			RowData: datatypes.JSON([]byte(`{"a":"1"}`)),
+		}).Error; err != nil {
+			t.Fatalf("seed file data: %v", err)
+		}
+		if err := db.Create(&[]FormSubmissionForTest{
+			{FileID: file.ID, Status: "approved"},
+			{FileID: file.ID, Status: " rejected "},
+		}).Error; err != nil {
+			t.Fatalf("seed reviewed form submissions: %v", err)
+		}
+
+		err := svc.RevertFile(file.Filename, 1, 1)
+		if err != nil {
+			t.Fatalf("expected reviewed submissions not to block revert, got %v", err)
+		}
+	})
+
+	t.Run("revert allowed when file edit request is already approved", func(t *testing.T) {
 		db := newTestDB(t)
 		svc := &FileService{DB: db}
 
 		file := File{Filename: "revert-approved-edit-guard.csv", Version: 1}
 		if err := db.Create(&file).Error; err != nil {
 			t.Fatalf("seed file: %v", err)
+		}
+		if err := db.Create(&FileVersion{
+			FileID:               file.ID,
+			Filename:             file.Filename,
+			Version:              1,
+			Rows:                 1,
+			ColumnsOrder:         datatypes.JSON([]byte(`["a"]`)),
+			ReconciliationStatus: fileVersionStatusReady,
+		}).Error; err != nil {
+			t.Fatalf("seed file version: %v", err)
+		}
+		if err := db.Create(&FileData{
+			FileID:  file.ID,
+			Version: 1,
+			RowData: datatypes.JSON([]byte(`{"a":"1"}`)),
+		}).Error; err != nil {
+			t.Fatalf("seed file data: %v", err)
 		}
 		if err := db.Create(&FileEditRequest{
 			UserID: 1,
@@ -1857,11 +1909,8 @@ func TestFileService_BlocksFileMutationsWhenOpenRequestsExist(t *testing.T) {
 		}
 
 		err := svc.RevertFile(file.Filename, 1, 1)
-		if !errors.Is(err, ErrFileOperationBlocked) {
-			t.Fatalf("expected open request block, got %v", err)
-		}
-		if !strings.Contains(err.Error(), "open file edit request") {
-			t.Fatalf("unexpected error message: %v", err)
+		if err != nil {
+			t.Fatalf("expected approved file edit request not to block revert, got %v", err)
 		}
 	})
 }
