@@ -71,6 +71,8 @@ func migrateTestSchema(t *testing.T, db *gorm.DB) {
 		&FileVersion{},
 		&FileData{},
 		&FileDataNormalized{},
+		&FileVersionReconciliationJob{},
+		&FileRowLineage{},
 		&FormSubmissionForTest{},
 		&FileAccess{},
 		&FileEditRequest{},
@@ -984,6 +986,37 @@ func TestFileService_GetFileData_AllBranches(t *testing.T) {
 	}
 	if compact.String() != `{"b":"2","a":"1","c":""}` {
 		t.Fatalf("unexpected ordered row: %s", compact.String())
+	}
+
+	// duplicate file_version rows from legacy data should not break reads
+	f4 := File{Filename: "f4", IsDelete: false, Version: 1, ColumnsOrder: cols}
+	_ = db.Create(&f4).Error
+	_ = db.Create(&FileVersion{
+		FileID:               f4.ID,
+		Filename:             "f4",
+		Version:              1,
+		ColumnsOrder:         cols,
+		ReconciliationStatus: fileVersionStatusReady,
+	}).Error
+	_ = db.Create(&FileVersion{
+		FileID:               f4.ID,
+		Filename:             "f4",
+		Version:              1,
+		ColumnsOrder:         cols,
+		ReconciliationStatus: fileVersionStatusReady,
+	}).Error
+	_ = db.Create(&FileData{
+		FileID:  f4.ID,
+		RowData: datatypes.JSON([]byte(`{"a":"x","b":"y"}`)),
+		Version: 1,
+	}).Error
+
+	rows, err = svc.GetFileData("f4", 1)
+	if err != nil {
+		t.Fatalf("expected duplicate version metadata not to break reads, got %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row for duplicate-version file, got %d", len(rows))
 	}
 
 	// Find error path: drop file_data table after file exists + columns ok

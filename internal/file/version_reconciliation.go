@@ -192,45 +192,17 @@ type debugLineagePayload struct {
 	Fields        []string `json:"fields,omitempty"`
 }
 
-func ensureVersionReconciliationSchema(db *gorm.DB) error {
-	if db == nil {
-		return fmt.Errorf("db not initialized")
-	}
-	hasFileVersionTable := db.Migrator().HasTable(&FileVersion{})
-
-	if hasFileVersionTable {
-		if err := db.AutoMigrate(&FileVersion{}); err != nil {
-			return err
-		}
-	}
-
-	if err := db.AutoMigrate(
-		&FileVersionReconciliationJob{},
-		&FileRowLineage{},
-	); err != nil {
-		return err
-	}
-
-	if hasFileVersionTable {
-		if err := db.Exec(
-			"UPDATE file_version SET reconciliation_status = ?, reconciliation_error = COALESCE(reconciliation_error, ''), transition_operation = COALESCE(transition_operation, '') WHERE reconciliation_status IS NULL OR reconciliation_status = ''",
-			fileVersionStatusReady,
-		).Error; err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
 func EnsureFileVersionTransitionIdleByID(db *gorm.DB, fileID uint) error {
 	if fileID == 0 {
 		return nil
 	}
-	if err := ensureVersionReconciliationSchema(db); err != nil {
-		return err
+	if db == nil {
+		return fmt.Errorf("db not initialized")
 	}
 	if !db.Migrator().HasTable(&FileVersion{}) {
+		return nil
+	}
+	if !db.Migrator().HasColumn(&FileVersion{}, "reconciliation_status") {
 		return nil
 	}
 	return ensureFileVersionTransitionIdleWithDB(db, fileID)
@@ -311,8 +283,8 @@ func (fs *FileService) enqueueVersionTransitionJob(tx *gorm.DB, fileID uint, fil
 }
 
 func RunVersionReconciliationJobs(db *gorm.DB, options VersionReconciliationRunOptions) (*VersionReconciliationRunResult, error) {
-	if err := ensureVersionReconciliationSchema(db); err != nil {
-		return nil, err
+	if db == nil {
+		return nil, fmt.Errorf("db not initialized")
 	}
 
 	maxJobs := options.MaxJobs
