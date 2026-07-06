@@ -1866,7 +1866,7 @@ func TestRunVersionReconciliationJobs_RecoversStaleProcessingJob(t *testing.T) {
 	staleAt := time.Now().Add(-defaultVersionReconciliationLeaseTTL - time.Minute)
 	if err := db.Model(&FileVersionReconciliationJob{}).
 		Where("id = ?", job.ID).
-		Updates(map[string]any{
+		UpdateColumns(map[string]any{
 			"status":       reconciliationJobStatusProcessing,
 			"attempts":     1,
 			"started_at":   staleAt,
@@ -1908,6 +1908,98 @@ func TestRunVersionReconciliationJobs_RecoversStaleProcessingJob(t *testing.T) {
 	}
 	if versionTwo.ReconciliationStatus != fileVersionStatusReady {
 		t.Fatalf("expected reconciled version to be ready, got %#v", versionTwo)
+	}
+}
+
+func TestRunVersionReconciliationJobs_DoesNotRecoverProcessingJobWithRecentHeartbeat(t *testing.T) {
+	db := newTestDB(t)
+	svc := &FileService{DB: db}
+
+	file := File{
+		Filename:     "active-heartbeat.csv",
+		Version:      1,
+		Rows:         1,
+		ColumnsOrder: datatypes.JSON([]byte(`["name"]`)),
+	}
+	if err := db.Create(&file).Error; err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	if err := db.Create(&FileVersion{
+		FileID:               file.ID,
+		Filename:             file.Filename,
+		Version:              1,
+		Rows:                 1,
+		ColumnsOrder:         datatypes.JSON([]byte(`["name"]`)),
+		ReconciliationStatus: fileVersionStatusReady,
+	}).Error; err != nil {
+		t.Fatalf("seed current version: %v", err)
+	}
+	if err := db.Create(&FileData{
+		FileID:  file.ID,
+		Version: 1,
+		RowData: datatypes.JSON([]byte(`{"name":"before"}`)),
+	}).Error; err != nil {
+		t.Fatalf("seed current row: %v", err)
+	}
+
+	fh := fileHeaderFromBytes(t, "file", "active-heartbeat.csv", csvBytes(
+		[]string{"name"},
+		[][]string{{"after"}},
+	))
+	if err := svc.ReplaceFiles(fh, file.ID, 11); err != nil {
+		t.Fatalf("queue replace: %v", err)
+	}
+
+	var job FileVersionReconciliationJob
+	if err := db.Where("file_id = ?", file.ID).First(&job).Error; err != nil {
+		t.Fatalf("load queued job: %v", err)
+	}
+
+	var targetVersion FileVersion
+	if err := db.First(&targetVersion, job.FileVersionID).Error; err != nil {
+		t.Fatalf("load target version: %v", err)
+	}
+
+	staleStartedAt := time.Now().Add(-defaultVersionReconciliationLeaseTTL - time.Minute)
+	heartbeatAt := time.Now()
+	if err := db.Model(&FileVersionReconciliationJob{}).
+		Where("id = ?", job.ID).
+		UpdateColumns(map[string]any{
+			"status":       reconciliationJobStatusProcessing,
+			"attempts":     1,
+			"started_at":   staleStartedAt,
+			"updated_at":   heartbeatAt,
+			"available_at": staleStartedAt,
+		}).Error; err != nil {
+		t.Fatalf("mark job as actively heartbeating: %v", err)
+	}
+
+	result, err := RunVersionReconciliationJobs(db, VersionReconciliationRunOptions{MaxJobs: 1})
+	if err != nil {
+		t.Fatalf("run reconciliation jobs: %v", err)
+	}
+	if result.Claimed != 0 || result.Completed != 0 || result.Retried != 0 || result.Failed != 0 {
+		t.Fatalf("expected active processing job to be left untouched, got %#v", result)
+	}
+
+	if err := db.First(&job, job.ID).Error; err != nil {
+		t.Fatalf("reload job: %v", err)
+	}
+	if job.Status != reconciliationJobStatusProcessing {
+		t.Fatalf("expected active job to remain processing, got %#v", job)
+	}
+	if job.Attempts != 1 {
+		t.Fatalf("expected attempts to remain unchanged, got %#v", job)
+	}
+	if job.LastError != "" {
+		t.Fatalf("expected no recovery error on active job, got %#v", job)
+	}
+
+	if err := db.First(&targetVersion, targetVersion.ID).Error; err != nil {
+		t.Fatalf("reload target version: %v", err)
+	}
+	if targetVersion.ReconciliationStatus != fileVersionStatusProcessing {
+		t.Fatalf("expected target version to remain processing, got %#v", targetVersion)
 	}
 }
 

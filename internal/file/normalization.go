@@ -176,6 +176,19 @@ func SyncPendingNormalizedRows(db *gorm.DB, fileID *uint, version *int, limit in
 		Where("f.is_delete = ?", false).
 		Where("(fdn.id IS NULL OR fdn.source_updated_at < fd.updated_at OR fdn.normalization_version <> ?)", currentNormalizationVersion)
 
+	if db.Migrator().HasTable(&FileVersion{}) && db.Migrator().HasColumn(&FileVersion{}, "reconciliation_status") {
+		query = query.Where(
+			`NOT EXISTS (
+				SELECT 1
+				FROM file_version fv
+				WHERE fv.file_id = fd.file_id
+				  AND fv.version = fd.version
+				  AND COALESCE(fv.reconciliation_status, '') = ?
+			)`,
+			fileVersionStatusProcessing,
+		)
+	}
+
 	if fileID != nil {
 		query = query.Where("fd.file_id = ?", *fileID)
 	}

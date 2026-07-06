@@ -1,6 +1,7 @@
 package file
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,14 +30,16 @@ const (
 	reconciliationJobStatusCompleted  = "completed"
 	reconciliationJobStatusFailed     = "failed"
 
-	defaultVersionReconciliationMaxJobs    = 5
-	defaultVersionReconciliationThreshold  = 45.0
-	defaultVersionReconciliationMargin     = 8.0
-	defaultVersionReconciliationLeaseTTL   = 15 * time.Minute
-	maxVersionReconciliationAttempts       = 10
-	maxGenericFieldScore                   = 12.0
-	maxGenericFieldWeight                  = 3.0
-	defaultVersionReconciliationRetryDelay = time.Minute
+	defaultVersionReconciliationMaxJobs     = 5
+	defaultVersionReconciliationThreshold   = 45.0
+	defaultVersionReconciliationMargin      = 8.0
+	defaultVersionReconciliationHeartbeat   = 30 * time.Second
+	defaultVersionReconciliationLeaseTTL    = 15 * time.Minute
+	defaultVersionReconciliationRelinkBatch = 250
+	maxVersionReconciliationAttempts        = 10
+	maxGenericFieldScore                    = 12.0
+	maxGenericFieldWeight                   = 3.0
+	defaultVersionReconciliationRetryDelay  = time.Minute
 )
 
 var ErrFileVersionTransitionInProgress = errors.New("file version transition already in progress")
@@ -215,6 +218,11 @@ type debugLineagePayload struct {
 	Matched       bool     `json:"matched"`
 	TargetRowID   *uint    `json:"target_row_id,omitempty"`
 	Fields        []string `json:"fields,omitempty"`
+}
+
+type versionReconciliationHeartbeat struct {
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 func EnsureFileVersionTransitionIdleByID(db *gorm.DB, fileID uint) error {
@@ -402,16 +410,19 @@ func RunVersionReconciliationJobs(db *gorm.DB, options VersionReconciliationRunO
 func recoverStaleVersionReconciliationJobs(db *gorm.DB) error {
 	staleBefore := time.Now().Add(-defaultVersionReconciliationLeaseTTL)
 
-	var staleJobs []FileVersionReconciliationJob
+	var processingJobs []FileVersionReconciliationJob
 	if err := db.
-		Where("status = ? AND COALESCE(started_at, updated_at, created_at) <= ?", reconciliationJobStatusProcessing, staleBefore).
+		Where("status = ?", reconciliationJobStatusProcessing).
 		Order("id ASC").
-		Find(&staleJobs).Error; err != nil {
+		Find(&processingJobs).Error; err != nil {
 		return err
 	}
 
-	for i := range staleJobs {
-		if err := recoverStaleVersionReconciliationJob(db, &staleJobs[i], staleBefore); err != nil {
+	for i := range processingJobs {
+		if !isVersionReconciliationJobStale(&processingJobs[i], staleBefore) {
+			continue
+		}
+		if err := recoverStaleVersionReconciliationJob(db, &processingJobs[i], staleBefore); err != nil {
 			return err
 		}
 	}
@@ -441,11 +452,7 @@ func recoverStaleVersionReconciliationJob(db *gorm.DB, staleJob *FileVersionReco
 			return nil
 		}
 
-		referenceTime := current.UpdatedAt
-		if current.StartedAt != nil && !current.StartedAt.IsZero() {
-			referenceTime = *current.StartedAt
-		}
-		if referenceTime.After(staleBefore) {
+		if !isVersionReconciliationJobStale(&current, staleBefore) {
 			return nil
 		}
 
@@ -593,6 +600,9 @@ func versionReconciliationRetryDelay(attempts int) time.Duration {
 }
 
 func processVersionReconciliationJobSafely(db *gorm.DB, job *FileVersionReconciliationJob) (err error) {
+	heartbeat := startVersionReconciliationHeartbeat(db, job.ID)
+	defer heartbeat.Stop()
+
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("panic while processing file version reconciliation job %d: %v", job.ID, recovered)
@@ -600,6 +610,83 @@ func processVersionReconciliationJobSafely(db *gorm.DB, job *FileVersionReconcil
 	}()
 
 	return processVersionReconciliationJob(db, job)
+}
+
+func latestVersionReconciliationJobActivity(job *FileVersionReconciliationJob) time.Time {
+	if job == nil {
+		return time.Time{}
+	}
+
+	var latest time.Time
+	if job.StartedAt != nil && !job.StartedAt.IsZero() && job.StartedAt.After(latest) {
+		latest = *job.StartedAt
+	}
+	if !job.UpdatedAt.IsZero() && job.UpdatedAt.After(latest) {
+		latest = job.UpdatedAt
+	}
+	if latest.IsZero() {
+		latest = job.CreatedAt
+	}
+	return latest
+}
+
+func isVersionReconciliationJobStale(job *FileVersionReconciliationJob, staleBefore time.Time) bool {
+	return !latestVersionReconciliationJobActivity(job).After(staleBefore)
+}
+
+func startVersionReconciliationHeartbeat(db *gorm.DB, jobID uint) *versionReconciliationHeartbeat {
+	if db == nil || jobID == 0 {
+		return &versionReconciliationHeartbeat{}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	heartbeat := &versionReconciliationHeartbeat{
+		cancel: cancel,
+		done:   make(chan struct{}),
+	}
+
+	go func() {
+		defer close(heartbeat.done)
+
+		_ = touchVersionReconciliationHeartbeat(db, jobID)
+
+		ticker := time.NewTicker(defaultVersionReconciliationHeartbeat)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = touchVersionReconciliationHeartbeat(db, jobID)
+			}
+		}
+	}()
+
+	return heartbeat
+}
+
+func (h *versionReconciliationHeartbeat) Stop() {
+	if h == nil {
+		return
+	}
+	if h.cancel != nil {
+		h.cancel()
+	}
+	if h.done != nil {
+		<-h.done
+	}
+}
+
+func touchVersionReconciliationHeartbeat(db *gorm.DB, jobID uint) error {
+	if db == nil || jobID == 0 {
+		return nil
+	}
+
+	return db.Model(&FileVersionReconciliationJob{}).
+		Where("id = ? AND status = ?", jobID, reconciliationJobStatusProcessing).
+		Update("updated_at", time.Now()).
+		Error
 }
 
 func processVersionReconciliationJob(db *gorm.DB, job *FileVersionReconciliationJob) error {
@@ -1510,9 +1597,13 @@ func applyVersionReconciliationPlan(tx *gorm.DB, file File, targetVersion *FileV
 		}
 	}
 
-	rowIDMap := make(map[uint]uint, len(links)+len(carryForwardRows))
+	relinkRowIDMap := make(map[uint]uint, len(links)+len(carryForwardRows))
 	for _, link := range links {
-		rowIDMap[link.SourceID] = link.TargetID
+		source := sourceByID[link.SourceID]
+		if !source.HasLinkedState || link.SourceID == link.TargetID {
+			continue
+		}
+		relinkRowIDMap[link.SourceID] = link.TargetID
 	}
 
 	for _, source := range carryForwardRows {
@@ -1542,14 +1633,14 @@ func applyVersionReconciliationPlan(tx *gorm.DB, file File, targetVersion *FileV
 			return err
 		}
 
-		rowIDMap[source.ID] = newRow.ID
+		if source.HasLinkedState && source.ID != newRow.ID {
+			relinkRowIDMap[source.ID] = newRow.ID
+		}
 		lineages = append(lineages, buildLineageRow(file.ID, job.SourceVersion, job.TargetVersion, source.ID, &newRow.ID, "carried_forward", "carried_forward", 0, source.ApprovedUpdates))
 	}
 
-	for sourceID, targetID := range rowIDMap {
-		if err := relinkRowReferences(tx, file.ID, sourceID, targetID, file.Filename); err != nil {
-			return err
-		}
+	if err := bulkRelinkRowReferences(tx, file.ID, file.Filename, relinkRowIDMap); err != nil {
+		return err
 	}
 
 	if err := replaceLineageRows(tx, file.ID, job.TargetVersion, lineages); err != nil {
@@ -1636,6 +1727,95 @@ func replaceLineageRows(tx *gorm.DB, fileID uint, targetVersion int, rows []File
 		return nil
 	}
 	return tx.Create(&rows).Error
+}
+
+func bulkRelinkRowReferences(tx *gorm.DB, fileID uint, fileName string, rowIDMap map[uint]uint) error {
+	if len(rowIDMap) == 0 {
+		return nil
+	}
+
+	sourceIDs := sortedRelinkSourceIDs(rowIDMap)
+	for start := 0; start < len(sourceIDs); start += defaultVersionReconciliationRelinkBatch {
+		end := start + defaultVersionReconciliationRelinkBatch
+		if end > len(sourceIDs) {
+			end = len(sourceIDs)
+		}
+
+		batch := sourceIDs[start:end]
+		if err := bulkRelinkTableRows(tx, "file_edit_request", fileID, "", batch, rowIDMap); err != nil {
+			return err
+		}
+		if err := bulkRelinkTableRows(tx, "file_edit_request_details", fileID, "", batch, rowIDMap); err != nil {
+			return err
+		}
+		if err := bulkRelinkTableRows(tx, "file_edit_request_photos", fileID, "", batch, rowIDMap); err != nil {
+			return err
+		}
+		if tx.Migrator().HasTable("form_submissions") {
+			if err := bulkRelinkTableRows(tx, "form_submissions", fileID, fileName, batch, rowIDMap); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func sortedRelinkSourceIDs(rowIDMap map[uint]uint) []uint {
+	sourceIDs := make([]uint, 0, len(rowIDMap))
+	for sourceID, targetID := range rowIDMap {
+		if sourceID == 0 || targetID == 0 || sourceID == targetID {
+			continue
+		}
+		sourceIDs = append(sourceIDs, sourceID)
+	}
+	sort.Slice(sourceIDs, func(i, j int) bool {
+		return sourceIDs[i] < sourceIDs[j]
+	})
+	return sourceIDs
+}
+
+func bulkRelinkTableRows(tx *gorm.DB, tableName string, fileID uint, fileName string, sourceIDs []uint, rowIDMap map[uint]uint) error {
+	if len(sourceIDs) == 0 {
+		return nil
+	}
+
+	caseParts := make([]string, 0, len(sourceIDs))
+	inPlaceholders := make([]string, 0, len(sourceIDs))
+	args := make([]any, 0, len(sourceIDs)*3+2)
+	for _, sourceID := range sourceIDs {
+		targetID := rowIDMap[sourceID]
+		if targetID == 0 || sourceID == targetID {
+			continue
+		}
+		caseParts = append(caseParts, "WHEN ? THEN ?")
+		inPlaceholders = append(inPlaceholders, "?")
+		args = append(args, int64(sourceID), int64(targetID))
+	}
+	if len(caseParts) == 0 {
+		return nil
+	}
+
+	setClauses := []string{
+		fmt.Sprintf("row_id = CASE row_id %s ELSE row_id END", strings.Join(caseParts, " ")),
+	}
+	if strings.EqualFold(tableName, "form_submissions") {
+		setClauses = append(setClauses, "file_name = ?")
+		args = append(args, fileName)
+	}
+
+	args = append(args, int64(fileID))
+	for _, sourceID := range sourceIDs {
+		args = append(args, int64(sourceID))
+	}
+
+	query := fmt.Sprintf(
+		`UPDATE "%s" SET %s WHERE file_id = ? AND row_id IN (%s)`,
+		tableName,
+		strings.Join(setClauses, ", "),
+		strings.Join(inPlaceholders, ", "),
+	)
+	return tx.Exec(query, args...).Error
 }
 
 func relinkRowReferences(tx *gorm.DB, fileID uint, sourceRowID uint, targetRowID uint, fileName string) error {
