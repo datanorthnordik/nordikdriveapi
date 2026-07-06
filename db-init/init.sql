@@ -95,6 +95,9 @@ CREATE INDEX IF NOT EXISTS idx_file_version_reconciliation_jobs_file_status
 CREATE INDEX IF NOT EXISTS idx_file_version_reconciliation_jobs_available_at
     ON file_version_reconciliation_jobs(available_at);
 
+CREATE INDEX IF NOT EXISTS idx_file_version_reconciliation_jobs_status_available_id
+    ON file_version_reconciliation_jobs(status, available_at, id);
+
 CREATE TABLE IF NOT EXISTS file_data (
     id SERIAL PRIMARY KEY,
     file_id INT NOT NULL REFERENCES file(id) ON DELETE CASCADE,
@@ -107,6 +110,9 @@ CREATE TABLE IF NOT EXISTS file_data (
 
 CREATE INDEX IF NOT EXISTS idx_file_data_file_version_updated_at
     ON file_data(file_id, version, updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_file_data_file_version_id
+    ON file_data(file_id, version, id);
 
 CREATE OR REPLACE FUNCTION set_file_data_updated_at()
 RETURNS TRIGGER AS $$
@@ -302,6 +308,12 @@ ALTER TABLE file_edit_request
 ADD CONSTRAINT file_edit_request_status_check
 CHECK (status IN ('pending', 'completed'));
 
+CREATE INDEX IF NOT EXISTS idx_file_edit_request_file_row
+    ON file_edit_request(file_id, row_id);
+
+CREATE INDEX IF NOT EXISTS idx_file_edit_request_file_status_created
+    ON file_edit_request(file_id, status, created_at, request_id);
+
 
 CREATE TABLE file_edit_request_photos (
     id SERIAL PRIMARY KEY,
@@ -327,6 +339,12 @@ CREATE TABLE file_edit_request_photos (
     photo_comment TEXT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_file_edit_request_photos_file_row
+    ON file_edit_request_photos(file_id, row_id);
+
+CREATE INDEX IF NOT EXISTS idx_file_edit_request_photos_request_id
+    ON file_edit_request_photos(request_id);
+
 
 
 CREATE TABLE IF NOT EXISTS file_edit_request_details (
@@ -351,6 +369,12 @@ ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'pending';
 
 ALTER TABLE file_edit_request_details
 ADD COLUMN IF NOT EXISTS reviewer_comment TEXT NOT NULL DEFAULT '';
+
+CREATE INDEX IF NOT EXISTS idx_file_edit_request_details_file_row
+    ON file_edit_request_details(file_id, row_id);
+
+CREATE INDEX IF NOT EXISTS idx_file_edit_request_details_request_status_id
+    ON file_edit_request_details(request_id, status, id);
 
 DO $$
 BEGIN
@@ -494,6 +518,9 @@ CREATE TABLE form_file_mappings (
 
 CREATE INDEX idx_form_submissions_lookup
     ON form_submissions (row_id);
+
+CREATE INDEX IF NOT EXISTS idx_form_submissions_file_row
+    ON form_submissions (file_id, row_id);
 
 CREATE INDEX idx_form_submission_details_submission
     ON form_submission_details (submission_id);
