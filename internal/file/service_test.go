@@ -1019,6 +1019,44 @@ func TestFileService_GetFileData_AllBranches(t *testing.T) {
 		t.Fatalf("expected 1 row for duplicate-version file, got %d", len(rows))
 	}
 
+	// duplicate version metadata with a newer processing row should still prefer
+	// the latest ready snapshot for historical reads.
+	f5 := File{Filename: "f5", IsDelete: false, Version: 2, ColumnsOrder: cols}
+	_ = db.Create(&f5).Error
+	_ = db.Create(&FileVersion{
+		FileID:               f5.ID,
+		Filename:             "f5",
+		Version:              1,
+		ColumnsOrder:         cols,
+		ReconciliationStatus: fileVersionStatusReady,
+		CreatedAt:            time.Now().Add(-time.Minute),
+	}).Error
+	_ = db.Create(&FileVersion{
+		FileID:               f5.ID,
+		Filename:             "f5",
+		Version:              1,
+		ColumnsOrder:         datatypes.JSON([]byte(`["a"]`)),
+		ReconciliationStatus: fileVersionStatusProcessing,
+		CreatedAt:            time.Now(),
+	}).Error
+	_ = db.Create(&FileData{
+		FileID:  f5.ID,
+		RowData: datatypes.JSON([]byte(`{"a":"1","b":"2"}`)),
+		Version: 1,
+	}).Error
+
+	rows, err = svc.GetFileData("f5", 1)
+	if err != nil {
+		t.Fatalf("expected historical read to prefer ready duplicate version, got %v", err)
+	}
+	var readyPreferred bytes.Buffer
+	if err := json.Compact(&readyPreferred, rows[0].RowData); err != nil {
+		t.Fatalf("compact ready-preferred row: %v", err)
+	}
+	if readyPreferred.String() != `{"b":"2","a":"1","c":""}` {
+		t.Fatalf("unexpected ready-preferred row order: %s", readyPreferred.String())
+	}
+
 	// Find error path: drop file_data table after file exists + columns ok
 	if err := db.Migrator().DropTable(&FileData{}); err != nil {
 		t.Fatalf("drop file_data: %v", err)
@@ -1302,6 +1340,77 @@ func TestFileService_RevertFile_AllBranches(t *testing.T) {
 	}
 	if string(latestVersion.ColumnsOrder) != `["a","b"]` {
 		t.Fatalf("expected reverted version columns order, got %s", string(latestVersion.ColumnsOrder))
+	}
+}
+
+func TestFileService_RevertFile_UsesNextUnusedVersionNumber(t *testing.T) {
+	db := newTestDB(t)
+	svc := &FileService{DB: db}
+
+	file := File{
+		Filename:     "revert-gap.csv",
+		Version:      5,
+		Rows:         1,
+		ColumnsOrder: datatypes.JSON([]byte(`["name"]`)),
+	}
+	if err := db.Create(&file).Error; err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	if err := db.Create(&FileVersion{
+		FileID:               file.ID,
+		Filename:             file.Filename,
+		Version:              1,
+		Rows:                 1,
+		ColumnsOrder:         datatypes.JSON([]byte(`["name"]`)),
+		ReconciliationStatus: fileVersionStatusReady,
+	}).Error; err != nil {
+		t.Fatalf("seed target version: %v", err)
+	}
+	if err := db.Create(&FileVersion{
+		FileID:               file.ID,
+		Filename:             file.Filename,
+		Version:              6,
+		Rows:                 1,
+		ColumnsOrder:         datatypes.JSON([]byte(`["name"]`)),
+		ReconciliationStatus: fileVersionStatusReady,
+	}).Error; err != nil {
+		t.Fatalf("seed higher historical version: %v", err)
+	}
+	if err := db.Create(&FileData{
+		FileID:  file.ID,
+		Version: 1,
+		RowData: datatypes.JSON([]byte(`{"name":"older"}`)),
+	}).Error; err != nil {
+		t.Fatalf("seed target data row: %v", err)
+	}
+	if err := db.Create(&FileData{
+		FileID:  file.ID,
+		Version: 6,
+		RowData: datatypes.JSON([]byte(`{"name":"existing-v6"}`)),
+	}).Error; err != nil {
+		t.Fatalf("seed existing higher-version row: %v", err)
+	}
+
+	if err := svc.RevertFile(file.Filename, 1, 77); err != nil {
+		t.Fatalf("queue revert: %v", err)
+	}
+
+	var queuedVersion FileVersion
+	if err := db.Where("file_id = ? AND transition_operation = ?", file.ID, versionTransitionOperationRevert).
+		Order("id DESC").
+		First(&queuedVersion).Error; err != nil {
+		t.Fatalf("load queued version: %v", err)
+	}
+	if queuedVersion.Version != 7 {
+		t.Fatalf("expected revert to allocate version 7, got %d", queuedVersion.Version)
+	}
+
+	var job FileVersionReconciliationJob
+	if err := db.Where("file_id = ?", file.ID).Order("id DESC").First(&job).Error; err != nil {
+		t.Fatalf("load queued job: %v", err)
+	}
+	if job.TargetVersion != 7 {
+		t.Fatalf("expected job target version 7, got %#v", job)
 	}
 }
 
@@ -1711,7 +1820,199 @@ func TestFileService_VersionReconciliation_ReplaceAndRevert(t *testing.T) {
 	})
 }
 
+func TestRunVersionReconciliationJobs_RecoversStaleProcessingJob(t *testing.T) {
+	db := newTestDB(t)
+	svc := &FileService{DB: db}
+
+	file := File{
+		Filename:     "stale-reconciliation.csv",
+		Version:      1,
+		Rows:         1,
+		ColumnsOrder: datatypes.JSON([]byte(`["name"]`)),
+	}
+	if err := db.Create(&file).Error; err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	if err := db.Create(&FileVersion{
+		FileID:               file.ID,
+		Filename:             file.Filename,
+		Version:              1,
+		Rows:                 1,
+		ColumnsOrder:         datatypes.JSON([]byte(`["name"]`)),
+		ReconciliationStatus: fileVersionStatusReady,
+	}).Error; err != nil {
+		t.Fatalf("seed current version: %v", err)
+	}
+	if err := db.Create(&FileData{
+		FileID:  file.ID,
+		Version: 1,
+		RowData: datatypes.JSON([]byte(`{"name":"before"}`)),
+	}).Error; err != nil {
+		t.Fatalf("seed current row: %v", err)
+	}
+
+	fh := fileHeaderFromBytes(t, "file", "stale.csv", csvBytes(
+		[]string{"name"},
+		[][]string{{"after"}},
+	))
+	if err := svc.ReplaceFiles(fh, file.ID, 11); err != nil {
+		t.Fatalf("queue replace: %v", err)
+	}
+
+	var job FileVersionReconciliationJob
+	if err := db.Where("file_id = ?", file.ID).First(&job).Error; err != nil {
+		t.Fatalf("load queued job: %v", err)
+	}
+	staleAt := time.Now().Add(-defaultVersionReconciliationLeaseTTL - time.Minute)
+	if err := db.Model(&FileVersionReconciliationJob{}).
+		Where("id = ?", job.ID).
+		Updates(map[string]any{
+			"status":       reconciliationJobStatusProcessing,
+			"attempts":     1,
+			"started_at":   staleAt,
+			"updated_at":   staleAt,
+			"available_at": staleAt,
+		}).Error; err != nil {
+		t.Fatalf("mark job stale: %v", err)
+	}
+
+	result, err := RunVersionReconciliationJobs(db, VersionReconciliationRunOptions{MaxJobs: 1})
+	if err != nil {
+		t.Fatalf("run reconciliation jobs: %v", err)
+	}
+	if result.Claimed != 1 || result.Completed != 1 {
+		t.Fatalf("expected recovered job to complete in same run, got %#v", result)
+	}
+
+	if err := db.First(&job, job.ID).Error; err != nil {
+		t.Fatalf("reload job: %v", err)
+	}
+	if job.Status != reconciliationJobStatusCompleted {
+		t.Fatalf("expected stale job to complete after recovery, got %#v", job)
+	}
+	if job.Attempts != 2 {
+		t.Fatalf("expected stale job to be reclaimed with attempts=2, got %#v", job)
+	}
+
+	var updatedFile File
+	if err := db.First(&updatedFile, file.ID).Error; err != nil {
+		t.Fatalf("reload file: %v", err)
+	}
+	if updatedFile.Version != 2 || updatedFile.Rows != 1 {
+		t.Fatalf("unexpected reconciled file after stale recovery: %#v", updatedFile)
+	}
+
+	var versionTwo FileVersion
+	if err := db.Where("file_id = ? AND version = ?", file.ID, 2).First(&versionTwo).Error; err != nil {
+		t.Fatalf("reload reconciled version: %v", err)
+	}
+	if versionTwo.ReconciliationStatus != fileVersionStatusReady {
+		t.Fatalf("expected reconciled version to be ready, got %#v", versionTwo)
+	}
+}
+
+func TestRunVersionReconciliationJobs_FailsConflictingTargetVersionJob(t *testing.T) {
+	db := newTestDB(t)
+
+	file := File{
+		Filename:     "conflicting-target-version.csv",
+		Version:      5,
+		Rows:         1,
+		ColumnsOrder: datatypes.JSON([]byte(`["name"]`)),
+	}
+	if err := db.Create(&file).Error; err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	if err := db.Create(&FileVersion{
+		FileID:               file.ID,
+		Filename:             file.Filename,
+		Version:              6,
+		Rows:                 1,
+		ColumnsOrder:         datatypes.JSON([]byte(`["name"]`)),
+		ReconciliationStatus: fileVersionStatusReady,
+	}).Error; err != nil {
+		t.Fatalf("seed existing target version: %v", err)
+	}
+
+	conflictingVersion := FileVersion{
+		FileID:               file.ID,
+		Filename:             file.Filename,
+		Version:              6,
+		Rows:                 1,
+		ColumnsOrder:         datatypes.JSON([]byte(`["name"]`)),
+		ReconciliationStatus: fileVersionStatusProcessing,
+		TransitionOperation:  versionTransitionOperationRevert,
+	}
+	if err := db.Create(&conflictingVersion).Error; err != nil {
+		t.Fatalf("seed conflicting transition row: %v", err)
+	}
+
+	job := FileVersionReconciliationJob{
+		FileID:              file.ID,
+		FileVersionID:       conflictingVersion.ID,
+		SourceVersion:       5,
+		TargetVersion:       6,
+		MaterializedVersion: 1,
+		RequestedBy:         1,
+		Operation:           versionTransitionOperationRevert,
+		Status:              reconciliationJobStatusPending,
+		AvailableAt:         time.Now(),
+	}
+	if err := db.Create(&job).Error; err != nil {
+		t.Fatalf("seed conflicting job: %v", err)
+	}
+
+	result, err := RunVersionReconciliationJobs(db, VersionReconciliationRunOptions{MaxJobs: 1})
+	if err != nil {
+		t.Fatalf("run reconciliation jobs: %v", err)
+	}
+	if result.Claimed != 1 || result.Failed != 1 {
+		t.Fatalf("expected conflicting job to fail immediately, got %#v", result)
+	}
+
+	if err := db.First(&job, job.ID).Error; err != nil {
+		t.Fatalf("reload job: %v", err)
+	}
+	if job.Status != reconciliationJobStatusFailed {
+		t.Fatalf("expected job to be terminally failed, got %#v", job)
+	}
+	if !strings.Contains(job.LastError, "target version 6 conflicts") {
+		t.Fatalf("expected conflict error in job, got %#v", job)
+	}
+
+	if err := db.First(&conflictingVersion, conflictingVersion.ID).Error; err != nil {
+		t.Fatalf("reload conflicting version row: %v", err)
+	}
+	if conflictingVersion.ReconciliationStatus != fileVersionStatusFailed {
+		t.Fatalf("expected conflicting version row to fail, got %#v", conflictingVersion)
+	}
+}
+
 func TestFileService_BlocksFileMutationsWhenOpenRequestsExist(t *testing.T) {
+	t.Run("failed historical transition does not block replace", func(t *testing.T) {
+		db := newTestDB(t)
+		svc := &FileService{DB: db}
+
+		file := File{Filename: "replace-failed-transition.csv", Version: 1}
+		if err := db.Create(&file).Error; err != nil {
+			t.Fatalf("seed file: %v", err)
+		}
+		if err := db.Create(&FileVersion{
+			FileID:               file.ID,
+			Filename:             file.Filename,
+			Version:              2,
+			ReconciliationStatus: fileVersionStatusFailed,
+			ReconciliationError:  "old failed transition",
+		}).Error; err != nil {
+			t.Fatalf("seed failed transition row: %v", err)
+		}
+
+		fh := fileHeaderFromBytes(t, "file", "replace.csv", csvBytes([]string{"a"}, [][]string{{"1"}}))
+		if err := svc.ReplaceFiles(fh, file.ID, 1); err != nil {
+			t.Fatalf("expected failed historical transition not to block replace, got %v", err)
+		}
+	})
+
 	t.Run("replace blocked by pending file edit request", func(t *testing.T) {
 		db := newTestDB(t)
 		svc := &FileService{DB: db}

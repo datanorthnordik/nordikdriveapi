@@ -255,9 +255,8 @@ func (fs *FileService) getColumnsOrderForVersion(file File, version int) ([]stri
 
 	if version != file.Version {
 		var fileVersion FileVersion
-		err := fs.DB.
+		err := preferredFileVersionQuery(fs.DB, file.ID, version).
 			Select("columns_order").
-			Where("file_id = ? AND version = ?", file.ID, version).
 			First(&fileVersion).Error
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, err
@@ -329,7 +328,10 @@ func (fs *FileService) ReplaceFiles(uploadedFile *multipart.FileHeader, fileID u
 			return err
 		}
 
-		newVersion := lockedFile.Version + 1
+		newVersion, err := nextFileVersionNumber(tx, lockedFile.ID, lockedFile.Version)
+		if err != nil {
+			return err
+		}
 
 		fileVersion := FileVersion{
 			FileID:               lockedFile.ID,
@@ -456,15 +458,13 @@ func (fs *FileService) GetFileData(filename string, version int) ([]FileData, er
 	}
 
 	if version != file.Version {
-		query := fs.DB.Where("file_id = ? AND version = ?", file.ID, version)
-
 		var requestedVersion FileVersion
 		selectClause := "version"
 		if fs.DB.Migrator().HasTable(&FileVersion{}) && fs.DB.Migrator().HasColumn(&FileVersion{}, "reconciliation_status") {
 			selectClause = "version, reconciliation_status"
 		}
 
-		if err := query.
+		if err := preferredFileVersionQuery(fs.DB, file.ID, version).
 			Select(selectClause).
 			First(&requestedVersion).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -783,7 +783,7 @@ func (fs *FileService) RevertFile(filename string, version int, userID uint) err
 		}
 
 		var targetVersion FileVersion
-		if err := tx.Where("file_id = ? AND version = ?", lockedFile.ID, version).First(&targetVersion).Error; err != nil {
+		if err := preferredFileVersionQuery(tx, lockedFile.ID, version).First(&targetVersion).Error; err != nil {
 			return fmt.Errorf("target version not found: %w", err)
 		}
 
@@ -792,7 +792,10 @@ func (fs *FileService) RevertFile(filename string, version int, userID uint) err
 			return err
 		}
 
-		newVersion := lockedFile.Version + 1
+		newVersion, err := nextFileVersionNumber(tx, lockedFile.ID, lockedFile.Version)
+		if err != nil {
+			return err
+		}
 
 		newFileVersion := FileVersion{
 			FileID:               lockedFile.ID,
