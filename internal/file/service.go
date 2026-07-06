@@ -271,10 +271,6 @@ func (fs *FileService) getColumnsOrderForVersion(file File, version int) ([]stri
 }
 
 func (fs *FileService) ReplaceFiles(uploadedFile *multipart.FileHeader, fileID uint, userID uint) error {
-	if err := ensureVersionReconciliationSchema(fs.DB); err != nil {
-		return err
-	}
-
 	var existing File
 	if err := fs.DB.First(&existing, fileID).Error; err != nil {
 		return fmt.Errorf("file not found: %w", err)
@@ -437,10 +433,6 @@ func (fs *FileService) GetAllFiles(userID uint, role string) ([]FileWithUser, er
 }
 
 func (fs *FileService) GetFileData(filename string, version int) ([]FileData, error) {
-	if err := ensureVersionReconciliationSchema(fs.DB); err != nil {
-		return nil, err
-	}
-
 	var file File
 
 	// Fetch file by filename
@@ -464,10 +456,16 @@ func (fs *FileService) GetFileData(filename string, version int) ([]FileData, er
 	}
 
 	if version != file.Version {
+		query := fs.DB.Where("file_id = ? AND version = ?", file.ID, version)
+
 		var requestedVersion FileVersion
-		if err := fs.DB.
-			Select("version, reconciliation_status").
-			Where("file_id = ? AND version = ?", file.ID, version).
+		selectClause := "version"
+		if fs.DB.Migrator().HasTable(&FileVersion{}) && fs.DB.Migrator().HasColumn(&FileVersion{}, "reconciliation_status") {
+			selectClause = "version, reconciliation_status"
+		}
+
+		if err := query.
+			Select(selectClause).
 			First(&requestedVersion).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil, nil
@@ -704,20 +702,45 @@ func (fs *FileService) GetFileAccess(fileId string) ([]FileAccessWithUser, error
 }
 
 func (fs *FileService) GetFileHistory(fileId string) ([]FileVersionWithUser, error) {
-	if err := ensureVersionReconciliationSchema(fs.DB); err != nil {
-		return nil, err
-	}
-
 	var results []FileVersionWithUser
 
+	selectColumns := []string{
+		"file_version.id",
+		"file_version.file_id",
+		"file_version.filename",
+		"users.firstname AS firstname",
+		"users.lastname AS lastname",
+		"file_version.created_at",
+		"file_version.private",
+		"file_version.is_delete",
+		"file_version.size",
+		"file_version.version",
+		"file_version.rows",
+		"file_version.columns_order",
+	}
+	if fs.DB.Migrator().HasTable(&FileVersion{}) && fs.DB.Migrator().HasColumn(&FileVersion{}, "reconciliation_status") {
+		selectColumns = append(selectColumns, "file_version.reconciliation_status")
+	} else {
+		selectColumns = append(selectColumns, "'' AS reconciliation_status")
+	}
+	if fs.DB.Migrator().HasTable(&FileVersion{}) && fs.DB.Migrator().HasColumn(&FileVersion{}, "reconciliation_error") {
+		selectColumns = append(selectColumns, "file_version.reconciliation_error")
+	} else {
+		selectColumns = append(selectColumns, "'' AS reconciliation_error")
+	}
+	if fs.DB.Migrator().HasTable(&FileVersion{}) && fs.DB.Migrator().HasColumn(&FileVersion{}, "reconciled_at") {
+		selectColumns = append(selectColumns, "file_version.reconciled_at")
+	} else {
+		selectColumns = append(selectColumns, "NULL AS reconciled_at")
+	}
+	if fs.DB.Migrator().HasTable(&FileVersion{}) && fs.DB.Migrator().HasColumn(&FileVersion{}, "transition_operation") {
+		selectColumns = append(selectColumns, "file_version.transition_operation")
+	} else {
+		selectColumns = append(selectColumns, "'' AS transition_operation")
+	}
+
 	err := fs.DB.Table("file_version").
-		Select(`file_version.id, file_version.file_id, file_version.filename, 
-		        users.firstname AS firstname, users.lastname AS lastname,
-		        file_version.created_at, file_version.private, file_version.is_delete,
-		        file_version.size, file_version.version, file_version.rows,
-		        file_version.columns_order, file_version.reconciliation_status,
-		        file_version.reconciliation_error, file_version.reconciled_at,
-		        file_version.transition_operation`).
+		Select(strings.Join(selectColumns, ", ")).
 		Joins("JOIN users ON users.id = file_version.inserted_by").
 		Where("file_version.file_id = ?", fileId).
 		Order("file_version.version DESC").
@@ -731,10 +754,6 @@ func (fs *FileService) GetFileHistory(fileId string) ([]FileVersionWithUser, err
 }
 
 func (fs *FileService) RevertFile(filename string, version int, userID uint) error {
-	if err := ensureVersionReconciliationSchema(fs.DB); err != nil {
-		return err
-	}
-
 	var file File
 	if err := fs.DB.Where("filename = ?", filename).First(&file).Error; err != nil {
 		return fmt.Errorf("file not found: %w", err)

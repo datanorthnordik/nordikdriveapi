@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS file_version (
     transition_operation VARCHAR(20) NOT NULL DEFAULT ''
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_file_version_file_version
+CREATE INDEX IF NOT EXISTS idx_file_version_file_version
     ON file_version(file_id, version);
 
 CREATE INDEX IF NOT EXISTS idx_file_version_transition_state

@@ -24,14 +24,14 @@ type File struct {
 
 type FileVersion struct {
 	ID                   uint           `gorm:"primaryKey;autoIncrement" jsoxn:"id"`
-	FileID               uint           `gorm:"not null;index;uniqueIndex:uq_file_version_file_version,priority:1;index:idx_file_version_transition_state,priority:1" json:"file_id"`
+	FileID               uint           `gorm:"not null;index;index:idx_file_version_file_version,priority:1;index:idx_file_version_transition_state,priority:1" json:"file_id"`
 	Filename             string         `gorm:"size:255;not null" json:"filename"`
 	InsertedBy           uint           `gorm:"not null;index" json:"inserted_by"`
 	CreatedAt            time.Time      `gorm:"autoCreateTime" json:"created_at"`
 	Private              bool           `gorm:"default:false" json:"private"`
 	IsDelete             bool           `gorm:"default:false" json:"is_delete"`
 	Size                 float64        `gorm:"not null" json:"size"`
-	Version              int            `gorm:"not null;default:1;uniqueIndex:uq_file_version_file_version,priority:2" json:"version"`
+	Version              int            `gorm:"not null;default:1;index:idx_file_version_file_version,priority:2" json:"version"`
 	Rows                 int            `gorm:"not null" json:"rows"`
 	ColumnsOrder         datatypes.JSON `gorm:"type:jsonb" json:"columns_order"`
 	ReconciliationStatus string         `gorm:"type:varchar(20);not null;default:'ready';index:idx_file_version_transition_state,priority:2" json:"reconciliation_status"`
