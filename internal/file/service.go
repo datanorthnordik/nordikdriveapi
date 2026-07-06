@@ -16,6 +16,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -29,6 +30,24 @@ import (
 type FileService struct {
 	DB     *gorm.DB
 	Mailer mailer.EmailSender
+}
+
+type fileVersionHistoryQueryRow struct {
+	FileVersionWithUser
+	InsertedBy uint `gorm:"column:inserted_by"`
+}
+
+type fileDataVersionHistoryAggregate struct {
+	Version      int    `gorm:"column:version"`
+	Rows         int64  `gorm:"column:rows"`
+	CreatedAtRaw string `gorm:"column:created_at_raw"`
+	InsertedBy   uint   `gorm:"column:inserted_by"`
+}
+
+type historyUserName struct {
+	ID        uint   `gorm:"column:id"`
+	Firstname string `gorm:"column:firstname"`
+	Lastname  string `gorm:"column:lastname"`
 }
 
 const (
@@ -702,7 +721,13 @@ func (fs *FileService) GetFileAccess(fileId string) ([]FileAccessWithUser, error
 }
 
 func (fs *FileService) GetFileHistory(fileId string) ([]FileVersionWithUser, error) {
-	var results []FileVersionWithUser
+	var file File
+	if err := fs.DB.Where("id = ?", fileId).First(&file).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
 
 	selectColumns := []string{
 		"file_version.id",
@@ -718,39 +743,194 @@ func (fs *FileService) GetFileHistory(fileId string) ([]FileVersionWithUser, err
 		"file_version.rows",
 		"file_version.columns_order",
 	}
+	queryColumns := append([]string{}, selectColumns...)
+	queryColumns = append(queryColumns, "file_version.inserted_by")
 	if fs.DB.Migrator().HasTable(&FileVersion{}) && fs.DB.Migrator().HasColumn(&FileVersion{}, "reconciliation_status") {
-		selectColumns = append(selectColumns, "file_version.reconciliation_status")
+		queryColumns = append(queryColumns, "file_version.reconciliation_status")
 	} else {
-		selectColumns = append(selectColumns, "'' AS reconciliation_status")
+		queryColumns = append(queryColumns, "'' AS reconciliation_status")
 	}
 	if fs.DB.Migrator().HasTable(&FileVersion{}) && fs.DB.Migrator().HasColumn(&FileVersion{}, "reconciliation_error") {
-		selectColumns = append(selectColumns, "file_version.reconciliation_error")
+		queryColumns = append(queryColumns, "file_version.reconciliation_error")
 	} else {
-		selectColumns = append(selectColumns, "'' AS reconciliation_error")
+		queryColumns = append(queryColumns, "'' AS reconciliation_error")
 	}
 	if fs.DB.Migrator().HasTable(&FileVersion{}) && fs.DB.Migrator().HasColumn(&FileVersion{}, "reconciled_at") {
-		selectColumns = append(selectColumns, "file_version.reconciled_at")
+		queryColumns = append(queryColumns, "file_version.reconciled_at")
 	} else {
-		selectColumns = append(selectColumns, "NULL AS reconciled_at")
+		queryColumns = append(queryColumns, "NULL AS reconciled_at")
 	}
 	if fs.DB.Migrator().HasTable(&FileVersion{}) && fs.DB.Migrator().HasColumn(&FileVersion{}, "transition_operation") {
-		selectColumns = append(selectColumns, "file_version.transition_operation")
+		queryColumns = append(queryColumns, "file_version.transition_operation")
 	} else {
-		selectColumns = append(selectColumns, "'' AS transition_operation")
+		queryColumns = append(queryColumns, "'' AS transition_operation")
 	}
 
-	err := fs.DB.Table("file_version").
-		Select(strings.Join(selectColumns, ", ")).
-		Joins("JOIN users ON users.id = file_version.inserted_by").
-		Where("file_version.file_id = ?", fileId).
-		Order("file_version.version DESC").
-		Scan(&results).Error
+	var versionRows []fileVersionHistoryQueryRow
+	query := fs.DB.Table("file_version").
+		Select(strings.Join(queryColumns, ", ")).
+		Joins("LEFT JOIN users ON users.id = file_version.inserted_by").
+		Where("file_version.file_id = ?", file.ID)
+	if fs.DB.Migrator().HasTable(&FileVersion{}) && fs.DB.Migrator().HasColumn(&FileVersion{}, "reconciliation_status") {
+		query = query.Order(
+			fmt.Sprintf(
+				"file_version.version DESC, CASE file_version.reconciliation_status WHEN '%s' THEN 0 WHEN '%s' THEN 1 ELSE 2 END ASC, file_version.created_at DESC, file_version.id DESC",
+				fileVersionStatusReady,
+				fileVersionStatusProcessing,
+			),
+		)
+	} else {
+		query = query.Order("file_version.version DESC, file_version.created_at DESC, file_version.id DESC")
+	}
+
+	err := query.Scan(&versionRows).Error
 
 	if err != nil {
 		return nil, err
 	}
 
+	var aggregates []fileDataVersionHistoryAggregate
+	if err := fs.DB.Table("file_data").
+		Select("version, COUNT(*) AS rows, MIN(CAST(created_at AS TEXT)) AS created_at_raw, MAX(inserted_by) AS inserted_by").
+		Where("file_id = ?", file.ID).
+		Group("version").
+		Order("version DESC").
+		Scan(&aggregates).Error; err != nil {
+		return nil, err
+	}
+
+	resultsByVersion := make(map[int]FileVersionWithUser)
+	for _, row := range versionRows {
+		if _, exists := resultsByVersion[row.Version]; exists {
+			continue
+		}
+		entry := row.FileVersionWithUser
+		resultsByVersion[row.Version] = entry
+	}
+
+	missingUserIDs := make(map[uint]struct{})
+	for _, aggregate := range aggregates {
+		if _, exists := resultsByVersion[aggregate.Version]; exists {
+			continue
+		}
+		if aggregate.InsertedBy > 0 {
+			missingUserIDs[aggregate.InsertedBy] = struct{}{}
+		}
+	}
+
+	userNames := make(map[uint]historyUserName)
+	if len(missingUserIDs) > 0 {
+		userIDs := make([]uint, 0, len(missingUserIDs))
+		for id := range missingUserIDs {
+			userIDs = append(userIDs, id)
+		}
+
+		var names []historyUserName
+		if err := fs.DB.Table("users").
+			Select("id, firstname, lastname").
+			Where("id IN ?", userIDs).
+			Scan(&names).Error; err != nil {
+			return nil, err
+		}
+		for _, name := range names {
+			userNames[name.ID] = name
+		}
+	}
+
+	for _, aggregate := range aggregates {
+		if _, exists := resultsByVersion[aggregate.Version]; exists {
+			continue
+		}
+
+		userName := userNames[aggregate.InsertedBy]
+		columnsOrder := datatypes.JSON(nil)
+		switch {
+		case aggregate.Version == file.Version && len(bytes.TrimSpace(file.ColumnsOrder)) > 0:
+			columnsOrder = file.ColumnsOrder
+		case len(bytes.TrimSpace(file.ColumnsOrder)) > 0:
+			columnsOrder = file.ColumnsOrder
+		}
+
+		reconciliationStatus := ""
+		if aggregate.Version == file.Version {
+			reconciliationStatus = fileVersionStatusReady
+		}
+
+		createdAt := parseHistoryTimestamp(aggregate.CreatedAtRaw)
+		if createdAt.IsZero() {
+			createdAt = file.CreatedAt
+		}
+
+		resultsByVersion[aggregate.Version] = FileVersionWithUser{
+			FileID:               file.ID,
+			FileName:             file.Filename,
+			Firstname:            userName.Firstname,
+			Lastname:             userName.Lastname,
+			CreatedAt:            createdAt,
+			Private:              file.Private,
+			IsDelete:             file.IsDelete,
+			Size:                 0,
+			Version:              aggregate.Version,
+			Rows:                 int(aggregate.Rows),
+			ColumnsOrder:         columnsOrder,
+			ReconciliationStatus: reconciliationStatus,
+			ReconciliationError:  "",
+			TransitionOperation:  "",
+		}
+	}
+
+	if len(resultsByVersion) == 0 {
+		return nil, nil
+	}
+
+	versions := make([]int, 0, len(resultsByVersion))
+	for version := range resultsByVersion {
+		versions = append(versions, version)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(versions)))
+
+	results := make([]FileVersionWithUser, 0, len(versions))
+	for _, version := range versions {
+		entry := resultsByVersion[version]
+		if entry.Rows <= 0 {
+			for _, aggregate := range aggregates {
+				if aggregate.Version == version {
+					entry.Rows = int(aggregate.Rows)
+					if entry.CreatedAt.IsZero() {
+						entry.CreatedAt = parseHistoryTimestamp(aggregate.CreatedAtRaw)
+					}
+					break
+				}
+			}
+		}
+		results = append(results, entry)
+	}
+
 	return results, nil
+}
+
+func parseHistoryTimestamp(raw string) time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}
+	}
+
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05",
+	}
+
+	for _, layout := range layouts {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			return parsed
+		}
+	}
+
+	return time.Time{}
 }
 
 func (fs *FileService) RevertFile(filename string, version int, userID uint) error {

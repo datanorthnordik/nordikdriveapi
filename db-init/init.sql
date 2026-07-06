@@ -551,3 +551,29 @@ CREATE TABLE IF NOT EXISTS file_logo_content (
 CREATE INDEX IF NOT EXISTS idx_file_logo_content_file_id
     ON file_logo_content (file_id);
 
+CREATE INDEX IF NOT EXISTS idx_file_version_reconciliation_jobs_status_available_id
+    ON file_version_reconciliation_jobs(status, available_at, id);
+
+CREATE INDEX IF NOT EXISTS idx_file_data_file_version_id
+    ON file_data(file_id, version, id);
+
+CREATE INDEX IF NOT EXISTS idx_file_edit_request_file_row
+    ON file_edit_request(file_id, row_id);
+
+CREATE INDEX IF NOT EXISTS idx_file_edit_request_file_status_created
+    ON file_edit_request(file_id, status, created_at, request_id);
+
+CREATE INDEX IF NOT EXISTS idx_file_edit_request_photos_file_row
+    ON file_edit_request_photos(file_id, row_id);
+
+CREATE INDEX IF NOT EXISTS idx_file_edit_request_photos_request_id
+    ON file_edit_request_photos(request_id);
+
+CREATE INDEX IF NOT EXISTS idx_file_edit_request_details_file_row
+    ON file_edit_request_details(file_id, row_id);
+
+CREATE INDEX IF NOT EXISTS idx_file_edit_request_details_request_status_id
+    ON file_edit_request_details(request_id, status, id);
+
+CREATE INDEX IF NOT EXISTS idx_form_submissions_file_row
+    ON form_submissions(file_id, row_id);
