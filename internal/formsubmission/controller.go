@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	filehelper "nordik-drive-api/internal/file"
 	"strconv"
 	"strings"
 
@@ -98,7 +99,11 @@ func (cc *FormSubmissionController) SaveFormSubmission(c *gin.Context) {
 
 	res, err := cc.FormSubmissionService.Upsert(&req, uid)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		status := http.StatusBadRequest
+		if errors.Is(err, filehelper.ErrFileVersionTransitionInProgress) {
+			status = http.StatusConflict
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
 

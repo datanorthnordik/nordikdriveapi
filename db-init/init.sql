@@ -55,9 +55,45 @@ CREATE TABLE IF NOT EXISTS file_version (
     size DECIMAL NOT NULL,
     version INT DEFAULT 1 NOT NULL,
     rows INT NOT NULL,
-    columns_order JSONB
+    columns_order JSONB,
+    reconciliation_status VARCHAR(20) NOT NULL DEFAULT 'ready',
+    reconciliation_error TEXT NOT NULL DEFAULT '',
+    reconciled_at TIMESTAMP NULL,
+    transition_operation VARCHAR(20) NOT NULL DEFAULT ''
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS uq_file_version_file_version
+    ON file_version(file_id, version);
+
+CREATE INDEX IF NOT EXISTS idx_file_version_transition_state
+    ON file_version(file_id, reconciliation_status);
+
+CREATE TABLE IF NOT EXISTS file_version_reconciliation_jobs (
+    id SERIAL PRIMARY KEY,
+    file_id INT NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    file_version_id INT NOT NULL REFERENCES file_version(id) ON DELETE CASCADE,
+    source_version INT NOT NULL,
+    target_version INT NOT NULL,
+    materialized_version INT NOT NULL DEFAULT 0,
+    requested_by INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    operation VARCHAR(20) NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    attempts INT NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    payload JSONB,
+    available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP NULL,
+    completed_at TIMESTAMP NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_file_version_reconciliation_jobs_file_version UNIQUE (file_version_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_version_reconciliation_jobs_file_status
+    ON file_version_reconciliation_jobs(file_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_file_version_reconciliation_jobs_available_at
+    ON file_version_reconciliation_jobs(available_at);
 
 CREATE TABLE IF NOT EXISTS file_data (
     id SERIAL PRIMARY KEY,
@@ -85,6 +121,28 @@ CREATE TRIGGER trg_file_data_set_updated_at
 BEFORE UPDATE ON file_data
 FOR EACH ROW
 EXECUTE FUNCTION set_file_data_updated_at();
+
+CREATE TABLE IF NOT EXISTS file_row_lineage (
+    id SERIAL PRIMARY KEY,
+    file_id INT NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    target_version INT NOT NULL,
+    source_version INT NOT NULL,
+    source_row_id INT NOT NULL,
+    target_row_id INT NULL REFERENCES file_data(id) ON DELETE SET NULL,
+    status VARCHAR(20) NOT NULL,
+    method VARCHAR(50) NOT NULL,
+    score DOUBLE PRECISION NOT NULL DEFAULT 0,
+    debug_json JSONB,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_file_row_lineage_target_source UNIQUE (file_id, target_version, source_row_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_row_lineage_target
+    ON file_row_lineage(file_id, target_version);
+
+CREATE INDEX IF NOT EXISTS idx_file_row_lineage_target_row_id
+    ON file_row_lineage(target_row_id);
 
 CREATE TABLE IF NOT EXISTS file_data_normalized (
     id SERIAL PRIMARY KEY,

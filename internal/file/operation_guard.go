@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"gorm.io/gorm"
 )
 
 const (
@@ -67,8 +69,12 @@ func pluralSuffix(count int64) string {
 }
 
 func (fs *FileService) ensureNoOpenRequestsForFile(file File, operation string) error {
+	return ensureNoOpenRequestsForFileWithDB(fs.DB, file, operation)
+}
+
+func ensureNoOpenRequestsForFileWithDB(db *gorm.DB, file File, operation string) error {
 	var fileEditRequestCount int64
-	if err := fs.DB.
+	if err := db.
 		Table((&FileEditRequest{}).TableName()).
 		Where("file_id = ? AND LOWER(TRIM(CAST(status AS TEXT))) <> ?", file.ID, fileEditRequestStatusCompleted).
 		Count(&fileEditRequestCount).Error; err != nil {
@@ -76,7 +82,7 @@ func (fs *FileService) ensureNoOpenRequestsForFile(file File, operation string) 
 	}
 
 	var formSubmissionCount int64
-	if err := fs.DB.
+	if err := db.
 		Table("form_submissions").
 		Where("file_id = ? AND LOWER(TRIM(CAST(status AS TEXT))) <> ?", file.ID, formSubmissionStatusRejected).
 		Count(&formSubmissionCount).Error; err != nil {

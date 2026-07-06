@@ -682,7 +682,7 @@ func (fc *FileController) ReplaceFile(c *gin.Context) {
 	err = fc.FileService.ReplaceFiles(file, replaceFileInput.Id, uint(userID))
 	if err != nil {
 		status := http.StatusBadRequest
-		if errors.Is(err, ErrFileOperationBlocked) {
+		if errors.Is(err, ErrFileOperationBlocked) || errors.Is(err, ErrFileVersionTransitionInProgress) {
 			status = http.StatusConflict
 		}
 		c.JSON(status, gin.H{"error": err.Error()})
@@ -707,7 +707,7 @@ func (fc *FileController) ReplaceFile(c *gin.Context) {
 		Service:     "file",
 		UserID:      &uid,
 		Action:      "REPLACE_FILE",
-		Message:     fmt.Sprintf("File replaced: %s", file.Filename),
+		Message:     fmt.Sprintf("File replace queued: %s", file.Filename),
 		Communities: communities,
 		Filename:    &file.Filename,
 	}
@@ -716,7 +716,7 @@ func (fc *FileController) ReplaceFile(c *gin.Context) {
 		fmt.Printf("Failed to insert log: %v\n", err)
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "File replaced successfully"})
+	c.JSON(http.StatusOK, gin.H{"message": "File replace queued for background reconciliation"})
 }
 
 func (fc *FileController) RevertFile(c *gin.Context) {
@@ -739,7 +739,7 @@ func (fc *FileController) RevertFile(c *gin.Context) {
 
 	if err := fc.FileService.RevertFile(input.Filename, input.Version, uint(userID)); err != nil {
 		status := http.StatusInternalServerError
-		if errors.Is(err, ErrFileOperationBlocked) {
+		if errors.Is(err, ErrFileOperationBlocked) || errors.Is(err, ErrFileVersionTransitionInProgress) {
 			status = http.StatusConflict
 		}
 		c.JSON(status, gin.H{"error": err.Error()})
@@ -764,7 +764,7 @@ func (fc *FileController) RevertFile(c *gin.Context) {
 		Service:     "file",
 		UserID:      &uid,
 		Action:      "REVERT_FILE",
-		Message:     fmt.Sprintf("%s file reverted to %d version", input.Filename, input.Version),
+		Message:     fmt.Sprintf("%s file revert queued to version %d", input.Filename, input.Version),
 		Communities: communities,
 		Filename:    &input.Filename,
 	}
@@ -774,7 +774,7 @@ func (fc *FileController) RevertFile(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": fmt.Sprintf("file reverted to version %d successfully", input.Version),
+		"message": fmt.Sprintf("file revert to version %d queued for background reconciliation", input.Version),
 	})
 
 }
@@ -803,7 +803,11 @@ func (fc *FileController) CreateEditRequest(c *gin.Context) {
 
 	request, err := fc.FileService.CreateEditRequest(input, uint(userID))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		status := http.StatusBadRequest
+		if errors.Is(err, ErrFileVersionTransitionInProgress) {
+			status = http.StatusConflict
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
 

@@ -271,12 +271,19 @@ func (fs *FileService) getColumnsOrderForVersion(file File, version int) ([]stri
 }
 
 func (fs *FileService) ReplaceFiles(uploadedFile *multipart.FileHeader, fileID uint, userID uint) error {
+	if err := ensureVersionReconciliationSchema(fs.DB); err != nil {
+		return err
+	}
+
 	var existing File
 	if err := fs.DB.First(&existing, fileID).Error; err != nil {
 		return fmt.Errorf("file not found: %w", err)
 	}
 
 	if err := fs.ensureNoOpenRequestsForFile(existing, "replace"); err != nil {
+		return err
+	}
+	if err := fs.ensureFileVersionTransitionIdle(existing); err != nil {
 		return err
 	}
 
@@ -309,64 +316,83 @@ func (fs *FileService) ReplaceFiles(uploadedFile *multipart.FileHeader, fileID u
 
 	sizeInBytes := uploadedFile.Size
 	sizeInKB := float64(sizeInBytes) / 1024.0
-	newVersion := existing.Version + 1
 
-	// 4. Update file metadata (only certain fields, keep same ID)
-	existing.Version = newVersion
-	existing.Rows = len(dataRows)
-	existing.Size = sizeInKB
-	existing.ColumnsOrder = headersJSON
-
-	if err := fs.DB.Save(&existing).Error; err != nil {
-		return err
-	}
-
-	// 5. Insert into FileVersion table
-	fileVersion := FileVersion{
-		FileID:       existing.ID,
-		Filename:     existing.Filename,
-		InsertedBy:   userID,
-		CreatedAt:    time.Now(),
-		Private:      existing.Private,
-		Version:      newVersion,
-		IsDelete:     false,
-		Rows:         len(dataRows),
-		Size:         sizeInKB,
-		ColumnsOrder: headersJSON,
-	}
-	if err := fs.DB.Create(&fileVersion).Error; err != nil {
-		return err
-	}
-
-	for _, row := range dataRows {
-		recordMap := make(map[string]string)
-		for j, header := range headers {
-			if j < len(row) {
-				recordMap[header] = row[j]
-			} else {
-				recordMap[header] = ""
-			}
-		}
-
-		jsonBytes, err := json.Marshal(recordMap)
+	return fs.DB.Transaction(func(tx *gorm.DB) error {
+		lockedFile, err := lockFileForVersionTransition(tx, existing.ID)
 		if err != nil {
 			return err
 		}
-
-		record := FileData{
-			FileID:     existing.ID,
-			RowData:    jsonBytes,
-			InsertedBy: userID,
-			CreatedAt:  time.Now(),
-			UpdatedAt:  time.Now(),
-			Version:    newVersion,
-		}
-		if err := fs.DB.Create(&record).Error; err != nil {
+		if err := ensureNoOpenRequestsForFileWithDB(tx, lockedFile, "replace"); err != nil {
 			return err
 		}
-	}
+		if err := ensureFileVersionTransitionIdleWithDB(tx, lockedFile.ID); err != nil {
+			var transitionErr *FileVersionTransitionError
+			if errors.As(err, &transitionErr) {
+				transitionErr.Filename = lockedFile.Filename
+			}
+			return err
+		}
 
-	return nil
+		newVersion := lockedFile.Version + 1
+
+		fileVersion := FileVersion{
+			FileID:               lockedFile.ID,
+			Filename:             lockedFile.Filename,
+			InsertedBy:           userID,
+			CreatedAt:            time.Now(),
+			Private:              lockedFile.Private,
+			Version:              newVersion,
+			IsDelete:             false,
+			Rows:                 len(dataRows),
+			Size:                 sizeInKB,
+			ColumnsOrder:         headersJSON,
+			ReconciliationStatus: fileVersionStatusProcessing,
+			ReconciliationError:  "",
+			TransitionOperation:  versionTransitionOperationReplace,
+		}
+		if err := tx.Create(&fileVersion).Error; err != nil {
+			return err
+		}
+
+		for _, row := range dataRows {
+			recordMap := make(map[string]string)
+			for j, header := range headers {
+				if j < len(row) {
+					recordMap[header] = row[j]
+				} else {
+					recordMap[header] = ""
+				}
+			}
+
+			jsonBytes, err := json.Marshal(recordMap)
+			if err != nil {
+				return err
+			}
+
+			record := FileData{
+				FileID:     lockedFile.ID,
+				RowData:    jsonBytes,
+				InsertedBy: userID,
+				CreatedAt:  time.Now(),
+				UpdatedAt:  time.Now(),
+				Version:    newVersion,
+			}
+			if err := tx.Create(&record).Error; err != nil {
+				return err
+			}
+		}
+
+		return fs.enqueueVersionTransitionJob(
+			tx,
+			lockedFile.ID,
+			fileVersion.ID,
+			lockedFile.Version,
+			newVersion,
+			newVersion,
+			userID,
+			versionTransitionOperationReplace,
+		)
+	})
 }
 
 func (fs *FileService) GetUserRole(userID uint) (string, error) {
@@ -411,6 +437,10 @@ func (fs *FileService) GetAllFiles(userID uint, role string) ([]FileWithUser, er
 }
 
 func (fs *FileService) GetFileData(filename string, version int) ([]FileData, error) {
+	if err := ensureVersionReconciliationSchema(fs.DB); err != nil {
+		return nil, err
+	}
+
 	var file File
 
 	// Fetch file by filename
@@ -419,6 +449,34 @@ func (fs *FileService) GetFileData(filename string, version int) ([]FileData, er
 			return nil, nil
 		}
 		return nil, err
+	}
+
+	if file.Version <= 0 {
+		if version > 0 {
+			file.Version = version
+		} else {
+			file.Version = 1
+		}
+	}
+
+	if version <= 0 {
+		version = file.Version
+	}
+
+	if version != file.Version {
+		var requestedVersion FileVersion
+		if err := fs.DB.
+			Select("version, reconciliation_status").
+			Where("file_id = ? AND version = ?", file.ID, version).
+			First(&requestedVersion).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		if requestedVersion.ReconciliationStatus != "" && requestedVersion.ReconciliationStatus != fileVersionStatusReady {
+			return nil, fmt.Errorf("version %d is still being reconciled", version)
+		}
 	}
 
 	var fileData []FileData
@@ -646,6 +704,10 @@ func (fs *FileService) GetFileAccess(fileId string) ([]FileAccessWithUser, error
 }
 
 func (fs *FileService) GetFileHistory(fileId string) ([]FileVersionWithUser, error) {
+	if err := ensureVersionReconciliationSchema(fs.DB); err != nil {
+		return nil, err
+	}
+
 	var results []FileVersionWithUser
 
 	err := fs.DB.Table("file_version").
@@ -653,7 +715,9 @@ func (fs *FileService) GetFileHistory(fileId string) ([]FileVersionWithUser, err
 		        users.firstname AS firstname, users.lastname AS lastname,
 		        file_version.created_at, file_version.private, file_version.is_delete,
 		        file_version.size, file_version.version, file_version.rows,
-		        file_version.columns_order`).
+		        file_version.columns_order, file_version.reconciliation_status,
+		        file_version.reconciliation_error, file_version.reconciled_at,
+		        file_version.transition_operation`).
 		Joins("JOIN users ON users.id = file_version.inserted_by").
 		Where("file_version.file_id = ?", fileId).
 		Order("file_version.version DESC").
@@ -667,6 +731,10 @@ func (fs *FileService) GetFileHistory(fileId string) ([]FileVersionWithUser, err
 }
 
 func (fs *FileService) RevertFile(filename string, version int, userID uint) error {
+	if err := ensureVersionReconciliationSchema(fs.DB); err != nil {
+		return err
+	}
+
 	var file File
 	if err := fs.DB.Where("filename = ?", filename).First(&file).Error; err != nil {
 		return fmt.Errorf("file not found: %w", err)
@@ -675,68 +743,88 @@ func (fs *FileService) RevertFile(filename string, version int, userID uint) err
 	if err := fs.ensureNoOpenRequestsForFile(file, "revert"); err != nil {
 		return err
 	}
-
-	// get target version from file_version
-	var targetVersion FileVersion
-	if err := fs.DB.Where("file_id = ? AND version = ?", file.ID, version).First(&targetVersion).Error; err != nil {
-		return fmt.Errorf("target version not found: %w", err)
-	}
-
-	// new version number
-	newVersion := file.Version + 1
-
-	// update file table to new version
-	if err := fs.DB.Model(&file).Updates(File{
-		Version:      newVersion,
-		Rows:         targetVersion.Rows,
-		Size:         targetVersion.Size,
-		Private:      targetVersion.Private,
-		ColumnsOrder: targetVersion.ColumnsOrder,
-	}).Error; err != nil {
+	if err := fs.ensureFileVersionTransitionIdle(file); err != nil {
 		return err
 	}
 
-	// insert new row in file_version
-	newFileVersion := FileVersion{
-		FileID:       file.ID,
-		Filename:     filename,
-		InsertedBy:   userID,
-		CreatedAt:    time.Now(),
-		Private:      targetVersion.Private,
-		Version:      newVersion,
-		IsDelete:     false,
-		Rows:         targetVersion.Rows,
-		Size:         targetVersion.Size,
-		ColumnsOrder: targetVersion.ColumnsOrder,
-	}
-	if err := fs.DB.Create(&newFileVersion).Error; err != nil {
-		return err
-	}
-
-	// copy file_data rows of target version into new version
-	var dataRows []FileData
-	if err := fs.DB.Where("file_id = ? AND version = ?", file.ID, version).Find(&dataRows).Error; err != nil {
-		return err
-	}
-
-	for _, row := range dataRows {
-		newRow := FileData{
-			FileID:     file.ID,
-			RowData:    row.RowData,
-			InsertedBy: userID,
-			CreatedAt:  time.Now(),
-			UpdatedAt:  time.Now(),
-			Version:    newVersion,
-		}
-		if err := fs.DB.Create(&newRow).Error; err != nil {
+	return fs.DB.Transaction(func(tx *gorm.DB) error {
+		lockedFile, err := lockFileForVersionTransition(tx, file.ID)
+		if err != nil {
 			return err
 		}
-	}
+		if err := ensureNoOpenRequestsForFileWithDB(tx, lockedFile, "revert"); err != nil {
+			return err
+		}
+		if err := ensureFileVersionTransitionIdleWithDB(tx, lockedFile.ID); err != nil {
+			var transitionErr *FileVersionTransitionError
+			if errors.As(err, &transitionErr) {
+				transitionErr.Filename = lockedFile.Filename
+			}
+			return err
+		}
 
-	return nil
+		var targetVersion FileVersion
+		if err := tx.Where("file_id = ? AND version = ?", lockedFile.ID, version).First(&targetVersion).Error; err != nil {
+			return fmt.Errorf("target version not found: %w", err)
+		}
+
+		var dataRows []FileData
+		if err := tx.Where("file_id = ? AND version = ?", lockedFile.ID, version).Find(&dataRows).Error; err != nil {
+			return err
+		}
+
+		newVersion := lockedFile.Version + 1
+
+		newFileVersion := FileVersion{
+			FileID:               lockedFile.ID,
+			Filename:             lockedFile.Filename,
+			InsertedBy:           userID,
+			CreatedAt:            time.Now(),
+			Private:              targetVersion.Private,
+			Version:              newVersion,
+			IsDelete:             false,
+			Rows:                 targetVersion.Rows,
+			Size:                 targetVersion.Size,
+			ColumnsOrder:         targetVersion.ColumnsOrder,
+			ReconciliationStatus: fileVersionStatusProcessing,
+			ReconciliationError:  "",
+			TransitionOperation:  versionTransitionOperationRevert,
+		}
+		if err := tx.Create(&newFileVersion).Error; err != nil {
+			return err
+		}
+
+		for _, row := range dataRows {
+			newRow := FileData{
+				FileID:     lockedFile.ID,
+				RowData:    row.RowData,
+				InsertedBy: userID,
+				CreatedAt:  time.Now(),
+				UpdatedAt:  time.Now(),
+				Version:    newVersion,
+			}
+			if err := tx.Create(&newRow).Error; err != nil {
+				return err
+			}
+		}
+
+		return fs.enqueueVersionTransitionJob(
+			tx,
+			lockedFile.ID,
+			newFileVersion.ID,
+			lockedFile.Version,
+			newVersion,
+			version,
+			userID,
+			versionTransitionOperationRevert,
+		)
+	})
 }
 
 func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*FileEditRequest, error) {
+	if err := EnsureFileVersionTransitionIdleByID(fs.DB, input.FileID); err != nil {
+		return nil, err
+	}
 
 	// Step 1: Insert main request
 	request := FileEditRequest{
@@ -1180,6 +1268,13 @@ func (fs *FileService) ReviewEditRequest(
 			return err
 		}
 
+		currentFile := File{ID: req.FileID, Version: 1}
+		if err := tx.Where("id = ?", req.FileID).First(&currentFile).Error; err != nil {
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+		}
+
 		if !hasDetailStatuses {
 			if err := tx.Model(&FileEditRequestDetails{}).
 				Where("request_id = ?", requestID).
@@ -1229,7 +1324,7 @@ func (fs *FileService) ReviewEditRequest(
 					InsertedBy: req.UserID,
 					CreatedAt:  time.Now(),
 					UpdatedAt:  time.Now(),
-					Version:    1,
+					Version:    currentFile.Version,
 				}
 
 				if err := tx.Create(&fd).Error; err != nil {
@@ -1317,6 +1412,14 @@ func (fs *FileService) ReviewEditRequest(
 						return fmt.Errorf("failed to update file_data: %v", err)
 					}
 				}
+			}
+
+			approvedFields := make([]string, 0, len(approvedDetails))
+			for _, detail := range approvedDetails {
+				approvedFields = append(approvedFields, detail.FieldName)
+			}
+			if err := syncCurrentVersionMetadata(tx, currentFile, approvedFields); err != nil {
+				return err
 			}
 		}
 
