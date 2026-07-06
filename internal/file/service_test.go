@@ -1207,6 +1207,150 @@ func TestFileService_AccessCRUD_AndHistory(t *testing.T) {
 	}
 }
 
+func TestFileService_GetFileHistory_ReturnsDistinctVersionsWithFileDataFallback(t *testing.T) {
+	db := newTestDB(t)
+	svc := &FileService{DB: db}
+
+	originalUser := UserForTest{Email: "original@example.com", Role: "User", FirstName: "Original", LastName: "Uploader"}
+	replacerUser := UserForTest{Email: "replacer@example.com", Role: "User", FirstName: "Replacement", LastName: "Uploader"}
+	if err := db.Create(&originalUser).Error; err != nil {
+		t.Fatalf("seed original user: %v", err)
+	}
+	if err := db.Create(&replacerUser).Error; err != nil {
+		t.Fatalf("seed replacer user: %v", err)
+	}
+
+	cols := datatypes.JSON([]byte(`["a","b"]`))
+	file := File{
+		Filename:     "history-fallback.csv",
+		InsertedBy:   originalUser.ID,
+		Version:      2,
+		Rows:         1,
+		ColumnsOrder: cols,
+		Size:         222.5,
+	}
+	if err := db.Create(&file).Error; err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	if err := db.Create(&FileVersion{
+		FileID:               file.ID,
+		Filename:             file.Filename,
+		InsertedBy:           replacerUser.ID,
+		Version:              2,
+		Rows:                 1,
+		Size:                 222.5,
+		ColumnsOrder:         cols,
+		ReconciliationStatus: fileVersionStatusReady,
+		TransitionOperation:  versionTransitionOperationReplace,
+	}).Error; err != nil {
+		t.Fatalf("seed version 2 metadata: %v", err)
+	}
+
+	if err := db.Create(&FileData{
+		FileID:     file.ID,
+		RowData:    datatypes.JSON([]byte(`{"a":"v1","b":"row"}`)),
+		InsertedBy: originalUser.ID,
+		Version:    1,
+	}).Error; err != nil {
+		t.Fatalf("seed version 1 row: %v", err)
+	}
+	if err := db.Create(&FileData{
+		FileID:     file.ID,
+		RowData:    datatypes.JSON([]byte(`{"a":"v2","b":"row"}`)),
+		InsertedBy: replacerUser.ID,
+		Version:    2,
+	}).Error; err != nil {
+		t.Fatalf("seed version 2 row: %v", err)
+	}
+
+	history, err := svc.GetFileHistory(fmt.Sprintf("%d", file.ID))
+	if err != nil {
+		t.Fatalf("get file history: %v", err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("expected 2 history versions, got %d", len(history))
+	}
+
+	if history[0].Version != 2 || history[1].Version != 1 {
+		t.Fatalf("unexpected history order: %#v", history)
+	}
+	if history[0].TransitionOperation != versionTransitionOperationReplace {
+		t.Fatalf("expected version 2 transition operation, got %#v", history[0])
+	}
+	if history[1].Firstname != originalUser.FirstName || history[1].Lastname != originalUser.LastName {
+		t.Fatalf("expected fallback uploader names for version 1, got %#v", history[1])
+	}
+	if history[1].Rows != 1 {
+		t.Fatalf("expected fallback version rows=1, got %#v", history[1])
+	}
+	if string(history[1].ColumnsOrder) != `["a","b"]` {
+		t.Fatalf("expected fallback columns order, got %s", string(history[1].ColumnsOrder))
+	}
+}
+
+func TestFileService_GetFileHistory_PrefersSingleReadySnapshotPerVersion(t *testing.T) {
+	db := newTestDB(t)
+	svc := &FileService{DB: db}
+
+	user := UserForTest{Email: "history@example.com", Role: "User", FirstName: "History", LastName: "Tester"}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+
+	cols := datatypes.JSON([]byte(`["a"]`))
+	file := File{
+		Filename:     "history-dedupe.csv",
+		InsertedBy:   user.ID,
+		Version:      1,
+		Rows:         1,
+		ColumnsOrder: cols,
+	}
+	if err := db.Create(&file).Error; err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	if err := db.Create(&FileVersion{
+		FileID:               file.ID,
+		Filename:             file.Filename,
+		InsertedBy:           user.ID,
+		Version:              1,
+		Rows:                 1,
+		ColumnsOrder:         cols,
+		ReconciliationStatus: fileVersionStatusReady,
+		CreatedAt:            time.Now().Add(-2 * time.Minute),
+	}).Error; err != nil {
+		t.Fatalf("seed ready version row: %v", err)
+	}
+	if err := db.Create(&FileVersion{
+		FileID:               file.ID,
+		Filename:             file.Filename,
+		InsertedBy:           user.ID,
+		Version:              1,
+		Rows:                 1,
+		ColumnsOrder:         datatypes.JSON([]byte(`["wrong"]`)),
+		ReconciliationStatus: fileVersionStatusProcessing,
+		TransitionOperation:  versionTransitionOperationReplace,
+		CreatedAt:            time.Now(),
+	}).Error; err != nil {
+		t.Fatalf("seed duplicate processing version row: %v", err)
+	}
+
+	history, err := svc.GetFileHistory(fmt.Sprintf("%d", file.ID))
+	if err != nil {
+		t.Fatalf("get file history: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("expected 1 deduped history row, got %d", len(history))
+	}
+	if history[0].ReconciliationStatus != fileVersionStatusReady {
+		t.Fatalf("expected ready snapshot to win, got %#v", history[0])
+	}
+	if string(history[0].ColumnsOrder) != `["a"]` {
+		t.Fatalf("expected ready snapshot columns order, got %s", string(history[0].ColumnsOrder))
+	}
+}
+
 // -----------------------------------------------------------------------------
 // RevertFile
 // -----------------------------------------------------------------------------
