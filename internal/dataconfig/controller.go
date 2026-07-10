@@ -69,7 +69,7 @@ func (cc *DataConfigController) GetConfig(c *gin.Context) {
 		"version":      cfg.Version,
 		"checksum":     cfg.Checksum,
 		"updated_at":   cfg.UpdatedAt,
-		"config":       cfg.Config,
+		"config":       configForResponse(cfg.Config),
 	})
 }
 

@@ -198,6 +198,73 @@ func TestDataConfigController_GetConfig_Modified(t *testing.T) {
 	}
 }
 
+func TestDataConfigController_GetConfig_ModifiedUsesSourceFileDataConfig(t *testing.T) {
+	updatedAt := time.Date(2026, 2, 25, 12, 0, 0, 0, time.UTC)
+	cfg := &DataConfig{
+		FileID:   12,
+		FileName: "source.json",
+		Version:  4,
+		Checksum: "cfg-4",
+		Config: datatypes.JSON([]byte(`{
+			"fields": [
+				{"key":"id","additional_field":true}
+			],
+			"source_file": {
+				"data_config": {
+					"fields": [
+						{"key":"student_name","label":"Student Name","additional_field":false},
+						{"key":"nia_comments","label":"NIA comments","additional_field":true}
+					]
+				}
+			}
+		}`)),
+		UpdatedAt: updatedAt,
+	}
+
+	r := setupControllerRouter(&mockDataConfigService{
+		getByFileNameIfModifiedFn: func(fileName string, clientLastModified *time.Time) (*GetConfigResult, error) {
+			return &GetConfigResult{
+				NotModified: false,
+				Config:      cfg,
+			}, nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/config?file_name=source.json", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	cfgBody, ok := body["config"].(map[string]any)
+	if !ok {
+		t.Fatalf("config missing or invalid: %#v", body["config"])
+	}
+
+	fields, ok := cfgBody["fields"].([]any)
+	if !ok {
+		t.Fatalf("config.fields missing or invalid: %#v", cfgBody["fields"])
+	}
+	if len(fields) != 1 {
+		t.Fatalf("config.fields length = %d want 1", len(fields))
+	}
+
+	field, ok := fields[0].(map[string]any)
+	if !ok {
+		t.Fatalf("config.fields[0] invalid: %#v", fields[0])
+	}
+	if field["key"] != "student_name" {
+		t.Fatalf("config.fields[0].key = %v", field["key"])
+	}
+}
+
 func TestDataConfigController_GetConfig_NotModified(t *testing.T) {
 	updatedAt := time.Date(2026, 2, 25, 12, 0, 0, 0, time.UTC)
 	cfg := &DataConfig{
