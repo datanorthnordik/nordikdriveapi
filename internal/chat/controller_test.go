@@ -48,7 +48,14 @@ func TestChatController_Chat_Success200(t *testing.T) {
 	defer cleanup()
 
 	expectChatFileLookup(mock, "sheet.xlsx")
-	expectChatRowsLookup(mock, `{"NAME":"Alice","First Nation/Community":"Garden River"}`)
+	expectChatNormalizedRowsLookup(mock, normalizedChatRowJSON(
+		map[string]any{
+			"name": "Alice",
+		},
+		withCanonical(map[string]any{
+			"display_name": "Alice",
+		}),
+	))
 
 	oldGen := genaiGenerateContentHook
 	t.Cleanup(func() {
@@ -85,6 +92,60 @@ func TestChatController_Chat_Success200(t *testing.T) {
 	}
 	if !strings.Contains(res.Body.String(), `"answer":"Yes. I found 1 recorded death connected to drowning at Shingwauk."`) {
 		t.Fatalf("unexpected body: %s", res.Body.String())
+	}
+}
+
+func TestChatController_Chat_IncludesDebugWhenRequested(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db, mock, cleanup := newMockDBChat(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	expectChatNormalizedRowsLookup(mock, normalizedChatRowJSON(
+		map[string]any{
+			"name": "Alice",
+		},
+		withCanonical(map[string]any{
+			"display_name": "Alice",
+		}),
+	))
+
+	oldGen := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiGenerateContentHook = oldGen
+	})
+
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		return jsonStructuredAnswer("Alice is from Garden River.", nil), nil
+	}
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	cc := NewChatController(cs)
+
+	r := gin.New()
+	r.POST("/chat", cc.Chat)
+
+	body := &bytes.Buffer{}
+	w := multipart.NewWriter(body)
+	_ = w.WriteField("question", "Who is Alice?")
+	_ = w.WriteField("filename", "sheet.xlsx")
+	_ = w.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/chat?debug=1", body)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	res := httptest.NewRecorder()
+
+	r.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), `"debug"`) {
+		t.Fatalf("expected debug payload, got body=%s", res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), `"strategy":"structured_retrieval"`) {
+		t.Fatalf("expected strategy in debug payload, got body=%s", res.Body.String())
 	}
 }
 

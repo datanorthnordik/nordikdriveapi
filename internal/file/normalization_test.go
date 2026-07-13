@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"nordik-drive-api/internal/dataconfig"
+
 	"gorm.io/datatypes"
 )
 
@@ -270,5 +272,188 @@ func TestRunNormalizationSyncPrioritizesLatestFileVersions(t *testing.T) {
 	}
 	if normalizedRows[0].Version == 1 || normalizedRows[1].Version == 1 {
 		t.Fatalf("expected only latest-version rows in first batch, got %#v", gotVersions)
+	}
+}
+
+func TestInferFieldRoleTreatsStudentNumberAsIdentifier(t *testing.T) {
+	if got := inferFieldRole("Student Number"); got != "identifier" {
+		t.Fatalf("inferFieldRole(Student Number) = %q want identifier", got)
+	}
+}
+
+func TestNormalizeRowDataBuildsGenericCanonicalPayloadFromCommonColumns(t *testing.T) {
+	rowJSON := datatypes.JSON([]byte(`{
+		"Last Names":"LaForce",
+		"First Names":"John (Johnny)",
+		"Middle Names":"Edward",
+		"Indigenous Name/Spirit Name":"Miskwa",
+		"Student Number":"1915.999",
+		"First Nation/Community":"Sault Ste. Marie, Michigan.",
+		"Date of Birth":"09.08.1919",
+		"Admitted":"1915:09",
+		"Discharged":"1918-06-05",
+		"Parents Names":"Jane and Peter LaForce",
+		"Deceased?":"FALSE",
+		"Mapping Location":"Sault Ste Marie, Michigan",
+		"Lat":"46.5219",
+		"Lng":"-84.3461",
+		"Notes":"Long narrative note here",
+		"Additional Information":"Extra family context",
+		"Death details":"Not listed",
+		"Photos":"photo-a.jpg"
+	}`))
+
+	payloadJSON, searchText, canonicalName, canonicalCommunity, canonicalSchool, err := normalizeRowData(normalizationContext{}, rowJSON)
+	if err != nil {
+		t.Fatalf("normalizeRowData: %v", err)
+	}
+
+	if canonicalName != "john edward laforce" {
+		t.Fatalf("unexpected canonical name: %q", canonicalName)
+	}
+	if canonicalCommunity != "sault ste marie michigan" {
+		t.Fatalf("unexpected canonical community: %q", canonicalCommunity)
+	}
+	if canonicalSchool != "" {
+		t.Fatalf("unexpected canonical school: %q", canonicalSchool)
+	}
+	if !strings.Contains(searchText, "johnny") || !strings.Contains(searchText, "1915") {
+		t.Fatalf("expected alias and identifier tokens in search text, got %q", searchText)
+	}
+
+	var payload normalizedRowPayload
+	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
+		t.Fatalf("unmarshal normalized payload: %v", err)
+	}
+	if payload.Canonical == nil {
+		t.Fatal("expected canonical payload")
+	}
+	if payload.Canonical.RecordProfile != recordProfilePersonRegistry {
+		t.Fatalf("unexpected record profile: %#v", payload.Canonical)
+	}
+	if payload.Canonical.DisplayName != "John Edward LaForce" {
+		t.Fatalf("unexpected display name: %#v", payload.Canonical)
+	}
+	if payload.Canonical.StudentNumber != "1915-999" {
+		t.Fatalf("unexpected student number: %#v", payload.Canonical)
+	}
+	if payload.Canonical.DeceasedStatus != "no" {
+		t.Fatalf("unexpected deceased status: %#v", payload.Canonical)
+	}
+	if payload.Canonical.DerivedFrom["school"] != "" {
+		t.Fatalf("did not expect school derivation without a row-level school field: %#v", payload.Canonical.DerivedFrom)
+	}
+	if payload.Canonical.Dates.Birth == nil || payload.Canonical.Dates.Birth.ISO != "1919-08-09" {
+		t.Fatalf("unexpected birth date: %#v", payload.Canonical.Dates.Birth)
+	}
+
+	if payload.Chat == nil || payload.Chat.DefaultBundle == nil {
+		t.Fatalf("expected chat bundle: %#v", payload.Chat)
+	}
+	if payload.Chat.DefaultBundle.Name != "John Edward LaForce" {
+		t.Fatalf("unexpected default bundle name: %#v", payload.Chat.DefaultBundle)
+	}
+	if !payload.Chat.DefaultBundle.HasNotes || !payload.Chat.DefaultBundle.HasAdditionalInformation || !payload.Chat.DefaultBundle.HasDeathDetails {
+		t.Fatalf("expected narrative presence flags: %#v", payload.Chat.DefaultBundle)
+	}
+	if payload.Chat.NarrativeBundle == nil || payload.Chat.NarrativeBundle.Notes != "Long narrative note here" {
+		t.Fatalf("unexpected narrative bundle: %#v", payload.Chat.NarrativeBundle)
+	}
+	if len(payload.Chat.OmittedFields) == 0 {
+		t.Fatalf("expected omitted fields to be captured: %#v", payload.Chat)
+	}
+}
+
+func TestSyncPendingNormalizedRowsUsesDataConfigSchemaHints(t *testing.T) {
+	db := newTestDB(t)
+
+	file := File{
+		Filename:   "future-schema.csv",
+		InsertedBy: 1,
+		CreatedAt:  time.Now(),
+		Version:    1,
+		Rows:       1,
+		Size:       1,
+	}
+	if err := db.Create(&file).Error; err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+
+	if err := db.Create(&dataconfig.DataConfig{
+		FileID:   int64(file.ID),
+		FileName: file.Filename,
+		Version:  1,
+		Checksum: "cfg-1",
+		IsActive: true,
+		Config: datatypes.JSON([]byte(`{
+			"chat_schema": {
+				"concepts": {
+					"display_name": "Learner",
+					"community": "Nation",
+					"identifier": "Enrollment Id",
+					"notes": "Archive Notes"
+				}
+			}
+		}`)),
+	}).Error; err != nil {
+		t.Fatalf("create data config: %v", err)
+	}
+
+	row := FileData{
+		FileID: file.ID,
+		RowData: datatypes.JSON([]byte(`{
+			"Learner":"Sarah White",
+			"Nation":"Garden River",
+			"Enrollment Id":"A-42",
+			"Archive Notes":"Returned in spring"
+		}`)),
+		InsertedBy: 1,
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+		Version:    1,
+	}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatalf("create row: %v", err)
+	}
+
+	fileID := file.ID
+	version := 1
+	result, err := SyncPendingNormalizedRows(db, &fileID, &version, 10)
+	if err != nil {
+		t.Fatalf("SyncPendingNormalizedRows: %v", err)
+	}
+	if result.Processed != 1 || result.Inserted != 1 || result.Failed != 0 {
+		t.Fatalf("unexpected sync result: %#v", result)
+	}
+
+	var normalized FileDataNormalized
+	if err := db.Where("source_row_id = ?", row.ID).First(&normalized).Error; err != nil {
+		t.Fatalf("load normalized row: %v", err)
+	}
+	if normalized.CanonicalName != "sarah white" {
+		t.Fatalf("unexpected canonical name: %q", normalized.CanonicalName)
+	}
+	if normalized.CanonicalCommunity != "garden river" {
+		t.Fatalf("unexpected canonical community: %q", normalized.CanonicalCommunity)
+	}
+
+	var payload normalizedRowPayload
+	if err := json.Unmarshal(normalized.RowDataNormalized, &payload); err != nil {
+		t.Fatalf("unmarshal normalized payload: %v", err)
+	}
+	if payload.Canonical == nil {
+		t.Fatal("expected canonical payload")
+	}
+	if payload.Canonical.DisplayName != "Sarah White" {
+		t.Fatalf("unexpected display name: %#v", payload.Canonical)
+	}
+	if payload.Canonical.StudentNumberRaw != "A-42" {
+		t.Fatalf("unexpected student number raw: %#v", payload.Canonical)
+	}
+	if payload.Canonical.DerivedFrom["display_name"] != "Learner" {
+		t.Fatalf("expected display_name to come from config-mapped field: %#v", payload.Canonical.DerivedFrom)
+	}
+	if payload.Chat == nil || payload.Chat.NarrativeBundle == nil || payload.Chat.NarrativeBundle.Notes != "Returned in spring" {
+		t.Fatalf("unexpected narrative bundle: %#v", payload.Chat)
 	}
 }

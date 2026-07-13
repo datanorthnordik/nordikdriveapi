@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	currentNormalizationVersion = 1
+	currentNormalizationVersion = 2
 	defaultNormalizationBatch   = 250
 )
 
@@ -62,10 +62,13 @@ type NormalizationSyncOptions struct {
 type normalizedRowPayload struct {
 	Fields       map[string]normalizedField `json:"fields"`
 	Names        []string                   `json:"names,omitempty"`
+	Identifiers  []string                   `json:"identifiers,omitempty"`
 	Communities  []string                   `json:"communities,omitempty"`
 	Schools      []string                   `json:"schools,omitempty"`
 	Locations    []string                   `json:"locations,omitempty"`
 	SearchTokens []string                   `json:"search_tokens,omitempty"`
+	Canonical    *normalizedCanonicalRow    `json:"canonical,omitempty"`
+	Chat         *normalizedChatReadyRow    `json:"chat,omitempty"`
 }
 
 type normalizedField struct {
@@ -215,10 +218,25 @@ func SyncPendingNormalizedRows(db *gorm.DB, fileID *uint, version *int, limit in
 		return result, nil
 	}
 
+	schemaHintsByFileID := make(map[uint]*normalizationSchemaHints, len(candidates))
 	for _, candidate := range candidates {
 		result.Processed++
 
-		payloadJSON, searchText, canonicalName, canonicalCommunity, canonicalSchool, normalizeErr := normalizeRowData(candidate.RowData)
+		schemaHints, ok := schemaHintsByFileID[candidate.FileID]
+		if !ok {
+			loadedHints, err := loadNormalizationSchemaHints(db, candidate.FileID)
+			if err != nil {
+				return nil, err
+			}
+			schemaHints = loadedHints
+			schemaHintsByFileID[candidate.FileID] = schemaHints
+		}
+
+		payloadJSON, searchText, canonicalName, canonicalCommunity, canonicalSchool, normalizeErr := normalizeRowData(normalizationContext{
+			FileID:      candidate.FileID,
+			Version:     candidate.Version,
+			SchemaHints: schemaHints,
+		}, candidate.RowData)
 		status := "ready"
 		errorMessage := ""
 		if normalizeErr != nil {
@@ -282,7 +300,7 @@ func SyncPendingNormalizedRows(db *gorm.DB, fileID *uint, version *int, limit in
 	return result, nil
 }
 
-func normalizeRowData(rowData datatypes.JSON) (datatypes.JSON, string, string, string, string, error) {
+func normalizeRowData(ctx normalizationContext, rowData datatypes.JSON) (datatypes.JSON, string, string, string, string, error) {
 	var raw map[string]interface{}
 	if err := json.Unmarshal(rowData, &raw); err != nil {
 		return nil, "", "", "", "", fmt.Errorf("invalid row data json: %w", err)
@@ -294,6 +312,7 @@ func normalizeRowData(rowData datatypes.JSON) (datatypes.JSON, string, string, s
 
 	searchTokens := make([]string, 0)
 	names := make([]string, 0)
+	identifiers := make([]string, 0)
 	communities := make([]string, 0)
 	schools := make([]string, 0)
 	locations := make([]string, 0)
@@ -329,6 +348,10 @@ func normalizeRowData(rowData datatypes.JSON) (datatypes.JSON, string, string, s
 			if normalizedValue != "" {
 				names = append(names, normalizedValue)
 			}
+		case "identifier":
+			if normalizedValue != "" {
+				identifiers = append(identifiers, normalizedValue)
+			}
 		case "community":
 			if normalizedValue != "" {
 				communities = append(communities, normalizedValue)
@@ -345,9 +368,15 @@ func normalizeRowData(rowData datatypes.JSON) (datatypes.JSON, string, string, s
 	}
 
 	payload.Names = uniqueStrings(names)
+	payload.Identifiers = uniqueStrings(identifiers)
 	payload.Communities = uniqueStrings(communities)
 	payload.Schools = uniqueStrings(schools)
 	payload.Locations = uniqueStrings(locations)
+
+	payload.Canonical = buildNormalizedCanonicalRow(ctx, raw, payload)
+	payload.Chat = buildNormalizedChatReadyRow(ctx, payload.Canonical, raw)
+
+	searchTokens = append(searchTokens, searchTokensForCanonical(payload.Canonical)...)
 	payload.SearchTokens = uniqueStrings(searchTokens)
 
 	jsonBytes, err := json.Marshal(payload)
@@ -355,11 +384,27 @@ func normalizeRowData(rowData datatypes.JSON) (datatypes.JSON, string, string, s
 		return nil, "", "", "", "", fmt.Errorf("failed to marshal normalized row: %w", err)
 	}
 
+	canonicalName := firstOrEmpty(payload.Names)
+	canonicalCommunity := firstOrEmpty(payload.Communities)
+	canonicalSchool := firstOrEmpty(payload.Schools)
+
+	if payload.Canonical != nil {
+		if normalizedValue := normalizeSearchValue(payload.Canonical.DisplayName); normalizedValue != "" {
+			canonicalName = normalizedValue
+		}
+		if normalizedValue := normalizeSearchValue(payload.Canonical.Community); normalizedValue != "" {
+			canonicalCommunity = normalizedValue
+		}
+		if normalizedValue := normalizeSearchValue(payload.Canonical.School); normalizedValue != "" {
+			canonicalSchool = normalizedValue
+		}
+	}
+
 	return datatypes.JSON(jsonBytes),
 		strings.Join(payload.SearchTokens, " "),
-		firstOrEmpty(payload.Names),
-		firstOrEmpty(payload.Communities),
-		firstOrEmpty(payload.Schools),
+		canonicalName,
+		canonicalCommunity,
+		canonicalSchool,
 		nil
 }
 
@@ -380,6 +425,8 @@ func stringifyRowValue(value interface{}) string {
 func inferFieldRole(fieldName string) string {
 	normalizedField := normalizeSearchValue(fieldName)
 	switch {
+	case strings.Contains(normalizedField, "number"), strings.Contains(normalizedField, "identifier"), strings.HasSuffix(normalizedField, " id"), strings.HasPrefix(normalizedField, "id "):
+		return "identifier"
 	case strings.Contains(normalizedField, "community"), strings.Contains(normalizedField, "reserve"), strings.Contains(normalizedField, "first nation"):
 		return "community"
 	case strings.Contains(normalizedField, "school"), strings.Contains(normalizedField, "residential"), strings.Contains(normalizedField, "institution"):
@@ -523,6 +570,10 @@ func tryParseDate(value string) (time.Time, error) {
 		"January 2 2006",
 		"2006/01/02",
 		"2006.01.02",
+		"02.01.2006",
+		"2.1.2006",
+		"01.02.2006",
+		"1.2.2006",
 	}
 
 	for _, layout := range layouts {
@@ -580,4 +631,8 @@ func firstOrEmpty(values []string) string {
 
 func intPtr(v int) *int {
 	return &v
+}
+
+func CurrentNormalizationVersion() int {
+	return currentNormalizationVersion
 }
