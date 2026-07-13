@@ -22,6 +22,7 @@ func (cc *ChatController) Chat(c *gin.Context) {
 	filename := c.PostForm("filename")
 	audioFile, _ := c.FormFile("audio")
 	communities := c.PostFormArray("communities")
+	includeDebug := shouldIncludeChatDebug(c)
 
 	communities = util.ParseCommaSeparatedCommunities(communities)
 
@@ -39,6 +40,9 @@ func (cc *ChatController) Chat(c *gin.Context) {
 	response := gin.H{"answer": result.Answer}
 	if result.MatchedRowID != nil {
 		response["matched_row_id"] = *result.MatchedRowID
+	}
+	if includeDebug && result.Debug != nil {
+		response["debug"] = result.Debug
 	}
 
 	c.JSON(http.StatusOK, response)
@@ -98,4 +102,17 @@ func (cc *ChatController) TTS(c *gin.Context) {
 
 	// Return binary audio so frontend can fetch -> Blob -> cache & replay
 	c.Data(http.StatusOK, audio.MimeType, audio.Data)
+}
+
+func shouldIncludeChatDebug(c *gin.Context) bool {
+	return parseBoolish(c.Query("debug")) || parseBoolish(c.GetHeader("X-Chat-Debug"))
+}
+
+func parseBoolish(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }

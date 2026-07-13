@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	f "nordik-drive-api/internal/file"
@@ -25,8 +26,10 @@ type cachedChatRow struct {
 }
 
 type preparedChatDataset struct {
-	PromptJSON string
-	RowRefToID map[string]int
+	PromptJSON   string
+	RowRefToID   map[string]int
+	TotalRows    int
+	SelectedRows int
 }
 
 type chatStructuredResponse struct {
@@ -82,6 +85,7 @@ Rules for matched_row_ref:
 `
 
 func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, filename string, communities []string) (*ChatResult, error) {
+	totalStart := time.Now()
 	if cs.DB == nil {
 		return nil, fmt.Errorf("db not initialized")
 	}
@@ -94,19 +98,36 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 		return nil, fmt.Errorf("file not found")
 	}
 
-	filtered := normalizeCommunities(communities)
-	prepared, err := cs.getPreparedChatDataset(file.ID, file.Version, filtered)
+	strategy := cs.getQueryStrategy()
+	input := ChatQueryInput{
+		FileID:      file.ID,
+		Version:     file.Version,
+		Question:    question,
+		Communities: communities,
+	}
+
+	if audioFile == nil {
+		routed, ok, err := cs.tryDeterministicChat(input)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			if routed.Debug != nil {
+				routed.Debug.TotalMillis = time.Since(totalStart).Milliseconds()
+			}
+			return routed, nil
+		}
+	}
+
+	prepared, err := strategy.Prepare(cs, ChatQueryInput{
+		FileID:      input.FileID,
+		Version:     input.Version,
+		Question:    input.Question,
+		Communities: input.Communities,
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	prompt := fmt.Sprintf(
-		"%s\n\nStructured output requirements:\n%s\n\nUser question:\n%s\n\nDATA (only source of truth):\n%s",
-		strings.TrimSpace(chatStyleInstruction),
-		strings.TrimSpace(chatStructuredOutputInstruction),
-		strings.TrimSpace(question),
-		prepared.PromptJSON,
-	)
 
 	ctx := context.Background()
 
@@ -127,15 +148,26 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 		audioMime = audioFile.Header.Get("Content-Type")
 	}
 
-	answer, usedModel, err := cs.generateFromPrompt(ctx, prompt, audioBytes, audioMime)
+	primaryModel, fallbackModel := selectChatModelPlan(prepared.Debug, len(audioBytes) > 0)
+	generationStart := time.Now()
+	answer, usedModel, err := cs.generateFromPromptWithModels(ctx, prepared.Prompt, audioBytes, audioMime, primaryModel, fallbackModel)
 	if err != nil {
 		return nil, fmt.Errorf("generation error (%s): %w", usedModel, err)
 	}
 
 	resolvedAnswer, matchedRowID := resolveChatResponse(answer, prepared.RowRefToID)
+	debug := prepared.Debug
+	debug.ExecutionMode = "llm"
+	debug.AudioIncluded = len(audioBytes) > 0
+	debug.PrimaryModel = primaryModel
+	debug.UsedModel = usedModel
+	debug.GenerationMillis = time.Since(generationStart).Milliseconds()
+	debug.TotalMillis = time.Since(totalStart).Milliseconds()
+
 	return &ChatResult{
 		Answer:       resolvedAnswer,
 		MatchedRowID: matchedRowID,
+		Debug:        &debug,
 	}, nil
 }
 
@@ -263,8 +295,10 @@ func buildPreparedChatDataset(rows []cachedChatRow, communities []string) (*prep
 	}
 
 	return &preparedChatDataset{
-		PromptJSON: promptJSON,
-		RowRefToID: rowRefToID,
+		PromptJSON:   promptJSON,
+		RowRefToID:   rowRefToID,
+		TotalRows:    len(rows),
+		SelectedRows: len(selectedIndexes),
 	}, nil
 }
 

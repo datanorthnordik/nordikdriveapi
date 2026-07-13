@@ -26,6 +26,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
+	"nordik-drive-api/internal/dataconfig"
 	"nordik-drive-api/internal/mailer"
 	"nordik-drive-api/internal/util"
 )
@@ -75,6 +76,7 @@ func migrateTestSchema(t *testing.T, db *gorm.DB) {
 		&FileRowLineage{},
 		&FormSubmissionForTest{},
 		&FileAccess{},
+		&dataconfig.DataConfig{},
 		&FileEditRequest{},
 		&FileEditRequestDetails{},
 		&FileEditRequestPhoto{},

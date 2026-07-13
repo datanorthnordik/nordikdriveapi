@@ -34,7 +34,9 @@ type ChatService struct {
 	ProjectID string
 	Location  string
 
-	datasetCache sync.Map
+	datasetCache           sync.Map
+	structuredDatasetCache sync.Map
+	QueryStrategy          ChatQueryStrategy
 }
 
 var (
@@ -80,6 +82,17 @@ func (cs *ChatService) generateFromPrompt(
 	audioBytes []byte,
 	audioMime string,
 ) (answer string, usedModel string, err error) {
+	return cs.generateFromPromptWithModels(ctx, prompt, audioBytes, audioMime, chatFastModel, chatQualityModel)
+}
+
+func (cs *ChatService) generateFromPromptWithModels(
+	ctx context.Context,
+	prompt string,
+	audioBytes []byte,
+	audioMime string,
+	primaryModel string,
+	fallbackModel string,
+) (answer string, usedModel string, err error) {
 	if cs.Client == nil {
 		return "", "", fmt.Errorf("genai client not initialized")
 	}
@@ -99,7 +112,7 @@ func (cs *ChatService) generateFromPrompt(
 		{Role: "user", Parts: parts},
 	}
 
-	genResp, usedModel, err := cs.generateWith429Fallback(ctx, contents)
+	genResp, usedModel, err := cs.generateWithModelFallback(ctx, primaryModel, fallbackModel, contents, nil)
 	if err != nil {
 		return "", usedModel, err
 	}
@@ -177,6 +190,13 @@ func normalizeCommunities(communities []string) []string {
 	}
 	sort.Strings(filtered)
 	return filtered
+}
+
+func (cs *ChatService) getQueryStrategy() ChatQueryStrategy {
+	if cs != nil && cs.QueryStrategy != nil {
+		return cs.QueryStrategy
+	}
+	return structuredRetrievalChatStrategy{}
 }
 
 func (cs *ChatService) TTS(text string) (*TTSAudio, error) {
