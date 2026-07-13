@@ -59,7 +59,7 @@ func detectRelevantDefaultFields(normalizedQuestion string, selectedRows int) []
 	if questionMentionsAny(normalizedQuestion, "school", "residential school", "institution") {
 		fields = append(fields, "school")
 	}
-	if questionMentionsAny(normalizedQuestion, "deceased", "died", "dead", "alive", "living", "death") {
+	if questionMentionsAny(normalizedQuestion, "deceased", "died", "die", "dead", "alive", "living", "death", "deaths") {
 		fields = append(fields, "deceased_status")
 	}
 	if questionMentionsAny(normalizedQuestion, "date of birth", "birth date", "dob", "born") {

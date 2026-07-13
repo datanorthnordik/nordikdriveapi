@@ -102,6 +102,7 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 	input := ChatQueryInput{
 		FileID:      file.ID,
 		Version:     file.Version,
+		FileName:    filename,
 		Question:    question,
 		Communities: communities,
 	}
@@ -122,6 +123,7 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 	prepared, err := strategy.Prepare(cs, ChatQueryInput{
 		FileID:      input.FileID,
 		Version:     input.Version,
+		FileName:    input.FileName,
 		Question:    input.Question,
 		Communities: input.Communities,
 	})

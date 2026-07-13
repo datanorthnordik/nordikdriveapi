@@ -218,10 +218,19 @@ func extractDeterministicFilters(rows []cachedStructuredChatRow, normalizedQuest
 		consumeNormalizedPhrase(consumed, "not deceased")
 		consumeNormalizedPhrase(consumed, "living")
 		consumeNormalizedPhrase(consumed, "alive")
-	case strings.Contains(normalizedQuestion, "deceased") || strings.Contains(normalizedQuestion, "died") || strings.Contains(normalizedQuestion, "dead") || strings.Contains(normalizedQuestion, "passed away"):
+	case strings.Contains(normalizedQuestion, "deceased") ||
+		strings.Contains(normalizedQuestion, "died") ||
+		strings.Contains(normalizedQuestion, "die") ||
+		strings.Contains(normalizedQuestion, "dead") ||
+		strings.Contains(normalizedQuestion, "death") ||
+		strings.Contains(normalizedQuestion, "deaths") ||
+		strings.Contains(normalizedQuestion, "passed away"):
 		status := "yes"
 		filters.DeceasedStatus = &status
 		consumeNormalizedPhrase(consumed, "deceased")
+		consumeNormalizedPhrase(consumed, "death")
+		consumeNormalizedPhrase(consumed, "deaths")
+		consumeNormalizedPhrase(consumed, "die")
 		consumeNormalizedPhrase(consumed, "died")
 		consumeNormalizedPhrase(consumed, "dead")
 		consumeNormalizedPhrase(consumed, "passed away")

@@ -7,11 +7,13 @@ import (
 )
 
 type chatQuestionProfile struct {
-	NormalizedQuestion string
-	Tokens             []string
-	KeyPhrase          string
-	LooksLikeEntity    bool
-	WantsNarrative     bool
+	NormalizedQuestion  string
+	Tokens              []string
+	KeyPhrase           string
+	LooksLikeEntity     bool
+	WantsNarrative      bool
+	WantsDeathFocus     bool
+	WantsDeathNarrative bool
 }
 
 type structuredRowSelection struct {
@@ -47,6 +49,7 @@ func selectStructuredChatRowsFromIndexes(rows []cachedStructuredChatRow, filtere
 	}
 
 	profile := buildChatQuestionProfile(question)
+	filteredIndexes = prefilterStructuredChatRows(rows, filteredIndexes, profile)
 	if len(profile.Tokens) == 0 {
 		return structuredRowSelection{
 			Indexes:          filteredIndexes,
@@ -142,7 +145,7 @@ func filterStructuredRowsByCommunity(rows []cachedStructuredChatRow, communities
 func buildChatQuestionProfile(question string) chatQuestionProfile {
 	normalizedQuestion := normalizeChatSearchValue(question)
 	parts := strings.Fields(normalizedQuestion)
-	tokens := make([]string, 0, len(parts))
+	tokens := make([]string, 0, len(parts)*2)
 	for _, part := range parts {
 		if len(part) <= 1 {
 			continue
@@ -150,19 +153,102 @@ func buildChatQuestionProfile(question string) chatQuestionProfile {
 		if _, stopWord := chatQuestionStopWords[part]; stopWord {
 			continue
 		}
-		tokens = append(tokens, part)
+		tokens = append(tokens, chatQueryTokenVariants(part)...)
 	}
 
+	wantsDeathFocus := questionMentionsAny(
+		normalizedQuestion,
+		"death", "deaths", "deceased", "dead", "die", "died", "passed away",
+		"drown", "drowned", "drowning", "grave", "obit",
+	)
+	wantsDeathNarrative := wantsDeathFocus && questionMentionsAny(
+		normalizedQuestion,
+		"when",
+		"what year",
+		"which year",
+		"in what year",
+		"in what years",
+		"years",
+		"how did",
+		"what happened",
+		"cause of death",
+		"death details",
+		"drown",
+		"drowned",
+		"drowning",
+	)
+
 	profile := chatQuestionProfile{
-		NormalizedQuestion: normalizedQuestion,
-		Tokens:             uniqueChatTokens(tokens),
-		LooksLikeEntity:    looksLikeEntityLookup(normalizedQuestion),
-		WantsNarrative:     wantsNarrativeBundle(normalizedQuestion),
+		NormalizedQuestion:  normalizedQuestion,
+		Tokens:              uniqueChatTokens(tokens),
+		LooksLikeEntity:     looksLikeEntityLookup(normalizedQuestion),
+		WantsNarrative:      wantsNarrativeBundle(normalizedQuestion) || wantsDeathNarrative,
+		WantsDeathFocus:     wantsDeathFocus,
+		WantsDeathNarrative: wantsDeathNarrative,
 	}
 	if len(profile.Tokens) > 0 && len(profile.Tokens) <= 4 {
 		profile.KeyPhrase = strings.Join(profile.Tokens, " ")
 	}
 	return profile
+}
+
+func chatQueryTokenVariants(token string) []string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil
+	}
+
+	variants := []string{token}
+	switch token {
+	case "died":
+		variants = append(variants, "die", "death")
+	case "dies":
+		variants = append(variants, "die")
+	case "dead":
+		variants = append(variants, "death", "deceased")
+	case "deaths":
+		variants = append(variants, "death")
+	case "drowning", "drowned":
+		variants = append(variants, "drown")
+	}
+
+	switch {
+	case strings.HasSuffix(token, "ies") && len(token) > 4:
+		variants = append(variants, token[:len(token)-3]+"y")
+	case strings.HasSuffix(token, "s") && len(token) > 3:
+		variants = append(variants, strings.TrimSuffix(token, "s"))
+	}
+
+	switch {
+	case strings.HasSuffix(token, "ied") && len(token) > 4 && token != "died":
+		variants = append(variants, token[:len(token)-3]+"y")
+	case strings.HasSuffix(token, "ed") && len(token) > 3 && token != "died":
+		variants = append(variants, strings.TrimSuffix(token, "ed"))
+	}
+
+	if strings.HasSuffix(token, "ing") && len(token) > 4 {
+		variants = append(variants, strings.TrimSuffix(token, "ing"))
+	}
+
+	return uniqueChatTokens(variants)
+}
+
+func prefilterStructuredChatRows(rows []cachedStructuredChatRow, filteredIndexes []int, profile chatQuestionProfile) []int {
+	if !profile.WantsDeathFocus || len(filteredIndexes) == 0 {
+		return filteredIndexes
+	}
+
+	narrowed := make([]int, 0, len(filteredIndexes))
+	for _, index := range filteredIndexes {
+		row := rows[index]
+		if normalizeChatSearchValue(row.DefaultBundle.DeceasedStatus) == "yes" || row.DefaultBundle.HasDeathDetails {
+			narrowed = append(narrowed, index)
+		}
+	}
+	if len(narrowed) == 0 {
+		return filteredIndexes
+	}
+	return narrowed
 }
 
 func scoreStructuredChatRow(row cachedStructuredChatRow, profile chatQuestionProfile) (structuredRowMatch, bool) {

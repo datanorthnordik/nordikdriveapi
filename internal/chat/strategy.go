@@ -9,6 +9,7 @@ import (
 type ChatQueryInput struct {
 	FileID      uint
 	Version     int
+	FileName    string
 	Question    string
 	Communities []string
 }
@@ -53,14 +54,19 @@ func (structuredRetrievalChatStrategy) Prepare(cs *ChatService, input ChatQueryI
 		return fallback, nil
 	}
 
-	prompt := fmt.Sprintf(
-		"%s\n\nStructured output requirements:\n%s\n\nData notes:\n%s\n\nUser question:\n%s\n\nDATA (only source of truth):\n%s",
+	sections := []string{
 		strings.TrimSpace(chatStyleInstruction),
-		strings.TrimSpace(chatStructuredOutputInstruction),
-		strings.TrimSpace(chatCompactDataInstruction),
-		strings.TrimSpace(input.Question),
-		prepared.PromptJSON,
+		"Structured output requirements:\n" + strings.TrimSpace(chatStructuredOutputInstruction),
+	}
+	if datasetContext := buildChatDatasetContext(input.FileName); datasetContext != "" {
+		sections = append(sections, datasetContext)
+	}
+	sections = append(sections,
+		"Data notes:\n"+strings.TrimSpace(chatCompactDataInstruction),
+		"User question:\n"+strings.TrimSpace(input.Question),
+		"DATA (only source of truth):\n"+prepared.PromptJSON,
 	)
+	prompt := strings.Join(sections, "\n\n")
 
 	return &PreparedChatPrompt{
 		Prompt:     prompt,
@@ -90,13 +96,18 @@ func (fullDatasetChatStrategy) Prepare(cs *ChatService, input ChatQueryInput) (*
 		return nil, err
 	}
 
-	prompt := fmt.Sprintf(
-		"%s\n\nStructured output requirements:\n%s\n\nUser question:\n%s\n\nDATA (only source of truth):\n%s",
+	sections := []string{
 		strings.TrimSpace(chatStyleInstruction),
-		strings.TrimSpace(chatStructuredOutputInstruction),
-		strings.TrimSpace(input.Question),
-		prepared.PromptJSON,
+		"Structured output requirements:\n" + strings.TrimSpace(chatStructuredOutputInstruction),
+	}
+	if datasetContext := buildChatDatasetContext(input.FileName); datasetContext != "" {
+		sections = append(sections, datasetContext)
+	}
+	sections = append(sections,
+		"User question:\n"+strings.TrimSpace(input.Question),
+		"DATA (only source of truth):\n"+prepared.PromptJSON,
 	)
+	prompt := strings.Join(sections, "\n\n")
 
 	return &PreparedChatPrompt{
 		Prompt:     prompt,
@@ -113,4 +124,16 @@ func (fullDatasetChatStrategy) Prepare(cs *ChatService, input ChatQueryInput) (*
 			PreparationMillis:    time.Since(start).Milliseconds(),
 		},
 	}, nil
+}
+
+func buildChatDatasetContext(fileName string) string {
+	fileName = strings.TrimSpace(fileName)
+	if fileName == "" {
+		return ""
+	}
+
+	return fmt.Sprintf(
+		"Dataset context:\n- Source file title: %s\n- The file title can provide school, institution, or collection scope when rows do not repeat it.\n- Use that scope only to interpret the provided data, and do not mention the file title unless needed for accuracy.",
+		fileName,
+	)
 }
