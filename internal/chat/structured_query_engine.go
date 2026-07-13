@@ -27,6 +27,7 @@ type cachedStructuredChatRow struct {
 	SearchText          string
 	DefaultBundle       structuredChatDefaultBundle
 	NarrativeBundle     structuredChatNarrativeBundle
+	SourceFields        []structuredChatSourceField
 	DefaultBundleJSON   string
 	NarrativeBundleJSON string
 	HasNarrative        bool
@@ -52,8 +53,16 @@ type structuredChatRowDB struct {
 }
 
 type structuredChatNormalizedPayload struct {
-	Canonical *structuredChatCanonicalPayload `json:"canonical,omitempty"`
-	Chat      *structuredChatBundlePayload    `json:"chat,omitempty"`
+	Fields    map[string]structuredChatFieldPayload `json:"fields,omitempty"`
+	Canonical *structuredChatCanonicalPayload       `json:"canonical,omitempty"`
+	Chat      *structuredChatBundlePayload          `json:"chat,omitempty"`
+}
+
+type structuredChatFieldPayload struct {
+	Raw        string   `json:"raw,omitempty"`
+	Normalized string   `json:"normalized,omitempty"`
+	Tokens     []string `json:"tokens,omitempty"`
+	Role       string   `json:"role,omitempty"`
 }
 
 type structuredChatCanonicalPayload struct {
@@ -110,9 +119,18 @@ type structuredChatNarrativeBundle struct {
 	DeathDetails          string `json:"death_details,omitempty"`
 }
 
+type structuredChatSourceField struct {
+	Name            string
+	NormalizedName  string
+	Raw             string
+	NormalizedValue string
+	Role            string
+}
+
 const chatCompactDataInstruction = `
 - Each item includes a row_ref and a default_bundle with the structured facts most relevant to the question.
 - A narrative_bundle is included only when longer notes/details are likely relevant to the question.
+- Some rows may also include source_fields containing raw source columns that are relevant to the question.
 - Some non-essential fields may be omitted to keep the prompt compact.
 - Only rely on the fields that are actually shown in the bundles below.
 `
@@ -128,7 +146,8 @@ func (cs *ChatService) getPreparedStructuredChatDataset(fileID uint, version int
 
 	selection := selectStructuredChatRows(dataset.rows, question, communities)
 	projection := buildChatPromptProjectionProfile(question, selection.Mode, len(selection.Indexes), selection.IncludeNarrative)
-	promptJSON, rowRefToID, narrativeRows, err := buildStructuredPromptJSONArray(dataset.rows, selection.Indexes, selection.IncludeNarrative, projection)
+	profile := buildChatQuestionProfile(question)
+	promptJSON, rowRefToID, narrativeRows, err := buildStructuredPromptJSONArray(dataset.rows, selection.Indexes, selection.IncludeNarrative, projection, profile)
 	if err != nil {
 		return nil, err
 	}
@@ -229,6 +248,7 @@ func buildCachedStructuredChatRow(rawRow structuredChatRowDB) (cachedStructuredC
 		row.NarrativeBundleJSON = string(narrativeBundleJSON)
 		_ = json.Unmarshal(narrativeBundleJSON, &row.NarrativeBundle)
 	}
+	row.SourceFields = buildStructuredSourceFields(payload.Fields)
 
 	if payload.Canonical != nil {
 		identifierValues := []string{
@@ -306,7 +326,7 @@ func buildFallbackDefaultBundle(canonical *structuredChatCanonicalPayload) map[s
 	return bundle
 }
 
-func buildStructuredPromptJSONArray(rows []cachedStructuredChatRow, indexes []int, includeNarrative bool, projection chatPromptProjectionProfile) (string, map[string]int, int, error) {
+func buildStructuredPromptJSONArray(rows []cachedStructuredChatRow, indexes []int, includeNarrative bool, projection chatPromptProjectionProfile, profile chatQuestionProfile) (string, map[string]int, int, error) {
 	if len(indexes) == 0 {
 		return "[]", map[string]int{}, 0, nil
 	}
@@ -341,6 +361,14 @@ func buildStructuredPromptJSONArray(rows []cachedStructuredChatRow, indexes []in
 			}
 			builder.WriteString(narrativeBundleJSON)
 			narrativeRows++
+		}
+		if sourceFields := buildProjectedSourceFields(row, profile, projection, len(indexes), includeNarrative); len(sourceFields) > 0 {
+			sourceFieldsJSON, err := json.Marshal(sourceFields)
+			if err != nil {
+				return "", nil, 0, err
+			}
+			builder.WriteString(`,"source_fields":`)
+			builder.Write(sourceFieldsJSON)
 		}
 		builder.WriteByte('}')
 	}
@@ -385,6 +413,130 @@ func extractBundleStringValues(bundle map[string]any) []string {
 		}
 	}
 	return values
+}
+
+func buildStructuredSourceFields(fields map[string]structuredChatFieldPayload) []structuredChatSourceField {
+	if len(fields) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(fields))
+	for name := range fields {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	out := make([]structuredChatSourceField, 0, len(names))
+	for _, name := range names {
+		field := fields[name]
+		raw := strings.TrimSpace(field.Raw)
+		if raw == "" {
+			continue
+		}
+		normalizedName := normalizeChatSearchValue(name)
+		normalizedValue := strings.TrimSpace(field.Normalized)
+		if normalizedValue == "" {
+			normalizedValue = normalizeChatSearchValue(raw)
+		}
+		out = append(out, structuredChatSourceField{
+			Name:            name,
+			NormalizedName:  normalizedName,
+			Raw:             raw,
+			NormalizedValue: normalizedValue,
+			Role:            strings.TrimSpace(field.Role),
+		})
+	}
+	return out
+}
+
+func buildProjectedSourceFields(row cachedStructuredChatRow, profile chatQuestionProfile, projection chatPromptProjectionProfile, selectedRows int, includeNarrative bool) map[string]string {
+	if len(row.SourceFields) == 0 {
+		return nil
+	}
+
+	includeAll := profile.LooksLikeEntity && selectedRows <= 3
+	unresolvedTokens := unresolvedSourceFieldTokens(row, profile, includeNarrative)
+	out := make(map[string]string)
+
+	for _, field := range row.SourceFields {
+		if includeNarrative && isProjectedNarrativeSourceField(field) {
+			continue
+		}
+		if includeAll {
+			out[field.Name] = field.Raw
+			continue
+		}
+		if isProjectedSourceFieldRelevant(field, profile, unresolvedTokens) {
+			out[field.Name] = field.Raw
+		}
+	}
+
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func unresolvedSourceFieldTokens(row cachedStructuredChatRow, profile chatQuestionProfile, includeNarrative bool) []string {
+	if len(profile.Tokens) == 0 {
+		return nil
+	}
+
+	narrativeText := ""
+	if includeNarrative {
+		narrativeText = normalizeChatSearchValue(strings.Join([]string{
+			row.NarrativeBundle.Notes,
+			row.NarrativeBundle.AdditionalInformation,
+			row.NarrativeBundle.DeathDetails,
+		}, " "))
+	}
+
+	out := make([]string, 0, len(profile.Tokens))
+	for _, token := range profile.Tokens {
+		if containsStructuredToken(row.CoreSearchText, token) {
+			continue
+		}
+		if narrativeText != "" && containsStructuredToken(narrativeText, token) {
+			continue
+		}
+		if containsStructuredToken(row.SearchText, token) {
+			out = append(out, token)
+		}
+	}
+	return uniqueChatTokens(out)
+}
+
+func isProjectedSourceFieldRelevant(field structuredChatSourceField, profile chatQuestionProfile, unresolvedTokens []string) bool {
+	if strings.TrimSpace(field.Raw) == "" {
+		return false
+	}
+
+	if field.NormalizedName != "" && containsStructuredTokenSequence(profile.NormalizedQuestion, field.NormalizedName) {
+		return true
+	}
+
+	for _, token := range strings.Fields(field.NormalizedName) {
+		if containsStructuredToken(profile.NormalizedQuestion, token) {
+			return true
+		}
+	}
+
+	for _, token := range unresolvedTokens {
+		if containsStructuredToken(field.NormalizedValue, token) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isProjectedNarrativeSourceField(field structuredChatSourceField) bool {
+	switch field.NormalizedName {
+	case "notes", "note", "additional information", "additional info", "death details", "death detail":
+		return true
+	default:
+		return false
+	}
 }
 
 func setBundleField(bundle map[string]any, key string, value string) {
