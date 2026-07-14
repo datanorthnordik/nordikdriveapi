@@ -624,12 +624,16 @@ func TestFileService_SaveFilesMultipart_AllBranches(t *testing.T) {
 		FileNames:       []string{"okfile"},
 		Private:         []bool{true},
 		CommunityFilter: []bool{true},
+		Descriptions:    []string{"School register and death details for reconciliation testing."},
 	}, 99)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 	if len(out) != 1 || out[0].Filename != "okfile" || out[0].Version != 1 || out[0].Rows != 2 || out[0].InsertedBy != 99 {
 		t.Fatalf("unexpected file out: %#v", out)
+	}
+	if out[0].Description != "School register and death details for reconciliation testing." {
+		t.Fatalf("expected description to be stored on file, got %#v", out[0])
 	}
 
 	// verify file_version created
@@ -639,6 +643,9 @@ func TestFileService_SaveFilesMultipart_AllBranches(t *testing.T) {
 	}
 	if len(vers) != 1 || vers[0].Version != 1 {
 		t.Fatalf("unexpected versions: %#v", vers)
+	}
+	if vers[0].Description != "School register and death details for reconciliation testing." {
+		t.Fatalf("expected file version description to be stored, got %#v", vers[0])
 	}
 	if string(vers[0].ColumnsOrder) != `["c1","c2","c3"]` {
 		t.Fatalf("expected file version columns order to be stored, got %s", string(vers[0].ColumnsOrder))

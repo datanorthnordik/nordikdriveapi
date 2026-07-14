@@ -1681,6 +1681,7 @@ func applyVersionReconciliationPlan(tx *gorm.DB, file File, targetVersion *FileV
 	return tx.Model(&File{}).
 		Where("id = ?", file.ID).
 		Updates(map[string]any{
+			"description":   targetVersion.Description,
 			"version":       job.TargetVersion,
 			"rows":          finalRows,
 			"size":          targetVersion.Size,

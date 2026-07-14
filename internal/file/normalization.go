@@ -431,6 +431,8 @@ func inferFieldRole(fieldName string) string {
 		return "community"
 	case strings.Contains(normalizedField, "school"), strings.Contains(normalizedField, "residential"), strings.Contains(normalizedField, "institution"):
 		return "school"
+	case strings.Contains(normalizedField, "cause of death"), strings.Contains(normalizedField, "death cause"), strings.Contains(normalizedField, "manner of death"):
+		return "cause"
 	case strings.Contains(normalizedField, "place"), strings.Contains(normalizedField, "location"), strings.Contains(normalizedField, "town"), strings.Contains(normalizedField, "city"):
 		return "location"
 	case strings.Contains(normalizedField, "date"), strings.Contains(normalizedField, "dob"), strings.Contains(normalizedField, "birth"), strings.Contains(normalizedField, "death"):

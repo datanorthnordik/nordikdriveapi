@@ -29,6 +29,7 @@ type deterministicRowFilter struct {
 	SchoolNormalized    string
 	SchoolDisplay       string
 	DeceasedStatus      *string
+	RequireDeathRecord  *bool
 	RequireNotes        *bool
 	RequireAddInfo      *bool
 	RequireDeathDetails *bool
@@ -48,7 +49,8 @@ type deterministicGroupedCount struct {
 
 var deterministicRouteNoiseTokens = map[string]struct{}{
 	"count": {}, "counts": {}, "each": {}, "fewest": {}, "highest": {}, "largest": {}, "least": {}, "many": {},
-	"most": {}, "number": {}, "numbers": {}, "per": {}, "smallest": {}, "total": {},
+	"most": {}, "number": {}, "numbers": {}, "occur": {}, "occurred": {}, "per": {}, "smallest": {}, "total": {},
+	"happen": {}, "happened": {},
 }
 
 var deterministicLookupFieldPhrases = []struct {
@@ -56,6 +58,8 @@ var deterministicLookupFieldPhrases = []struct {
 	Phrases []string
 }{
 	{Field: "date_of_birth", Phrases: []string{"date of birth", "birth date", "dob", "born"}},
+	{Field: "date_of_death", Phrases: []string{"date of death", "death date", "year of death", "when did die", "when did died"}},
+	{Field: "cause_of_death", Phrases: []string{"cause of death", "how did die", "how did died", "what happened", "drowning", "drowned", "drown"}},
 	{Field: "student_number", Phrases: []string{"student number", "student id", "id number", "record number", "registration number", "admission number", "identifier"}},
 	{Field: "parents_names", Phrases: []string{"parents names", "parent names", "parents"}},
 	{Field: "mapping_location", Phrases: []string{"mapping location", "map location", "location", "place"}},
@@ -122,6 +126,9 @@ func buildDeterministicChatRoute(rows []cachedStructuredChatRow, question string
 		return deterministicChatRoute{}, false
 	}
 
+	if route, ok := tryDeterministicDeathYearExtremeRoute(rows, communities, cloneDeterministicQuestionContext(ctx)); ok {
+		return route, true
+	}
 	if route, ok := tryDeterministicGroupExtremeRoute(rows, communities, cloneDeterministicQuestionContext(ctx)); ok {
 		return route, true
 	}
@@ -184,6 +191,12 @@ func extractDeterministicFilters(rows []cachedStructuredChatRow, normalizedQuest
 		filters.SchoolNormalized = school.Normalized
 		filters.SchoolDisplay = school.Display
 		consumeNormalizedPhrase(consumed, school.Normalized)
+	} else if school, ok := uniqueStructuredFieldTokenMatch(rows, normalizedQuestion, func(row cachedStructuredChatRow) (string, string) {
+		return row.CanonicalSchool, structuredFieldDisplay(row.DefaultBundle.School, row.CanonicalSchool)
+	}, shouldIgnoreSchoolMatchToken); ok {
+		filters.SchoolNormalized = school.Normalized
+		filters.SchoolDisplay = school.Display
+		consumeNormalizedPhrase(consumed, school.Normalized)
 	}
 
 	if strings.Contains(normalizedQuestion, "death details") {
@@ -225,8 +238,8 @@ func extractDeterministicFilters(rows []cachedStructuredChatRow, normalizedQuest
 		strings.Contains(normalizedQuestion, "death") ||
 		strings.Contains(normalizedQuestion, "deaths") ||
 		strings.Contains(normalizedQuestion, "passed away"):
-		status := "yes"
-		filters.DeceasedStatus = &status
+		required := true
+		filters.RequireDeathRecord = &required
 		consumeNormalizedPhrase(consumed, "deceased")
 		consumeNormalizedPhrase(consumed, "death")
 		consumeNormalizedPhrase(consumed, "deaths")
@@ -239,7 +252,69 @@ func extractDeterministicFilters(rows []cachedStructuredChatRow, normalizedQuest
 	return filters
 }
 
+func tryDeterministicDeathYearExtremeRoute(rows []cachedStructuredChatRow, communities []string, ctx deterministicQuestionContext) (deterministicChatRoute, bool) {
+	if !looksLikeDeterministicDeathYearQuestion(ctx.NormalizedQuestion) {
+		return deterministicChatRoute{}, false
+	}
+
+	extreme := deterministicGroupExtreme(ctx.NormalizedQuestion)
+	if extreme == "" {
+		extreme = "highest"
+	}
+	consumeTokens(ctx.ConsumedTokens, "year", "years", "death", "deaths", extreme)
+
+	if hasUnsupportedDeterministicTokens(ctx.Profile.Tokens, ctx.ConsumedTokens) {
+		return deterministicChatRoute{}, false
+	}
+
+	selectedIndexes := applyDeterministicFilters(rows, communities, ctx.Filters)
+	grouped := buildDeterministicDeathYearCounts(rows, selectedIndexes)
+	if len(grouped) == 0 {
+		return deterministicChatRoute{}, false
+	}
+
+	sort.Slice(grouped, func(i, j int) bool {
+		if grouped[i].Count != grouped[j].Count {
+			if extreme == "lowest" {
+				return grouped[i].Count < grouped[j].Count
+			}
+			return grouped[i].Count > grouped[j].Count
+		}
+		return grouped[i].Display < grouped[j].Display
+	})
+
+	targetCount := grouped[0].Count
+	years := make([]string, 0, len(grouped))
+	for _, item := range grouped {
+		if item.Count != targetCount {
+			break
+		}
+		years = append(years, item.Display)
+	}
+	if len(years) == 0 {
+		return deterministicChatRoute{}, false
+	}
+
+	answer := ""
+	if len(years) == 1 {
+		answer = fmt.Sprintf("The %s number of matching deaths occurred in %s, with %d record%s.", extreme, years[0], targetCount, pluralSuffix(targetCount))
+	} else {
+		answer = fmt.Sprintf("%s tie for the %s number of matching deaths, with %d record%s each.", joinNaturalStrings(years), extreme, targetCount, pluralSuffix(targetCount))
+	}
+
+	return deterministicChatRoute{
+		QueryType:     "death_year_extreme",
+		RetrievalMode: "deterministic_death_year_extreme",
+		Answer:        answer,
+		RowsSelected:  len(selectedIndexes),
+	}, true
+}
+
 func tryDeterministicFieldLookupRoute(rows []cachedStructuredChatRow, communities []string, ctx deterministicQuestionContext) (deterministicChatRoute, bool) {
+	if looksLikeDeterministicExistenceQuestion(ctx.NormalizedQuestion) || looksLikeDeterministicCountQuestion(ctx.NormalizedQuestion) {
+		return deterministicChatRoute{}, false
+	}
+
 	field, consumed, ok := detectDeterministicLookupField(ctx.NormalizedQuestion)
 	if !ok {
 		return deterministicChatRoute{}, false
@@ -328,6 +403,10 @@ func tryDeterministicGroupExtremeRoute(rows []cachedStructuredChatRow, communiti
 	}
 	consumeTokens(ctx.ConsumedTokens, consumed...)
 	consumeNormalizedPhrase(ctx.ConsumedTokens, extreme)
+	wantsNames := wantsDeterministicGroupMemberList(ctx.NormalizedQuestion)
+	if wantsNames {
+		consumeTokens(ctx.ConsumedTokens, "name", "names", "who", "they")
+	}
 
 	if hasUnsupportedDeterministicTokens(ctx.Profile.Tokens, ctx.ConsumedTokens) {
 		return deterministicChatRoute{}, false
@@ -359,12 +438,17 @@ func tryDeterministicGroupExtremeRoute(rows []cachedStructuredChatRow, communiti
 	}
 
 	scopePrefix := deterministicScopePrefix(ctx.Filters, len(communities) > 0)
-	groupLabel := deterministicGroupLabel(field)
 	answer := ""
 	if len(tied) == 1 {
-		answer = fmt.Sprintf("%s%s has the %s %s, with %d record%s.", scopePrefix, tied[0], extreme, groupLabel, targetCount, pluralSuffix(targetCount))
+		answer = fmt.Sprintf("%s%s has the %s number of matching records, with %d matching record%s.", scopePrefix, tied[0], extreme, targetCount, pluralSuffix(targetCount))
 	} else {
-		answer = fmt.Sprintf("%s%s tie for the %s %s, with %d record%s each.", scopePrefix, joinNaturalStrings(tied), extreme, groupLabel, targetCount, pluralSuffix(targetCount))
+		answer = fmt.Sprintf("%s%s tie for the %s number of matching records, with %d matching record%s each.", scopePrefix, joinNaturalStrings(tied), extreme, targetCount, pluralSuffix(targetCount))
+	}
+	if wantsNames {
+		memberAnswer, ok := buildDeterministicGroupedMemberAnswer(rows, selectedIndexes, field, tied)
+		if ok {
+			answer = answer + " " + memberAnswer
+		}
 	}
 
 	return deterministicChatRoute{
@@ -419,6 +503,10 @@ func tryDeterministicGroupSummaryRoute(rows []cachedStructuredChatRow, communiti
 
 func applyDeterministicFilters(rows []cachedStructuredChatRow, communities []string, filters deterministicRowFilter) []int {
 	indexes := filterStructuredRowsByCommunity(rows, communities)
+	return applyDeterministicFiltersToIndexes(rows, indexes, filters)
+}
+
+func applyDeterministicFiltersToIndexes(rows []cachedStructuredChatRow, indexes []int, filters deterministicRowFilter) []int {
 	out := make([]int, 0, len(indexes))
 	for _, index := range indexes {
 		row := rows[index]
@@ -429,6 +517,9 @@ func applyDeterministicFilters(rows []cachedStructuredChatRow, communities []str
 			continue
 		}
 		if filters.DeceasedStatus != nil && normalizeChatSearchValue(row.DefaultBundle.DeceasedStatus) != normalizeChatSearchValue(*filters.DeceasedStatus) {
+			continue
+		}
+		if filters.RequireDeathRecord != nil && row.IsDeathRecord != *filters.RequireDeathRecord {
 			continue
 		}
 		if filters.RequireNotes != nil && row.DefaultBundle.HasNotes != *filters.RequireNotes {
@@ -562,6 +653,11 @@ func buildDeterministicFieldLookupAnswer(row cachedStructuredChatRow, field stri
 			return fmt.Sprintf("%s is in the data, but a date of birth isn't listed.", name), true
 		}
 		return fmt.Sprintf("%s's date of birth is %s.", name, row.DefaultBundle.DateOfBirth), true
+	case "date_of_death":
+		if strings.TrimSpace(row.DefaultBundle.DateOfDeath) == "" {
+			return fmt.Sprintf("%s is in the data, but a date of death isn't listed.", name), true
+		}
+		return fmt.Sprintf("%s's date of death is %s.", name, row.DefaultBundle.DateOfDeath), true
 	case "admitted":
 		if strings.TrimSpace(row.DefaultBundle.Admitted) == "" {
 			return fmt.Sprintf("%s is in the data, but an admission date isn't listed.", name), true
@@ -582,6 +678,11 @@ func buildDeterministicFieldLookupAnswer(row cachedStructuredChatRow, field stri
 			return fmt.Sprintf("%s is in the data, but a mapping location isn't listed.", name), true
 		}
 		return fmt.Sprintf("%s's mapping location is %s.", name, row.DefaultBundle.MappingLocation), true
+	case "cause_of_death":
+		if strings.TrimSpace(row.DefaultBundle.CauseOfDeath) == "" {
+			return fmt.Sprintf("%s is in the data, but a cause of death isn't listed.", name), true
+		}
+		return fmt.Sprintf("%s's cause of death is listed as %s.", name, row.DefaultBundle.CauseOfDeath), true
 	case "deceased_status":
 		switch normalizeChatSearchValue(row.DefaultBundle.DeceasedStatus) {
 		case "yes":
@@ -650,6 +751,41 @@ func uniqueStructuredFieldValueMatch(rows []cachedStructuredChatRow, normalizedQ
 	return matches[0], true
 }
 
+func uniqueStructuredFieldTokenMatch(rows []cachedStructuredChatRow, normalizedQuestion string, getter func(cachedStructuredChatRow) (string, string), ignoreToken func(string) bool) (deterministicFieldValueMatch, bool) {
+	unique := make([]deterministicFieldValueMatch, 0, 2)
+	seen := make(map[string]struct{})
+	for _, row := range rows {
+		normalizedValue, displayValue := getter(row)
+		normalizedValue = strings.TrimSpace(normalizedValue)
+		displayValue = strings.TrimSpace(displayValue)
+		if normalizedValue == "" {
+			continue
+		}
+		if _, ok := seen[normalizedValue]; ok {
+			continue
+		}
+		seen[normalizedValue] = struct{}{}
+		unique = append(unique, deterministicFieldValueMatch{
+			Normalized: normalizedValue,
+			Display:    firstNonEmptyString(displayValue, normalizedValue),
+		})
+	}
+	if len(unique) != 1 {
+		return deterministicFieldValueMatch{}, false
+	}
+
+	candidate := unique[0]
+	for _, token := range strings.Fields(candidate.Normalized) {
+		if ignoreToken != nil && ignoreToken(token) {
+			continue
+		}
+		if containsStructuredToken(normalizedQuestion, token) {
+			return candidate, true
+		}
+	}
+	return deterministicFieldValueMatch{}, false
+}
+
 func looksLikeDeterministicCountQuestion(normalizedQuestion string) bool {
 	return strings.Contains(normalizedQuestion, "how many") ||
 		strings.Contains(normalizedQuestion, "count ") ||
@@ -678,6 +814,27 @@ func looksLikeDeterministicGroupSummaryQuestion(normalizedQuestion string) bool 
 		}
 	}
 	return false
+}
+
+func shouldIgnoreSchoolMatchToken(token string) bool {
+	switch token {
+	case "", "indian", "institution", "on", "residential", "school", "sault", "ste", "marie":
+		return true
+	default:
+		return false
+	}
+}
+
+func looksLikeDeterministicDeathYearQuestion(normalizedQuestion string) bool {
+	return questionMentionsAny(
+		normalizedQuestion,
+		"what year",
+		"which year",
+		"in what year",
+		"in what years",
+		"year of death",
+		"years of death",
+	) && questionMentionsAny(normalizedQuestion, "death", "deaths", "died", "die")
 }
 
 func deterministicGroupExtreme(normalizedQuestion string) string {
@@ -736,6 +893,9 @@ func deterministicScopeDescription(filters deterministicRowFilter, hasCommunityF
 			parts = append(parts, "with unknown deceased status")
 		}
 	}
+	if filters.RequireDeathRecord != nil && *filters.RequireDeathRecord && filters.DeceasedStatus == nil {
+		parts = append(parts, "for death records")
+	}
 	if filters.RequireNotes != nil && *filters.RequireNotes {
 		parts = append(parts, "with notes")
 	}
@@ -779,6 +939,107 @@ func deterministicGroupDimension(field string) string {
 	default:
 		return "group"
 	}
+}
+
+func wantsDeterministicGroupMemberList(normalizedQuestion string) bool {
+	return questionMentionsAny(
+		normalizedQuestion,
+		"what are the names",
+		"what are their names",
+		"what are those names",
+		"names of those",
+		"names of these",
+		"which children",
+		"which students",
+		"who are they",
+		"who are those",
+		"who were they",
+	) || containsStructuredToken(normalizedQuestion, "names")
+}
+
+func buildDeterministicDeathYearCounts(rows []cachedStructuredChatRow, indexes []int) []deterministicGroupedCount {
+	if len(indexes) == 0 {
+		return nil
+	}
+
+	counts := map[string]deterministicGroupedCount{}
+	for _, index := range indexes {
+		row := rows[index]
+		if row.DeathYear == nil {
+			continue
+		}
+		display := fmt.Sprintf("%d", *row.DeathYear)
+		item := counts[display]
+		item.Normalized = display
+		item.Display = display
+		item.Count++
+		counts[display] = item
+	}
+
+	out := make([]deterministicGroupedCount, 0, len(counts))
+	for _, item := range counts {
+		out = append(out, item)
+	}
+	return out
+}
+
+func buildDeterministicGroupedMemberAnswer(rows []cachedStructuredChatRow, indexes []int, field string, tiedDisplays []string) (string, bool) {
+	if len(indexes) == 0 || len(tiedDisplays) == 0 {
+		return "", false
+	}
+
+	namesByGroup := make(map[string][]string, len(tiedDisplays))
+	allowed := make(map[string]struct{}, len(tiedDisplays))
+	for _, display := range tiedDisplays {
+		display = strings.TrimSpace(display)
+		if display == "" {
+			continue
+		}
+		allowed[strings.ToLower(display)] = struct{}{}
+	}
+
+	for _, index := range indexes {
+		_, display := deterministicGroupValue(rows[index], field)
+		display = strings.TrimSpace(display)
+		if display == "" {
+			continue
+		}
+		if _, ok := allowed[strings.ToLower(display)]; !ok {
+			continue
+		}
+		name := strings.TrimSpace(firstNonEmptyString(rows[index].DefaultBundle.Name, rows[index].CanonicalName))
+		if name == "" {
+			continue
+		}
+		namesByGroup[display] = append(namesByGroup[display], name)
+	}
+
+	if len(namesByGroup) == 0 {
+		return "", false
+	}
+
+	if len(tiedDisplays) == 1 {
+		names := namesByGroup[tiedDisplays[0]]
+		if len(names) == 0 {
+			return "", false
+		}
+		sort.Strings(names)
+		return fmt.Sprintf("The matching names are %s.", joinNaturalStrings(names)), true
+	}
+
+	parts := make([]string, 0, len(tiedDisplays))
+	for _, display := range tiedDisplays {
+		names := namesByGroup[display]
+		if len(names) == 0 {
+			continue
+		}
+		sort.Strings(names)
+		parts = append(parts, fmt.Sprintf("For %s, the matching names are %s", display, joinNaturalStrings(names)))
+	}
+	if len(parts) == 0 {
+		return "", false
+	}
+	return strings.Join(parts, ". ") + ".", true
 }
 
 func structuredFieldDisplay(display string, normalized string) string {

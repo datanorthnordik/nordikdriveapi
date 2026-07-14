@@ -33,6 +33,7 @@ CREATE TABLE otps (
 CREATE TABLE IF NOT EXISTS file (
     id SERIAL PRIMARY KEY,
     filename VARCHAR(255) UNIQUE NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
     inserted_by INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     private BOOLEAN DEFAULT FALSE,
@@ -48,6 +49,7 @@ CREATE TABLE IF NOT EXISTS file_version (
     id SERIAL PRIMARY KEY,
     file_id INT NOT NULL REFERENCES file(id) ON DELETE CASCADE,
     filename VARCHAR(255) NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
     inserted_by INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     private BOOLEAN DEFAULT FALSE,
@@ -61,6 +63,12 @@ CREATE TABLE IF NOT EXISTS file_version (
     reconciled_at TIMESTAMP NULL,
     transition_operation VARCHAR(20) NOT NULL DEFAULT ''
 );
+
+ALTER TABLE file
+ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE file_version
+ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
 
 CREATE INDEX IF NOT EXISTS idx_file_version_file_version
     ON file_version(file_id, version);

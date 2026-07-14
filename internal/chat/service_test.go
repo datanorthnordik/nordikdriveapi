@@ -79,10 +79,14 @@ func (h textprotoMIMEHeader) toHeader() map[string][]string {
 	return out
 }
 
-func expectChatFileLookup(mock sqlmock.Sqlmock, filename string) {
-	mock.ExpectQuery(`(?i)select.*id.*version.*from.*file.*where.*filename.*order.*version.*desc.*limit`).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "version"}).
-			AddRow(uint(1), 1))
+func expectChatFileLookup(mock sqlmock.Sqlmock, filename string, descriptions ...string) {
+	description := ""
+	if len(descriptions) > 0 {
+		description = descriptions[0]
+	}
+	mock.ExpectQuery(`(?i)select.*id.*version.*description.*from.*file.*where.*filename.*order.*version.*desc.*limit`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "version", "description"}).
+			AddRow(uint(1), 1, description))
 }
 
 func expectChatRowsLookup(mock sqlmock.Sqlmock, rows ...string) {
@@ -333,7 +337,7 @@ func TestChatService_Chat_FileNotFound(t *testing.T) {
 	defer cleanup()
 
 	mock.ExpectQuery(`(?i)select.*id.*version.*from.*file.*where.*filename.*order.*version.*desc.*limit`).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "version"}))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "version", "description"}))
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
 	_, err := cs.Chat("q", nil, "missing.xlsx", nil)
@@ -1040,7 +1044,7 @@ func TestChatService_Chat_DeathYearQuestionIncludesDeathNarrativeAndDatasetConte
 	defer cleanup()
 
 	filename := "Shingwauk And Wawanosh Students Master List"
-	expectChatFileLookup(mock, filename)
+	expectChatFileLookup(mock, filename, "Master list spanning Shingwauk and Wawanosh records, including obituary and death details where available.")
 	expectChatNormalizedRowsLookup(
 		mock,
 		normalizedChatRowJSON(
@@ -1102,6 +1106,9 @@ func TestChatService_Chat_DeathYearQuestionIncludesDeathNarrativeAndDatasetConte
 		prompt := contents[0].Parts[0].Text
 		if !strings.Contains(prompt, "Dataset context:") || !strings.Contains(prompt, filename) {
 			t.Fatalf("expected dataset context in prompt, got:\n%s", prompt)
+		}
+		if !strings.Contains(prompt, "Master list spanning Shingwauk and Wawanosh records") {
+			t.Fatalf("expected file description in prompt, got:\n%s", prompt)
 		}
 		if !strings.Contains(prompt, `"narrative_bundle":{`) || !strings.Contains(prompt, "Died 13 Jan 1913, obituary.") || !strings.Contains(prompt, "Died 2 Dec 1913, grave marker.") {
 			t.Fatalf("expected death narrative details in prompt, got:\n%s", prompt)
@@ -1423,6 +1430,170 @@ func TestChatService_Chat_RoutesDeathGroupExtremeDeterministically(t *testing.T)
 	}
 }
 
+func TestChatService_Chat_RoutesDeathGroupExtremeWithNamesDeterministically(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	expectChatNormalizedRowsLookup(
+		mock,
+		normalizedChatRowJSON(
+			map[string]any{
+				"name":            "Alice Johnson",
+				"community":       "Garden River",
+				"deceased_status": "Yes",
+			},
+			withCanonical(map[string]any{
+				"display_name":    "Alice Johnson",
+				"community":       "Garden River",
+				"deceased_status": "yes",
+			}),
+		),
+		normalizedChatRowJSON(
+			map[string]any{
+				"name":            "Bob Thomas",
+				"community":       "Garden River",
+				"deceased_status": "Yes",
+			},
+			withCanonical(map[string]any{
+				"display_name":    "Bob Thomas",
+				"community":       "Garden River",
+				"deceased_status": "yes",
+			}),
+		),
+		normalizedChatRowJSON(
+			map[string]any{
+				"name":            "Carol Pine",
+				"community":       "Batchawana Bay",
+				"deceased_status": "Yes",
+			},
+			withCanonical(map[string]any{
+				"display_name":    "Carol Pine",
+				"community":       "Batchawana Bay",
+				"deceased_status": "yes",
+			}),
+		),
+	)
+
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiGenerateContentHook = oldGenerate
+	})
+
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		t.Fatal("expected deterministic death grouped route with names without LLM generation")
+		return nil, nil
+	}
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	result, err := cs.Chat("What community had the most deaths, and what are the names of those children?", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !strings.Contains(result.Answer, "Garden River") || !strings.Contains(result.Answer, "Alice Johnson") || !strings.Contains(result.Answer, "Bob Thomas") {
+		t.Fatalf("unexpected answer: %#v", result)
+	}
+	if strings.Contains(result.Answer, "Carol Pine") {
+		t.Fatalf("expected only top community names, got %#v", result)
+	}
+	if result.Debug == nil || result.Debug.QueryType != "group_extreme" {
+		t.Fatalf("expected deterministic group_extreme debug, got %#v", result.Debug)
+	}
+}
+
+func TestChatService_Chat_RoutesDeathDatasetCommunityExtremeDeterministically(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	filename := "Confirmed- Shingwauk (Wawanosh)"
+	expectChatFileLookup(mock, filename)
+	expectChatNormalizedRowsLookup(
+		mock,
+		normalizedChatRowJSON(
+			map[string]any{
+				"name":          "Andrew Johnson",
+				"community":     "Walpole Island",
+				"school":        "Shingwauk, Sault Ste. Marie, ON",
+				"date_of_death": "1906-03-07",
+			},
+			withCanonical(map[string]any{
+				"display_name": "Andrew Johnson",
+				"community":    "Walpole Island",
+				"school":       "Shingwauk, Sault Ste. Marie, ON",
+				"dates": map[string]any{
+					"death": map[string]any{
+						"raw":  "1906-03-07",
+						"iso":  "1906-03-07",
+						"year": 1906,
+					},
+				},
+			}),
+		),
+		normalizedChatRowJSON(
+			map[string]any{
+				"name":          "Albert Penance",
+				"community":     "Walpole Island",
+				"school":        "Shingwauk, Sault Ste. Marie, ON",
+				"date_of_death": "1903-07-30",
+			},
+			withCanonical(map[string]any{
+				"display_name": "Albert Penance",
+				"community":    "Walpole Island",
+				"school":       "Shingwauk, Sault Ste. Marie, ON",
+				"dates": map[string]any{
+					"death": map[string]any{
+						"raw":  "1903-07-30",
+						"iso":  "1903-07-30",
+						"year": 1903,
+					},
+				},
+			}),
+		),
+		normalizedChatRowJSON(
+			map[string]any{
+				"name":          "Freida Augustine",
+				"community":     "Garden River",
+				"school":        "Shingwauk, Sault Ste. Marie, ON",
+				"date_of_death": "1913-04-17",
+			},
+			withCanonical(map[string]any{
+				"display_name": "Freida Augustine",
+				"community":    "Garden River",
+				"school":       "Shingwauk, Sault Ste. Marie, ON",
+				"dates": map[string]any{
+					"death": map[string]any{
+						"raw":  "1913-04-17",
+						"iso":  "1913-04-17",
+						"year": 1913,
+					},
+				},
+			}),
+		),
+	)
+
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiGenerateContentHook = oldGenerate
+	})
+
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		t.Fatal("expected deterministic death dataset community route without LLM generation")
+		return nil, nil
+	}
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	result, err := cs.Chat("What community / reserve had the most deaths? What are the names of those children?", nil, filename, nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !strings.Contains(result.Answer, "Walpole Island") || !strings.Contains(result.Answer, "Andrew Johnson") || !strings.Contains(result.Answer, "Albert Penance") {
+		t.Fatalf("unexpected answer: %#v", result)
+	}
+	if result.Debug == nil || result.Debug.QueryType != "group_extreme" {
+		t.Fatalf("expected deterministic group_extreme debug, got %#v", result.Debug)
+	}
+}
+
 func TestChatService_Chat_RoutesLowestGroupExtremeDeterministically(t *testing.T) {
 	db, mock, cleanup := newMockDBChatSvc(t)
 	defer cleanup()
@@ -1524,6 +1695,181 @@ func TestChatService_Chat_FallsBackToLLMForUnsupportedDeterministicCount(t *test
 	}
 	if result.Debug.ExecutionMode != "llm" {
 		t.Fatalf("execution mode = %q want llm", result.Debug.ExecutionMode)
+	}
+}
+
+func TestChatService_Chat_UsesAllDeathRowsForAggregateYearQuestion(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	filename := "Shingwauk And Wawanosh Students Master List"
+	expectChatFileLookup(mock, filename)
+	expectChatNormalizedRowsLookup(
+		mock,
+		normalizedChatRowJSON(
+			map[string]any{
+				"name":              "Alice Johnson",
+				"community":         "Garden River",
+				"deceased_status":   "Yes",
+				"has_death_details": true,
+			},
+			withCanonical(map[string]any{
+				"display_name":    "Alice Johnson",
+				"community":       "Garden River",
+				"deceased_status": "yes",
+			}),
+			withNarrative(map[string]any{
+				"notes":         "Referenced in the Shingwauk register.",
+				"death_details": "Died 13 Jan 1913, obituary.",
+			}),
+		),
+		normalizedChatRowJSON(
+			map[string]any{
+				"name":              "Bob Thomas",
+				"community":         "Batchawana Bay",
+				"deceased_status":   "Yes",
+				"has_death_details": true,
+			},
+			withCanonical(map[string]any{
+				"display_name":    "Bob Thomas",
+				"community":       "Batchawana Bay",
+				"deceased_status": "yes",
+			}),
+			withNarrative(map[string]any{
+				"death_details": "Died 2 Dec 1913, grave marker.",
+			}),
+		),
+		normalizedChatRowJSON(
+			map[string]any{
+				"name":              "Carol Pine",
+				"community":         "Garden River",
+				"deceased_status":   "Yes",
+				"has_death_details": true,
+			},
+			withCanonical(map[string]any{
+				"display_name":    "Carol Pine",
+				"community":       "Garden River",
+				"deceased_status": "yes",
+			}),
+			withNarrative(map[string]any{
+				"death_details": "Died 4 Mar 1914, church record.",
+			}),
+		),
+	)
+
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiGenerateContentHook = oldGenerate
+	})
+
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		prompt := contents[0].Parts[0].Text
+		if !strings.Contains(prompt, "Died 13 Jan 1913, obituary.") || !strings.Contains(prompt, "Died 2 Dec 1913, grave marker.") || !strings.Contains(prompt, "Died 4 Mar 1914, church record.") {
+			t.Fatalf("expected all death rows in prompt, got:\n%s", prompt)
+		}
+		return jsonStructuredAnswer("The highest number of recorded deaths occurred in 1913.", nil), nil
+	}
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	result, err := cs.Chat("In what years did the highest number of deaths occur at Shingwauk?", nil, filename, nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if result.Debug == nil {
+		t.Fatal("expected debug metrics")
+	}
+	if result.Debug.RetrievalMode != "aggregate_dataset" {
+		t.Fatalf("expected aggregate_dataset retrieval for broad death-year question, got %#v", result.Debug)
+	}
+	if result.Debug.RowsSelected != 3 {
+		t.Fatalf("expected all death rows to be selected, got %#v", result.Debug)
+	}
+}
+
+func TestChatService_Chat_RoutesDeathYearExtremeDeterministicallyForDeathDataset(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	filename := "Confirmed- Shingwauk (Wawanosh)"
+	expectChatFileLookup(mock, filename)
+	expectChatNormalizedRowsLookup(
+		mock,
+		normalizedChatRowJSON(
+			map[string]any{
+				"name":          "Freida Augustine",
+				"school":        "Shingwauk, Sault Ste. Marie, ON",
+				"date_of_death": "1913-04-17",
+			},
+			withCanonical(map[string]any{
+				"display_name": "Freida Augustine",
+				"school":       "Shingwauk, Sault Ste. Marie, ON",
+				"dates": map[string]any{
+					"death": map[string]any{
+						"raw":  "1913-04-17",
+						"iso":  "1913-04-17",
+						"year": 1913,
+					},
+				},
+			}),
+		),
+		normalizedChatRowJSON(
+			map[string]any{
+				"name":          "Lena Paibomsai",
+				"school":        "Shingwauk, Sault Ste. Marie, ON",
+				"date_of_death": "1913-05-01",
+			},
+			withCanonical(map[string]any{
+				"display_name": "Lena Paibomsai",
+				"school":       "Shingwauk, Sault Ste. Marie, ON",
+				"dates": map[string]any{
+					"death": map[string]any{
+						"raw":  "1913-05-01",
+						"iso":  "1913-05-01",
+						"year": 1913,
+					},
+				},
+			}),
+		),
+		normalizedChatRowJSON(
+			map[string]any{
+				"name":          "Andrew Johnson",
+				"school":        "Shingwauk, Sault Ste. Marie, ON",
+				"date_of_death": "1906-03-07",
+			},
+			withCanonical(map[string]any{
+				"display_name": "Andrew Johnson",
+				"school":       "Shingwauk, Sault Ste. Marie, ON",
+				"dates": map[string]any{
+					"death": map[string]any{
+						"raw":  "1906-03-07",
+						"iso":  "1906-03-07",
+						"year": 1906,
+					},
+				},
+			}),
+		),
+	)
+
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiGenerateContentHook = oldGenerate
+	})
+
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		t.Fatal("expected deterministic death-year route without LLM generation")
+		return nil, nil
+	}
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	result, err := cs.Chat("In what years did the highest number of deaths occur at Shingwauk?", nil, filename, nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !strings.Contains(result.Answer, "1913") || !strings.Contains(result.Answer, "2") {
+		t.Fatalf("unexpected answer: %#v", result)
+	}
+	if result.Debug == nil || result.Debug.QueryType != "death_year_extreme" {
+		t.Fatalf("expected deterministic death_year_extreme debug, got %#v", result.Debug)
 	}
 }
 

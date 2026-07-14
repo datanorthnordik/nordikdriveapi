@@ -94,17 +94,25 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 	}
 
 	var file f.File
-	if err := cs.DB.Select("id, version").Where("filename = ?", filename).Order("version DESC").First(&file).Error; err != nil {
-		return nil, fmt.Errorf("file not found")
+	fileQuery := cs.DB.Select("id, version, description").Where("filename = ?", filename).Order("version DESC")
+	if err := fileQuery.First(&file).Error; err != nil {
+		if isMissingDescriptionColumnError(err) {
+			if fallbackErr := cs.DB.Select("id, version").Where("filename = ?", filename).Order("version DESC").First(&file).Error; fallbackErr != nil {
+				return nil, fmt.Errorf("file not found")
+			}
+		} else {
+			return nil, fmt.Errorf("file not found")
+		}
 	}
 
 	strategy := cs.getQueryStrategy()
 	input := ChatQueryInput{
-		FileID:      file.ID,
-		Version:     file.Version,
-		FileName:    filename,
-		Question:    question,
-		Communities: communities,
+		FileID:          file.ID,
+		Version:         file.Version,
+		FileName:        filename,
+		FileDescription: file.Description,
+		Question:        question,
+		Communities:     communities,
 	}
 
 	if audioFile == nil {
@@ -121,11 +129,12 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 	}
 
 	prepared, err := strategy.Prepare(cs, ChatQueryInput{
-		FileID:      input.FileID,
-		Version:     input.Version,
-		FileName:    input.FileName,
-		Question:    input.Question,
-		Communities: input.Communities,
+		FileID:          input.FileID,
+		Version:         input.Version,
+		FileName:        input.FileName,
+		FileDescription: input.FileDescription,
+		Question:        input.Question,
+		Communities:     input.Communities,
 	})
 	if err != nil {
 		return nil, err
@@ -452,4 +461,15 @@ func normalizePromptRowRef(rowRef string) string {
 	}
 
 	return rowRef
+}
+
+func isMissingDescriptionColumnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	if !strings.Contains(message, "description") {
+		return false
+	}
+	return strings.Contains(message, "column") && (strings.Contains(message, "does not exist") || strings.Contains(message, "unknown"))
 }

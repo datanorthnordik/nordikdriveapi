@@ -11,6 +11,7 @@ type chatQuestionProfile struct {
 	Tokens              []string
 	KeyPhrase           string
 	LooksLikeEntity     bool
+	WantsAggregate      bool
 	WantsNarrative      bool
 	WantsDeathFocus     bool
 	WantsDeathNarrative bool
@@ -50,6 +51,13 @@ func selectStructuredChatRowsFromIndexes(rows []cachedStructuredChatRow, filtere
 
 	profile := buildChatQuestionProfile(question)
 	filteredIndexes = prefilterStructuredChatRows(rows, filteredIndexes, profile)
+	if profile.WantsAggregate && !profile.LooksLikeEntity {
+		return structuredRowSelection{
+			Indexes:          selectStructuredAggregateRows(rows, filteredIndexes, question),
+			IncludeNarrative: profile.WantsNarrative,
+			Mode:             "aggregate_dataset",
+		}
+	}
 	if len(profile.Tokens) == 0 {
 		return structuredRowSelection{
 			Indexes:          filteredIndexes,
@@ -177,11 +185,23 @@ func buildChatQuestionProfile(question string) chatQuestionProfile {
 		"drowned",
 		"drowning",
 	)
+	wantsAggregate := looksLikeDeterministicCountQuestion(normalizedQuestion) ||
+		looksLikeDeterministicGroupSummaryQuestion(normalizedQuestion) ||
+		deterministicGroupExtreme(normalizedQuestion) != "" ||
+		(wantsDeathFocus && questionMentionsAny(
+			normalizedQuestion,
+			"what year",
+			"which year",
+			"in what year",
+			"in what years",
+			"years",
+		))
 
 	profile := chatQuestionProfile{
 		NormalizedQuestion:  normalizedQuestion,
 		Tokens:              uniqueChatTokens(tokens),
 		LooksLikeEntity:     looksLikeEntityLookup(normalizedQuestion),
+		WantsAggregate:      wantsAggregate,
 		WantsNarrative:      wantsNarrativeBundle(normalizedQuestion) || wantsDeathNarrative,
 		WantsDeathFocus:     wantsDeathFocus,
 		WantsDeathNarrative: wantsDeathNarrative,
@@ -241,7 +261,7 @@ func prefilterStructuredChatRows(rows []cachedStructuredChatRow, filteredIndexes
 	narrowed := make([]int, 0, len(filteredIndexes))
 	for _, index := range filteredIndexes {
 		row := rows[index]
-		if normalizeChatSearchValue(row.DefaultBundle.DeceasedStatus) == "yes" || row.DefaultBundle.HasDeathDetails {
+		if row.IsDeathRecord || normalizeChatSearchValue(row.DefaultBundle.DeceasedStatus) == "yes" || row.DefaultBundle.HasDeathDetails {
 			narrowed = append(narrowed, index)
 		}
 	}
@@ -249,6 +269,19 @@ func prefilterStructuredChatRows(rows []cachedStructuredChatRow, filteredIndexes
 		return filteredIndexes
 	}
 	return narrowed
+}
+
+func selectStructuredAggregateRows(rows []cachedStructuredChatRow, filteredIndexes []int, question string) []int {
+	if len(filteredIndexes) == 0 {
+		return []int{}
+	}
+
+	ctx := buildDeterministicQuestionContext(rows, question)
+	indexes := applyDeterministicFiltersToIndexes(rows, filteredIndexes, ctx.Filters)
+	if len(indexes) == 0 {
+		return filteredIndexes
+	}
+	return indexes
 }
 
 func scoreStructuredChatRow(row cachedStructuredChatRow, profile chatQuestionProfile) (structuredRowMatch, bool) {

@@ -167,6 +167,7 @@ type fakeFileService struct {
 	LastPhotoReviews []PhotoReviewInput
 
 	LastSaveUserID uint
+	LastSaveInput  FileUploadInput
 	LastDeleteID   string
 	LastResetID    string
 
@@ -233,6 +234,7 @@ func (f *fakeFileService) bump(name string) {
 func (f *fakeFileService) SaveFilesMultipart(uploadedFiles []*multipart.FileHeader, filenames FileUploadInput, userID uint) ([]File, error) {
 	f.bump("SaveFilesMultipart")
 	f.LastSaveUserID = userID
+	f.LastSaveInput = filenames
 	return f.SaveOut, f.SaveErr
 }
 func (f *fakeFileService) GetUserRole(userID uint) (string, error) {
