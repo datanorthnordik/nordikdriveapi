@@ -1023,11 +1023,15 @@ func (as *AdminService) StreamMediaZip(ctx context.Context, out io.Writer, req A
 	envBucket := strings.TrimSpace(os.Getenv("BUCKET_NAME"))
 
 	created := 0
+	usedEntryNames := make(map[string]int, len(rows))
 
 	for _, r := range rows {
 		entryPath := buildZipEntryPath(r, req.CategorizeByUser, req.CategorizeByType)
 
-		baseName := sanitizeFilename(r.FileName)
+		baseName := ""
+		if strings.TrimSpace(r.FileName) != "" {
+			baseName = sanitizeFilename(r.FileName)
+		}
 		if baseName == "" {
 			_, obj, _ := parseGSURLAdmin(r.PhotoURL)
 			baseName = sanitizeFilename(path.Base(obj))
@@ -1036,7 +1040,7 @@ func (as *AdminService) StreamMediaZip(ctx context.Context, out io.Writer, req A
 			}
 		}
 
-		finalName := fmt.Sprintf("req_%d_row_%d_%d_%s", r.RequestID, r.RowID, r.ID, baseName)
+		finalName := uniqueZipEntryName(entryPath, baseName, usedEntryNames)
 		zipFullPath := entryPath + finalName
 
 		w, err := zw.Create(zipFullPath)
@@ -1233,4 +1237,30 @@ func sanitizePathPart(s string) string {
 	s = strings.ReplaceAll(s, "\n", "")
 	s = strings.ReplaceAll(s, "\r", "")
 	return s
+}
+
+func uniqueZipEntryName(entryPath string, baseName string, used map[string]int) string {
+	baseName = sanitizeFilename(baseName)
+	if baseName == "" {
+		baseName = "file"
+	}
+
+	key := strings.ToLower(entryPath + baseName)
+	if used[key] == 0 {
+		used[key] = 1
+		return baseName
+	}
+
+	ext := path.Ext(baseName)
+	stem := strings.TrimSuffix(baseName, ext)
+	for n := used[key] + 1; ; n++ {
+		candidate := fmt.Sprintf("%s (%d)%s", stem, n, ext)
+		candidateKey := strings.ToLower(entryPath + candidate)
+		if used[candidateKey] != 0 {
+			continue
+		}
+		used[key] = n
+		used[candidateKey] = 1
+		return candidate
+	}
 }

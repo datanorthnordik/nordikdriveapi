@@ -252,6 +252,12 @@ func Test_StreamMediaZip_Success_ZipsTwoFiles(t *testing.T) {
 	if !strings.Contains(joined, "user_9_") || !strings.Contains(joined, "/photos/") || !strings.Contains(joined, "/documents/") {
 		t.Fatalf("unexpected zip names: %v", names)
 	}
+	if strings.Contains(joined, "req_") {
+		t.Fatalf("zip names should use file_name without request prefixes: %v", names)
+	}
+	if !strings.Contains(joined, "/photos/a.jpg") || !strings.Contains(joined, "/documents/b.pdf") {
+		t.Fatalf("expected original file names inside zip, got %v", names)
+	}
 
 	// content check
 	got := map[string]string{}
@@ -354,6 +360,63 @@ func Test_StreamMediaZip_CopyError(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "read fail") {
 		t.Fatalf("expected read fail, got %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func Test_StreamMediaZip_KeepsFileNameAndAddsSuffixOnCollision(t *testing.T) {
+	db, mock, cleanup := newMockDBForZip(t)
+	defer cleanup()
+
+	as := &AdminService{DB: db}
+
+	mock.ExpectQuery(`(?i)file_edit_request_photos`).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "request_id", "row_id", "photo_url", "file_name", "document_type", "document_category",
+			"user_id", "user_first", "user_last",
+		}).
+			AddRow(uint(1), uint(10), 5, "gs://mybucket/docs/one.pdf", "shared.pdf", "document", "", uint(9), "A", "B").
+			AddRow(uint(2), uint(11), 7, "gs://mybucket/docs/two.pdf", "shared.pdf", "document", "", uint(9), "A", "B"))
+
+	fake := &fakeGCS{
+		objects: map[string]map[string]any{
+			"mybucket": {
+				path.Clean("docs/one.pdf"): []byte("ONE"),
+				path.Clean("docs/two.pdf"): []byte("TWO"),
+			},
+		},
+	}
+	old := newGCSClientHook
+	newGCSClientHook = func(ctx context.Context) (gcsClient, error) { return fake, nil }
+	t.Cleanup(func() { newGCSClientHook = old })
+
+	var out bytes.Buffer
+	err := as.StreamMediaZip(context.Background(), &out, AdminDownloadMediaRequest{
+		RequestIDs:   []uint{10, 11},
+		DocumentType: "document",
+	})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+
+	zr, err := zip.NewReader(bytes.NewReader(out.Bytes()), int64(out.Len()))
+	if err != nil {
+		t.Fatalf("zip read: %v", err)
+	}
+	if len(zr.File) != 2 {
+		t.Fatalf("expected 2 zip entries, got %d", len(zr.File))
+	}
+
+	names := []string{zr.File[0].Name, zr.File[1].Name}
+	joined := strings.Join(names, " | ")
+	if !strings.Contains(joined, "shared.pdf") || !strings.Contains(joined, "shared (2).pdf") {
+		t.Fatalf("expected original name plus collision suffix, got %v", names)
+	}
+	if strings.Contains(joined, "req_") {
+		t.Fatalf("zip names should not include request prefixes, got %v", names)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
