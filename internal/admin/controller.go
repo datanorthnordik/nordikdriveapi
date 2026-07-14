@@ -123,16 +123,7 @@ func (ac *AdminController) DownloadMediaZip(c *gin.Context) {
 		return
 	}
 
-	ts := time.Now().Format("20060102_150405")
-	zipName := fmt.Sprintf("media_%s.zip", ts)
-
-	// naming based on request_ids if present
-	ids := dedupeAndFilterRequestIDs(req.RequestIDs)
-	if len(ids) == 1 {
-		zipName = fmt.Sprintf("request_%d_media_%s.zip", ids[0], ts)
-	} else if len(ids) > 1 {
-		zipName = fmt.Sprintf("requests_%d_media_%s.zip", len(ids), ts)
-	}
+	zipName := buildMediaZipFilename(req, time.Now())
 
 	c.Header("Content-Type", "application/zip")
 	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, zipName))
@@ -162,4 +153,36 @@ func dedupeAndFilterRequestIDs(in []uint) []uint {
 
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
+}
+
+func buildMediaZipFilename(req AdminDownloadMediaRequest, now time.Time) string {
+	ts := now.Format("20060102_150405")
+
+	docType := "files"
+	switch strings.ToLower(strings.TrimSpace(req.DocumentType)) {
+	case "photos":
+		docType = "photos"
+	case "doc", "document":
+		docType = "documents"
+	}
+
+	scope := "filtered"
+	ids := dedupeAndFilterRequestIDs(req.RequestIDs)
+	if len(ids) == 1 {
+		scope = fmt.Sprintf("request_%d", ids[0])
+	} else if len(ids) > 1 {
+		scope = fmt.Sprintf("requests_%d", len(ids))
+	}
+
+	parts := []string{docType, scope}
+	if req.OnlyApproved != nil {
+		if *req.OnlyApproved {
+			parts = append(parts, "approved")
+		} else {
+			parts = append(parts, "not_approved")
+		}
+	}
+	parts = append(parts, ts)
+
+	return strings.Join(parts, "_") + ".zip"
 }

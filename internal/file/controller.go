@@ -1092,7 +1092,7 @@ func (fc *FileController) DownloadMediaByID(c *gin.Context) {
 	id := uint(id64)
 
 	kind := strings.TrimSpace(c.Query("kind")) // optional: photo|doc|document
-	handle, filename, contentType, disposition, err := fc.FileService.OpenMediaHandle(c.Request.Context(), id, kind)
+	handle, filename, contentType, _, err := fc.FileService.OpenMediaHandle(c.Request.Context(), id, kind)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -1109,13 +1109,8 @@ func (fc *FileController) DownloadMediaByID(c *gin.Context) {
 			contentType = "application/octet-stream"
 		}
 
-		disposition = "attachment"
-		if strings.HasPrefix(contentType, "image/") || contentType == "application/pdf" {
-			disposition = "inline"
-		}
-
 		c.Header("Content-Type", contentType)
-		c.Header("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, sanitizeFilename(filename)))
+		c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, sanitizeFilename(filename)))
 		c.Header("X-Content-Type-Options", "nosniff")
 		c.Header("Cache-Control", "no-store")
 
@@ -1125,7 +1120,7 @@ func (fc *FileController) DownloadMediaByID(c *gin.Context) {
 	}
 
 	c.Header("Content-Type", contentType)
-	c.Header("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, sanitizeFilename(filename)))
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, sanitizeFilename(filename)))
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.Header("Cache-Control", "no-store")
 

@@ -7,8 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -222,7 +224,57 @@ func TestAdminController_DownloadMediaZip_StreamsAndSetsHeaders(t *testing.T) {
 	if w.Header().Get("Content-Type") != "application/zip" {
 		t.Fatalf("expected application/zip, got %q", w.Header().Get("Content-Type"))
 	}
+	cd := w.Header().Get("Content-Disposition")
+	if !regexp.MustCompile(`attachment; filename="files_requests_2_\d{8}_\d{6}\.zip"`).MatchString(cd) {
+		t.Fatalf("unexpected content-disposition: %q", cd)
+	}
 	if w.Body.String() != "ZIPDATA" {
 		t.Fatalf("expected streamed data, got %q", w.Body.String())
+	}
+}
+
+func TestBuildMediaZipFilename(t *testing.T) {
+	approved := true
+	notApproved := false
+	now := time.Date(2026, time.July, 14, 10, 11, 12, 0, time.UTC)
+
+	tests := []struct {
+		name string
+		req  AdminDownloadMediaRequest
+		want string
+	}{
+		{
+			name: "single request documents",
+			req: AdminDownloadMediaRequest{
+				RequestIDs:   []uint{1408},
+				DocumentType: "document",
+			},
+			want: "documents_request_1408_20260714_101112.zip",
+		},
+		{
+			name: "multiple requests photos approved",
+			req: AdminDownloadMediaRequest{
+				RequestIDs:   []uint{0, 3, 3, 1},
+				DocumentType: "photos",
+				OnlyApproved: &approved,
+			},
+			want: "photos_requests_2_approved_20260714_101112.zip",
+		},
+		{
+			name: "filtered all not approved",
+			req: AdminDownloadMediaRequest{
+				DocumentType: "all",
+				OnlyApproved: &notApproved,
+			},
+			want: "files_filtered_not_approved_20260714_101112.zip",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := buildMediaZipFilename(tt.req, now); got != tt.want {
+				t.Fatalf("got %q want %q", got, tt.want)
+			}
+		})
 	}
 }

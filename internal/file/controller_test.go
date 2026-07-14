@@ -1709,9 +1709,11 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 		if w.Header().Get("X-Content-Type-Options") != "nosniff" {
 			t.Fatalf("expected nosniff")
 		}
+		cd := w.Header().Get("Content-Disposition")
+		requireContains(t, cd, `attachment; filename="hello.bin"`)
 	})
 
-	t.Run("DownloadMediaByID - 200 normal path uses provided contentType + disposition", func(t *testing.T) {
+	t.Run("DownloadMediaByID - 200 normal path forces attachment with file name", func(t *testing.T) {
 		content := []byte("%PDF-1.4 mock")
 		svc := &fakeFileService{
 			MediaRCOut:   io.NopCloser(bytes.NewReader(content)),
@@ -1728,6 +1730,6 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 		assertStatus(t, w, http.StatusOK)
 
 		cd := w.Header().Get("Content-Disposition")
-		requireContains(t, cd, `inline; filename="x.pdf"`)
+		requireContains(t, cd, `attachment; filename="x.pdf"`)
 	})
 }
