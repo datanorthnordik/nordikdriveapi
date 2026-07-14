@@ -11,6 +11,7 @@ import (
 type File struct {
 	ID              uint           `gorm:"primaryKey" json:"id"`
 	Filename        string         `gorm:"unique;not null" json:"filename"`
+	Description     string         `gorm:"type:text;not null;default:''" json:"description"`
 	InsertedBy      uint           `gorm:"not null" json:"inserted_by"`
 	CreatedAt       time.Time      `json:"created_at"`
 	Private         bool           `json:"private"`
@@ -26,6 +27,7 @@ type FileVersion struct {
 	ID                   uint           `gorm:"primaryKey;autoIncrement" jsoxn:"id"`
 	FileID               uint           `gorm:"not null;index;index:idx_file_version_file_version,priority:1;index:idx_file_version_transition_state,priority:1" json:"file_id"`
 	Filename             string         `gorm:"size:255;not null" json:"filename"`
+	Description          string         `gorm:"type:text;not null;default:''" json:"description"`
 	InsertedBy           uint           `gorm:"not null;index" json:"inserted_by"`
 	CreatedAt            time.Time      `gorm:"autoCreateTime" json:"created_at"`
 	Private              bool           `gorm:"default:false" json:"private"`
@@ -44,6 +46,7 @@ type FileVersionWithUser struct {
 	ID                   uint           `json:"id"`
 	FileID               uint           `json:"file_id"`
 	FileName             string         `json:"filename" gorm:"column:filename"`
+	Description          string         `json:"description" gorm:"column:description"`
 	Firstname            string         `json:"firstname" gorm:"column:firstname"`
 	Lastname             string         `json:"lastname" gorm:"column:lastname"`
 	CreatedAt            time.Time      `json:"created_at"`

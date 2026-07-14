@@ -332,6 +332,26 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 		requireContains(t, w.Body.String(), "files count and filenames array length mismatch")
 	})
 
+	t.Run("UploadFiles - 400 files count and descriptions mismatch", func(t *testing.T) {
+		svc := &fakeFileService{}
+		logSvc := &fakeLogService{}
+		fc := &FileController{FileService: svc, LogService: logSvc}
+		r := setupRouterForController(fc)
+
+		req := newMultipartReq(http.MethodPost, "/api/file/upload",
+			map[string][]string{
+				"filenames":        {"a.csv"},
+				"private":          {"false"},
+				"community_filter": {"false"},
+				"descriptions":     {"first", "second"},
+			},
+			"files", "x.csv", []byte("x"), authHeaders,
+		)
+		w := doReq(r, req)
+		assertStatus(t, w, http.StatusBadRequest)
+		requireContains(t, w.Body.String(), "files count and descriptions array length mismatch")
+	})
+
 	t.Run("UploadFiles - 401 invalid user ID (middleware sets uint, controller expects float64)", func(t *testing.T) {
 		svc := &fakeFileService{}
 		logSvc := &fakeLogService{}
@@ -411,6 +431,7 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 				"filenames":        {"a.csv"},
 				"private":          {"false"},
 				"community_filter": {"false"},
+				"descriptions":     {"Scoped death records for Shingwauk and Wawanosh."},
 			},
 			"files", "x.csv", []byte("x"), authHeaders,
 		)
@@ -422,6 +443,9 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 		}
 		if svc.LastSaveUserID != 1 {
 			t.Fatalf("expected userID=1, got %d", svc.LastSaveUserID)
+		}
+		if len(svc.LastSaveInput.Descriptions) != 1 || svc.LastSaveInput.Descriptions[0] != "Scoped death records for Shingwauk and Wawanosh." {
+			t.Fatalf("expected descriptions to be passed through, got %#v", svc.LastSaveInput.Descriptions)
 		}
 		found := false
 		for _, l := range logSvc.Calls {

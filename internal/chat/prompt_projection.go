@@ -62,6 +62,13 @@ func detectRelevantDefaultFields(normalizedQuestion string, selectedRows int) []
 	if questionMentionsAny(normalizedQuestion, "deceased", "died", "die", "dead", "alive", "living", "death", "deaths") {
 		fields = append(fields, "deceased_status")
 	}
+	if questionMentionsAny(normalizedQuestion, "date of death", "death date", "what year", "which year", "in what year", "in what years", "year of death", "years of death") ||
+		(questionMentionsAny(normalizedQuestion, "death", "deaths", "died", "die") && questionMentionsAny(normalizedQuestion, "year", "years", "when")) {
+		fields = append(fields, "date_of_death")
+	}
+	if questionMentionsAny(normalizedQuestion, "cause of death", "cause", "how did", "what happened", "drown", "drowned", "drowning", "tuberculosis", "pneumonia") {
+		fields = append(fields, "cause_of_death")
+	}
 	if questionMentionsAny(normalizedQuestion, "date of birth", "birth date", "dob", "born") {
 		fields = append(fields, "date_of_birth")
 	}
@@ -109,6 +116,9 @@ func marshalProjectedDefaultBundle(bundle structuredChatDefaultBundle, projectio
 	if _, ok := projection.DefaultFields["deceased_status"]; ok && bundle.DeceasedStatus != "" {
 		projected["deceased_status"] = bundle.DeceasedStatus
 	}
+	if _, ok := projection.DefaultFields["date_of_death"]; ok && bundle.DateOfDeath != "" {
+		projected["date_of_death"] = bundle.DateOfDeath
+	}
 	if _, ok := projection.DefaultFields["date_of_birth"]; ok && bundle.DateOfBirth != "" {
 		projected["date_of_birth"] = bundle.DateOfBirth
 	}
@@ -117,6 +127,9 @@ func marshalProjectedDefaultBundle(bundle structuredChatDefaultBundle, projectio
 	}
 	if _, ok := projection.DefaultFields["discharged"]; ok && bundle.Discharged != "" {
 		projected["discharged"] = bundle.Discharged
+	}
+	if _, ok := projection.DefaultFields["cause_of_death"]; ok && bundle.CauseOfDeath != "" {
+		projected["cause_of_death"] = bundle.CauseOfDeath
 	}
 	if _, ok := projection.DefaultFields["parents_names"]; ok && bundle.ParentsNames != "" {
 		projected["parents_names"] = bundle.ParentsNames
@@ -194,6 +207,9 @@ func defaultBundleMap(bundle structuredChatDefaultBundle) map[string]any {
 	if bundle.DeceasedStatus != "" {
 		out["deceased_status"] = bundle.DeceasedStatus
 	}
+	if bundle.DateOfDeath != "" {
+		out["date_of_death"] = bundle.DateOfDeath
+	}
 	if bundle.DateOfBirth != "" {
 		out["date_of_birth"] = bundle.DateOfBirth
 	}
@@ -202,6 +218,9 @@ func defaultBundleMap(bundle structuredChatDefaultBundle) map[string]any {
 	}
 	if bundle.Discharged != "" {
 		out["discharged"] = bundle.Discharged
+	}
+	if bundle.CauseOfDeath != "" {
+		out["cause_of_death"] = bundle.CauseOfDeath
 	}
 	if bundle.ParentsNames != "" {
 		out["parents_names"] = bundle.ParentsNames

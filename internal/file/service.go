@@ -65,6 +65,13 @@ var (
 )
 
 func (fs *FileService) SaveFilesMultipart(uploadedFiles []*multipart.FileHeader, filenames FileUploadInput, userID uint) ([]File, error) {
+	if err := ensureFileDescriptionSchema(fs.DB); err != nil {
+		return nil, err
+	}
+	if err := validateUploadInputCounts(len(uploadedFiles), filenames); err != nil {
+		return nil, err
+	}
+
 	var savedFiles []File
 	files := filenames.FileNames
 	privateList := filenames.Private
@@ -72,6 +79,7 @@ func (fs *FileService) SaveFilesMultipart(uploadedFiles []*multipart.FileHeader,
 
 	for i, fileHeader := range uploadedFiles {
 		filename := files[i]
+		description := normalizeUploadDescription(filenames.Descriptions, i)
 		private := privateList[i]
 		communityFilter := communityFilterList[i]
 
@@ -110,6 +118,7 @@ func (fs *FileService) SaveFilesMultipart(uploadedFiles []*multipart.FileHeader,
 
 		newFile := File{
 			Filename:        filename,
+			Description:     description,
 			InsertedBy:      userID,
 			CreatedAt:       time.Now(),
 			Private:         private,
@@ -128,6 +137,7 @@ func (fs *FileService) SaveFilesMultipart(uploadedFiles []*multipart.FileHeader,
 		fileVersion := FileVersion{
 			FileID:       newFile.ID,
 			Filename:     filename,
+			Description:  description,
 			InsertedBy:   userID,
 			CreatedAt:    time.Now(),
 			Private:      private,
@@ -289,6 +299,10 @@ func (fs *FileService) getColumnsOrderForVersion(file File, version int) ([]stri
 }
 
 func (fs *FileService) ReplaceFiles(uploadedFile *multipart.FileHeader, fileID uint, userID uint) error {
+	if err := ensureFileDescriptionSchema(fs.DB); err != nil {
+		return err
+	}
+
 	var existing File
 	if err := fs.DB.First(&existing, fileID).Error; err != nil {
 		return fmt.Errorf("file not found: %w", err)
@@ -355,6 +369,7 @@ func (fs *FileService) ReplaceFiles(uploadedFile *multipart.FileHeader, fileID u
 		fileVersion := FileVersion{
 			FileID:               lockedFile.ID,
 			Filename:             lockedFile.Filename,
+			Description:          lockedFile.Description,
 			InsertedBy:           userID,
 			CreatedAt:            time.Now(),
 			Private:              lockedFile.Private,
@@ -744,6 +759,11 @@ func (fs *FileService) GetFileHistory(fileId string) ([]FileVersionWithUser, err
 		"file_version.columns_order",
 	}
 	queryColumns := append([]string{}, selectColumns...)
+	if fs.DB.Migrator().HasTable(&FileVersion{}) && fs.DB.Migrator().HasColumn(&FileVersion{}, "description") {
+		queryColumns = append(queryColumns, "file_version.description")
+	} else {
+		queryColumns = append(queryColumns, "'' AS description")
+	}
 	queryColumns = append(queryColumns, "file_version.inserted_by")
 	if fs.DB.Migrator().HasTable(&FileVersion{}) && fs.DB.Migrator().HasColumn(&FileVersion{}, "reconciliation_status") {
 		queryColumns = append(queryColumns, "file_version.reconciliation_status")
@@ -934,6 +954,10 @@ func parseHistoryTimestamp(raw string) time.Time {
 }
 
 func (fs *FileService) RevertFile(filename string, version int, userID uint) error {
+	if err := ensureFileDescriptionSchema(fs.DB); err != nil {
+		return err
+	}
+
 	var file File
 	if err := fs.DB.Where("filename = ?", filename).First(&file).Error; err != nil {
 		return fmt.Errorf("file not found: %w", err)
@@ -980,6 +1004,7 @@ func (fs *FileService) RevertFile(filename string, version int, userID uint) err
 		newFileVersion := FileVersion{
 			FileID:               lockedFile.ID,
 			Filename:             lockedFile.Filename,
+			Description:          targetVersion.Description,
 			InsertedBy:           userID,
 			CreatedAt:            time.Now(),
 			Private:              targetVersion.Private,
@@ -2010,4 +2035,31 @@ func ioReadAll(r *storage.Reader) ([]byte, error) {
 
 func (h *gcsReadHandle) Read(p []byte) (int, error) {
 	return h.Reader.Read(p)
+}
+
+func ensureFileDescriptionSchema(db *gorm.DB) error {
+	if db == nil {
+		return fmt.Errorf("db not initialized")
+	}
+	if !db.Migrator().HasTable(&File{}) {
+		return nil
+	}
+	if !db.Migrator().HasColumn(&File{}, "Description") {
+		if err := db.Migrator().AddColumn(&File{}, "Description"); err != nil {
+			return err
+		}
+	}
+	if db.Migrator().HasTable(&FileVersion{}) && !db.Migrator().HasColumn(&FileVersion{}, "Description") {
+		if err := db.Migrator().AddColumn(&FileVersion{}, "Description"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizeUploadDescription(descriptions []string, index int) string {
+	if index < 0 || index >= len(descriptions) {
+		return ""
+	}
+	return strings.TrimSpace(descriptions[index])
 }

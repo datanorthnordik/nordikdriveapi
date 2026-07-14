@@ -23,6 +23,9 @@ type cachedStructuredChatRow struct {
 	IdentifierText      string
 	CanonicalCommunity  string
 	CanonicalSchool     string
+	IsDeathRecord       bool
+	DeathYear           *int
+	CauseOfDeathText    string
 	CoreSearchText      string
 	SearchText          string
 	DefaultBundle       structuredChatDefaultBundle
@@ -38,6 +41,7 @@ type preparedStructuredChatDataset struct {
 	RowRefToID           map[string]int
 	TotalRows            int
 	SelectedRows         int
+	RowsWithSchool       int
 	NarrativeRows        int
 	RetrievalMode        string
 	PromptProjectionMode string
@@ -73,6 +77,7 @@ type structuredChatCanonicalPayload struct {
 	Community        string                       `json:"community,omitempty"`
 	School           string                       `json:"school,omitempty"`
 	DeceasedStatus   string                       `json:"deceased_status,omitempty"`
+	CauseOfDeath     string                       `json:"cause_of_death,omitempty"`
 	ParentsNames     string                       `json:"parents_names,omitempty"`
 	MappingLocation  string                       `json:"mapping_location,omitempty"`
 	Dates            structuredChatCanonicalDates `json:"dates,omitempty"`
@@ -80,13 +85,15 @@ type structuredChatCanonicalPayload struct {
 
 type structuredChatCanonicalDates struct {
 	Birth      *structuredChatCanonicalDate `json:"birth,omitempty"`
+	Death      *structuredChatCanonicalDate `json:"death,omitempty"`
 	Admitted   *structuredChatCanonicalDate `json:"admitted,omitempty"`
 	Discharged *structuredChatCanonicalDate `json:"discharged,omitempty"`
 }
 
 type structuredChatCanonicalDate struct {
-	Raw string `json:"raw,omitempty"`
-	ISO string `json:"iso,omitempty"`
+	Raw  string `json:"raw,omitempty"`
+	ISO  string `json:"iso,omitempty"`
+	Year *int   `json:"year,omitempty"`
 }
 
 type structuredChatBundlePayload struct {
@@ -103,8 +110,10 @@ type structuredChatDefaultBundle struct {
 	School                   string   `json:"school,omitempty"`
 	DeceasedStatus           string   `json:"deceased_status,omitempty"`
 	DateOfBirth              string   `json:"date_of_birth,omitempty"`
+	DateOfDeath              string   `json:"date_of_death,omitempty"`
 	Admitted                 string   `json:"admitted,omitempty"`
 	Discharged               string   `json:"discharged,omitempty"`
+	CauseOfDeath             string   `json:"cause_of_death,omitempty"`
 	ParentsNames             string   `json:"parents_names,omitempty"`
 	MappingLocation          string   `json:"mapping_location,omitempty"`
 	HasNotes                 bool     `json:"has_notes,omitempty"`
@@ -157,6 +166,7 @@ func (cs *ChatService) getPreparedStructuredChatDataset(fileID uint, version int
 		RowRefToID:           rowRefToID,
 		TotalRows:            len(dataset.rows),
 		SelectedRows:         len(selection.Indexes),
+		RowsWithSchool:       countStructuredRowsWithCanonicalSchool(dataset.rows, selection.Indexes),
 		NarrativeRows:        narrativeRows,
 		RetrievalMode:        selection.Mode,
 		PromptProjectionMode: projection.Mode,
@@ -263,9 +273,11 @@ func buildCachedStructuredChatRow(rawRow structuredChatRowDB) (cachedStructuredC
 			payload.Canonical.Community,
 			payload.Canonical.School,
 			payload.Canonical.DeceasedStatus,
+			payload.Canonical.CauseOfDeath,
 			payload.Canonical.ParentsNames,
 			payload.Canonical.MappingLocation,
 			displayStructuredDate(payload.Canonical.Dates.Birth),
+			displayStructuredDate(payload.Canonical.Dates.Death),
 			displayStructuredDate(payload.Canonical.Dates.Admitted),
 			displayStructuredDate(payload.Canonical.Dates.Discharged),
 		}
@@ -281,6 +293,10 @@ func buildCachedStructuredChatRow(rawRow structuredChatRowDB) (cachedStructuredC
 		if row.CanonicalSchool == "" {
 			row.CanonicalSchool = normalizeChatSearchValue(payload.Canonical.School)
 		}
+		if payload.Canonical.Dates.Death != nil && payload.Canonical.Dates.Death.Year != nil {
+			deathYear := *payload.Canonical.Dates.Death.Year
+			row.DeathYear = &deathYear
+		}
 	}
 	if row.CanonicalName == "" {
 		row.CanonicalName = normalizeChatSearchValue(row.DefaultBundle.Name)
@@ -291,6 +307,17 @@ func buildCachedStructuredChatRow(rawRow structuredChatRowDB) (cachedStructuredC
 	if row.CanonicalSchool == "" {
 		row.CanonicalSchool = normalizeChatSearchValue(row.DefaultBundle.School)
 	}
+	if row.DeathYear == nil {
+		if parsedYear := extractStructuredYear(row.DefaultBundle.DateOfDeath); parsedYear != nil {
+			row.DeathYear = parsedYear
+		}
+	}
+	row.CauseOfDeathText = normalizeChatSearchValue(row.DefaultBundle.CauseOfDeath)
+	row.IsDeathRecord = row.DeathYear != nil ||
+		strings.TrimSpace(row.DefaultBundle.DateOfDeath) != "" ||
+		strings.TrimSpace(row.DefaultBundle.CauseOfDeath) != "" ||
+		strings.TrimSpace(row.NarrativeBundle.DeathDetails) != "" ||
+		normalizeChatSearchValue(row.DefaultBundle.DeceasedStatus) == "yes"
 
 	if row.CoreSearchText == "" {
 		row.CoreSearchText = normalizeChatSearchValue(strings.Join(extractBundleStringValues(defaultBundle), " "))
@@ -302,6 +329,19 @@ func buildCachedStructuredChatRow(rawRow structuredChatRowDB) (cachedStructuredC
 		return cachedStructuredChatRow{}, false
 	}
 	return row, true
+}
+
+func countStructuredRowsWithCanonicalSchool(rows []cachedStructuredChatRow, indexes []int) int {
+	count := 0
+	for _, index := range indexes {
+		if index < 0 || index >= len(rows) {
+			continue
+		}
+		if strings.TrimSpace(rows[index].CanonicalSchool) != "" || strings.TrimSpace(rows[index].DefaultBundle.School) != "" {
+			count++
+		}
+	}
+	return count
 }
 
 func buildFallbackDefaultBundle(canonical *structuredChatCanonicalPayload) map[string]any {
@@ -316,8 +356,10 @@ func buildFallbackDefaultBundle(canonical *structuredChatCanonicalPayload) map[s
 	setBundleField(bundle, "school", canonical.School)
 	setBundleField(bundle, "deceased_status", canonical.DeceasedStatus)
 	setBundleField(bundle, "date_of_birth", displayStructuredDate(canonical.Dates.Birth))
+	setBundleField(bundle, "date_of_death", displayStructuredDate(canonical.Dates.Death))
 	setBundleField(bundle, "admitted", displayStructuredDate(canonical.Dates.Admitted))
 	setBundleField(bundle, "discharged", displayStructuredDate(canonical.Dates.Discharged))
+	setBundleField(bundle, "cause_of_death", canonical.CauseOfDeath)
 	setBundleField(bundle, "parents_names", canonical.ParentsNames)
 	setBundleField(bundle, "mapping_location", canonical.MappingLocation)
 	if len(canonical.NameAliases) > 0 {
@@ -382,6 +424,20 @@ func displayStructuredDate(date *structuredChatCanonicalDate) string {
 		return ""
 	}
 	return strings.TrimSpace(firstNonEmptyString(date.Raw, date.ISO))
+}
+
+func extractStructuredYear(value string) *int {
+	for _, token := range strings.Fields(normalizeChatSearchValue(value)) {
+		if len(token) != 4 {
+			continue
+		}
+		year, err := strconv.Atoi(token)
+		if err != nil {
+			continue
+		}
+		return &year
+	}
+	return nil
 }
 
 func extractBundleStringValues(bundle map[string]any) []string {

@@ -21,6 +21,7 @@ type FileUploadInput struct {
 	FileNames       []string `form:"filenames" binding:"required"`
 	Private         []bool   `form:"private" binding:"required"`
 	CommunityFilter []bool   `form:"community_filter" binding:"required"`
+	Descriptions    []string `form:"descriptions"`
 }
 
 type ReplaceFileInput struct {
@@ -48,8 +49,8 @@ func (fc *FileController) UploadFiles(c *gin.Context) {
 		return
 	}
 
-	if len(input.FileNames) != len(uploadedFiles) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "files count and filenames array length mismatch"})
+	if err := validateUploadInputCounts(len(uploadedFiles), input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -99,6 +100,21 @@ func (fc *FileController) UploadFiles(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "files uploaded successfully", "files": savedFiles})
+}
+
+func validateUploadInputCounts(fileCount int, input FileUploadInput) error {
+	switch {
+	case len(input.FileNames) != fileCount:
+		return errors.New("files count and filenames array length mismatch")
+	case len(input.Private) != fileCount:
+		return errors.New("files count and private array length mismatch")
+	case len(input.CommunityFilter) != fileCount:
+		return errors.New("files count and community_filter array length mismatch")
+	case len(input.Descriptions) > 0 && len(input.Descriptions) != fileCount:
+		return errors.New("files count and descriptions array length mismatch")
+	default:
+		return nil
+	}
 }
 
 func (fc *FileController) GetAllFiles(c *gin.Context) {

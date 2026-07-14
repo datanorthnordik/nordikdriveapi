@@ -100,6 +100,10 @@ var canonicalFieldAliases = map[string][]string{
 		"DOB",
 		"Birth Date",
 	},
+	"death_date": {
+		"Date of Death",
+		"Death Date",
+	},
 	"admitted_date": {
 		"Admitted",
 		"Admission Date",
@@ -125,6 +129,13 @@ var canonicalFieldAliases = map[string][]string{
 		"Death details",
 		"Death Details",
 		"Death Detail",
+	},
+	"cause_of_death": {
+		"Cause of Death",
+		"Cause Of Death",
+		"Cause Of Death (As listed on death registration)",
+		"Cause of Death (As listed on death registration)",
+		"Cause",
 	},
 	"photos": {
 		"Photos",
@@ -152,6 +163,7 @@ type normalizedCanonicalRow struct {
 	Community        string                   `json:"community,omitempty"`
 	School           string                   `json:"school,omitempty"`
 	DeceasedStatus   string                   `json:"deceased_status,omitempty"`
+	CauseOfDeath     string                   `json:"cause_of_death,omitempty"`
 	ParentsNames     string                   `json:"parents_names,omitempty"`
 	MappingLocation  string                   `json:"mapping_location,omitempty"`
 	Lat              string                   `json:"lat,omitempty"`
@@ -161,6 +173,7 @@ type normalizedCanonicalRow struct {
 
 type normalizedCanonicalDates struct {
 	Birth      *normalizedCanonicalDate `json:"birth,omitempty"`
+	Death      *normalizedCanonicalDate `json:"death,omitempty"`
 	Admitted   *normalizedCanonicalDate `json:"admitted,omitempty"`
 	Discharged *normalizedCanonicalDate `json:"discharged,omitempty"`
 }
@@ -190,8 +203,10 @@ type normalizedChatBundle struct {
 	School                   string   `json:"school,omitempty"`
 	DeceasedStatus           string   `json:"deceased_status,omitempty"`
 	DateOfBirth              string   `json:"date_of_birth,omitempty"`
+	DateOfDeath              string   `json:"date_of_death,omitempty"`
 	Admitted                 string   `json:"admitted,omitempty"`
 	Discharged               string   `json:"discharged,omitempty"`
+	CauseOfDeath             string   `json:"cause_of_death,omitempty"`
 	ParentsNames             string   `json:"parents_names,omitempty"`
 	MappingLocation          string   `json:"mapping_location,omitempty"`
 	HasNotes                 bool     `json:"has_notes,omitempty"`
@@ -240,10 +255,13 @@ func buildNormalizedCanonicalRow(ctx normalizationContext, raw map[string]interf
 	lat, latSource := lookupConceptValue(lookup, ctx.SchemaHints, "lat")
 	lng, lngSource := lookupConceptValue(lookup, ctx.SchemaHints, "lng")
 	birthRaw, birthSource := lookupConceptValue(lookup, ctx.SchemaHints, "birth_date")
+	deathRaw, deathSource := lookupConceptValue(lookup, ctx.SchemaHints, "death_date")
 	admittedRaw, admittedSource := lookupConceptValue(lookup, ctx.SchemaHints, "admitted_date")
 	dischargedRaw, dischargedSource := lookupConceptValue(lookup, ctx.SchemaHints, "discharged_date")
+	causeOfDeath, causeOfDeathSource := lookupConceptValue(lookup, ctx.SchemaHints, "cause_of_death")
 
 	birth := buildNormalizedCanonicalDate(birthRaw)
+	death := buildNormalizedCanonicalDate(deathRaw)
 	admitted := buildNormalizedCanonicalDate(admittedRaw)
 	discharged := buildNormalizedCanonicalDate(dischargedRaw)
 
@@ -259,12 +277,14 @@ func buildNormalizedCanonicalRow(ctx normalizationContext, raw map[string]interf
 		Community:        cleanDisplayValue(community),
 		School:           cleanDisplayValue(school),
 		DeceasedStatus:   normalizeDeceasedStatus(deceasedRaw),
+		CauseOfDeath:     cleanDisplayValue(causeOfDeath),
 		ParentsNames:     cleanDisplayValue(parentsNames),
 		MappingLocation:  cleanDisplayValue(mappingLocation),
 		Lat:              cleanDisplayValue(lat),
 		Lng:              cleanDisplayValue(lng),
 		Dates: normalizedCanonicalDates{
 			Birth:      birth,
+			Death:      death,
 			Admitted:   admitted,
 			Discharged: discharged,
 		},
@@ -285,12 +305,16 @@ func buildNormalizedCanonicalRow(ctx normalizationContext, raw map[string]interf
 	setDerivedField(canonical.DerivedFrom, "community", communitySource)
 	setDerivedField(canonical.DerivedFrom, "school", schoolSource)
 	setDerivedField(canonical.DerivedFrom, "deceased_status", deceasedSource)
+	setDerivedField(canonical.DerivedFrom, "cause_of_death", causeOfDeathSource)
 	setDerivedField(canonical.DerivedFrom, "parents_names", parentsSource)
 	setDerivedField(canonical.DerivedFrom, "mapping_location", mappingLocationSource)
 	setDerivedField(canonical.DerivedFrom, "lat", latSource)
 	setDerivedField(canonical.DerivedFrom, "lng", lngSource)
 	if birth != nil {
 		setDerivedField(canonical.DerivedFrom, "dates.birth", birthSource)
+	}
+	if death != nil {
+		setDerivedField(canonical.DerivedFrom, "dates.death", deathSource)
 	}
 	if admitted != nil {
 		setDerivedField(canonical.DerivedFrom, "dates.admitted", admittedSource)
@@ -355,8 +379,10 @@ func buildNormalizedChatReadyRow(ctx normalizationContext, canonical *normalized
 			School:                   canonical.School,
 			DeceasedStatus:           canonical.DeceasedStatus,
 			DateOfBirth:              displayCanonicalDate(canonical.Dates.Birth),
+			DateOfDeath:              displayCanonicalDate(canonical.Dates.Death),
 			Admitted:                 displayCanonicalDate(canonical.Dates.Admitted),
 			Discharged:               displayCanonicalDate(canonical.Dates.Discharged),
+			CauseOfDeath:             canonical.CauseOfDeath,
 			ParentsNames:             canonical.ParentsNames,
 			MappingLocation:          canonical.MappingLocation,
 			HasNotes:                 notes != "",
@@ -405,6 +431,7 @@ func searchTokensForCanonical(canonical *normalizedCanonicalRow) []string {
 		canonical.StudentNumberRaw,
 		canonical.Community,
 		canonical.School,
+		canonical.CauseOfDeath,
 		canonical.ParentsNames,
 		canonical.MappingLocation,
 	}
@@ -531,7 +558,10 @@ func detectRecordProfile(canonical *normalizedCanonicalRow) string {
 		personSignals++
 	}
 	if canonical.Dates.Birth != nil || canonical.Dates.Admitted != nil || canonical.Dates.Discharged != nil ||
-		strings.TrimSpace(canonical.ParentsNames) != "" || strings.TrimSpace(canonical.DeceasedStatus) != "" {
+		canonical.Dates.Death != nil ||
+		strings.TrimSpace(canonical.ParentsNames) != "" ||
+		strings.TrimSpace(canonical.DeceasedStatus) != "" ||
+		strings.TrimSpace(canonical.CauseOfDeath) != "" {
 		personSignals++
 	}
 	if personSignals > 0 {
@@ -725,9 +755,11 @@ func hasCanonicalRowContent(row *normalizedCanonicalRow) bool {
 		strings.TrimSpace(row.Community) != "" ||
 		strings.TrimSpace(row.School) != "" ||
 		strings.TrimSpace(row.DeceasedStatus) != "" ||
+		strings.TrimSpace(row.CauseOfDeath) != "" ||
 		strings.TrimSpace(row.ParentsNames) != "" ||
 		strings.TrimSpace(row.MappingLocation) != "" ||
 		row.Dates.Birth != nil ||
+		row.Dates.Death != nil ||
 		row.Dates.Admitted != nil ||
 		row.Dates.Discharged != nil
 }
@@ -744,8 +776,10 @@ func isEmptyNormalizedChatBundle(bundle *normalizedChatBundle) bool {
 		strings.TrimSpace(bundle.School) == "" &&
 		strings.TrimSpace(bundle.DeceasedStatus) == "" &&
 		strings.TrimSpace(bundle.DateOfBirth) == "" &&
+		strings.TrimSpace(bundle.DateOfDeath) == "" &&
 		strings.TrimSpace(bundle.Admitted) == "" &&
 		strings.TrimSpace(bundle.Discharged) == "" &&
+		strings.TrimSpace(bundle.CauseOfDeath) == "" &&
 		strings.TrimSpace(bundle.ParentsNames) == "" &&
 		strings.TrimSpace(bundle.MappingLocation) == "" &&
 		!bundle.HasNotes &&

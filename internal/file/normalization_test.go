@@ -290,6 +290,8 @@ func TestNormalizeRowDataBuildsGenericCanonicalPayloadFromCommonColumns(t *testi
 		"Student Number":"1915.999",
 		"First Nation/Community":"Sault Ste. Marie, Michigan.",
 		"Date of Birth":"09.08.1919",
+		"Date of Death":"1913-04-17",
+		"Cause of Death (As listed on death registration)":"Tuberculosis",
 		"Admitted":"1915:09",
 		"Discharged":"1918-06-05",
 		"Parents Names":"Jane and Peter LaForce",
@@ -346,6 +348,12 @@ func TestNormalizeRowDataBuildsGenericCanonicalPayloadFromCommonColumns(t *testi
 	if payload.Canonical.Dates.Birth == nil || payload.Canonical.Dates.Birth.ISO != "1919-08-09" {
 		t.Fatalf("unexpected birth date: %#v", payload.Canonical.Dates.Birth)
 	}
+	if payload.Canonical.Dates.Death == nil || payload.Canonical.Dates.Death.ISO != "1913-04-17" {
+		t.Fatalf("unexpected death date: %#v", payload.Canonical.Dates.Death)
+	}
+	if payload.Canonical.CauseOfDeath != "Tuberculosis" {
+		t.Fatalf("unexpected cause of death: %#v", payload.Canonical)
+	}
 
 	if payload.Chat == nil || payload.Chat.DefaultBundle == nil {
 		t.Fatalf("expected chat bundle: %#v", payload.Chat)
@@ -355,6 +363,12 @@ func TestNormalizeRowDataBuildsGenericCanonicalPayloadFromCommonColumns(t *testi
 	}
 	if !payload.Chat.DefaultBundle.HasNotes || !payload.Chat.DefaultBundle.HasAdditionalInformation || !payload.Chat.DefaultBundle.HasDeathDetails {
 		t.Fatalf("expected narrative presence flags: %#v", payload.Chat.DefaultBundle)
+	}
+	if payload.Chat.DefaultBundle.DateOfDeath != "1913-04-17" {
+		t.Fatalf("unexpected default bundle death date: %#v", payload.Chat.DefaultBundle)
+	}
+	if payload.Chat.DefaultBundle.CauseOfDeath != "Tuberculosis" {
+		t.Fatalf("unexpected default bundle cause of death: %#v", payload.Chat.DefaultBundle)
 	}
 	if payload.Chat.NarrativeBundle == nil || payload.Chat.NarrativeBundle.Notes != "Long narrative note here" {
 		t.Fatalf("unexpected narrative bundle: %#v", payload.Chat.NarrativeBundle)
