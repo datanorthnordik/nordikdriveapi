@@ -126,18 +126,6 @@ func (cs *ChatService) generateFromPromptWithModels(
 }
 
 func (cs *ChatService) DescribeRow(rowID int) (string, error) {
-	if cs.DB == nil {
-		return "", fmt.Errorf("db not initialized")
-	}
-	if cs.Client == nil {
-		return "", fmt.Errorf("genai client not initialized")
-	}
-
-	var row f.FileData
-	if err := cs.DB.First(&row, rowID).Error; err != nil {
-		return "", fmt.Errorf("row not found")
-	}
-
 	describeInstruction := `
 You are writing a respectful, empathetic narration about ONE individual using ONLY the provided record.
 
@@ -159,10 +147,53 @@ Output:
 - Summarize key fields that exist (community/school/date/cause/notes), and clearly say when something isn't listed.
 `
 
+	return cs.generateRowNarrative(rowID, describeInstruction)
+}
+
+func (cs *ChatService) GenerateHonourText(rowID int) (string, error) {
+	honourInstruction := `
+You are writing a respectful daily honour for ONE survivor using ONLY the provided record.
+
+Style requirements:
+- Warm, gentle, and commemorative tone.
+- Write one short paragraph.
+- Keep it concise and readable for a daily highlight.
+- Do NOT mention JSON, database, tables, ids, or technical details.
+
+Accuracy requirements:
+- Use ONLY what appears in the record.
+- Do NOT guess or invent biography, family history, age, or emotions.
+- If details are missing, simply focus on what is listed instead of filling gaps.
+
+Safety:
+- Avoid graphic detail.
+- If death or harm-related information appears, mention it briefly and sensitively.
+
+Output:
+- Begin with the person's name if it is listed.
+- Honour the person with the known details from the record in a respectful way.
+`
+
+	return cs.generateRowNarrative(rowID, honourInstruction)
+}
+
+func (cs *ChatService) generateRowNarrative(rowID int, instruction string) (string, error) {
+	if cs.DB == nil {
+		return "", fmt.Errorf("db not initialized")
+	}
+	if cs.Client == nil {
+		return "", fmt.Errorf("genai client not initialized")
+	}
+
+	var row f.FileData
+	if err := cs.DB.First(&row, rowID).Error; err != nil {
+		return "", fmt.Errorf("row not found")
+	}
+
 	rowJSON := strings.TrimSpace(string(row.RowData))
 	prompt := fmt.Sprintf(
 		"%s\n\nRECORD (only source of truth):\n%s",
-		strings.TrimSpace(describeInstruction),
+		strings.TrimSpace(instruction),
 		rowJSON,
 	)
 

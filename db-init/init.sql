@@ -188,6 +188,31 @@ CREATE INDEX IF NOT EXISTS idx_file_data_normalized_status
 CREATE INDEX IF NOT EXISTS idx_file_data_normalized_source_updated
     ON file_data_normalized(source_updated_at);
 
+CREATE TABLE IF NOT EXISTS file_daily_honours (
+    id SERIAL PRIMARY KEY,
+    file_id INT NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    file_version INT NOT NULL,
+    source_row_id INT NOT NULL REFERENCES file_data(id) ON DELETE CASCADE,
+    honour_date DATE NOT NULL,
+    cycle_number INT NOT NULL DEFAULT 1,
+    honour_text TEXT NOT NULL DEFAULT '',
+    status VARCHAR(20) NOT NULL DEFAULT 'ready',
+    error_message TEXT NOT NULL DEFAULT '',
+    generated_at TIMESTAMP NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_file_daily_honours_file_date UNIQUE (file_id, honour_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_daily_honours_source_row
+    ON file_daily_honours(source_row_id);
+
+CREATE INDEX IF NOT EXISTS idx_file_daily_honours_status
+    ON file_daily_honours(status);
+
+CREATE INDEX IF NOT EXISTS idx_file_daily_honours_cycle_row
+    ON file_daily_honours(file_id, cycle_number, source_row_id);
+
 CREATE OR REPLACE FUNCTION set_file_data_normalized_updated_at()
 RETURNS TRIGGER AS $$
 BEGIN

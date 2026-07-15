@@ -27,6 +27,7 @@ import (
 	"gorm.io/gorm/logger"
 
 	"nordik-drive-api/internal/dataconfig"
+	"nordik-drive-api/internal/honour"
 	"nordik-drive-api/internal/mailer"
 	"nordik-drive-api/internal/util"
 )
@@ -74,6 +75,7 @@ func migrateTestSchema(t *testing.T, db *gorm.DB) {
 		&FileDataNormalized{},
 		&FileVersionReconciliationJob{},
 		&FileRowLineage{},
+		&honour.DailyHonour{},
 		&FormSubmissionForTest{},
 		&FileAccess{},
 		&dataconfig.DataConfig{},
@@ -855,6 +857,43 @@ func TestFileService_ReplaceFiles_AllBranches(t *testing.T) {
 	}
 }
 
+func TestReplaceFiles_ClearsDailyHonours(t *testing.T) {
+	db := newTestDB(t)
+	svc := &FileService{DB: db}
+	file := File{Filename: "f1", Version: 1, Private: true, IsDelete: false}
+	if err := db.Create(&file).Error; err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+	row := FileData{FileID: file.ID, Version: 1, RowData: datatypes.JSON([]byte(`{"name":"alpha"}`))}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatalf("create row: %v", err)
+	}
+	if err := db.Create(&honour.DailyHonour{
+		FileID:      file.ID,
+		FileVersion: 1,
+		SourceRowID: row.ID,
+		HonourDate:  time.Date(2026, time.July, 14, 0, 0, 0, 0, time.UTC),
+		CycleNumber: 1,
+		HonourText:  "Remembered today",
+		Status:      "ready",
+	}).Error; err != nil {
+		t.Fatalf("create honour: %v", err)
+	}
+
+	fh := fileHeaderFromBytes(t, "file", "ok.csv", csvBytes([]string{"h1"}, [][]string{{"v1"}}))
+	if err := svc.ReplaceFiles(fh, file.ID, 77); err != nil {
+		t.Fatalf("replace file: %v", err)
+	}
+
+	var count int64
+	if err := db.Model(&honour.DailyHonour{}).Where("file_id = ?", file.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count honours: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected honours to be cleared, got %d", count)
+	}
+}
+
 // -----------------------------------------------------------------------------
 // GetUserRole / GetAllFiles
 // -----------------------------------------------------------------------------
@@ -1493,6 +1532,58 @@ func TestFileService_RevertFile_AllBranches(t *testing.T) {
 	}
 	if string(latestVersion.ColumnsOrder) != `["a","b"]` {
 		t.Fatalf("expected reverted version columns order, got %s", string(latestVersion.ColumnsOrder))
+	}
+}
+
+func TestRevertFile_ClearsDailyHonours(t *testing.T) {
+	db := newTestDB(t)
+	svc := &FileService{DB: db}
+	file := File{
+		Filename: "f2",
+		Version:  2,
+		Rows:     1,
+		Size:     1.0,
+		Private:  true,
+	}
+	if err := db.Create(&file).Error; err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+	if err := db.Create(&FileVersion{
+		FileID:   file.ID,
+		Filename: "f2",
+		Version:  2,
+		Rows:     1,
+		Size:     0.5,
+		Private:  true,
+	}).Error; err != nil {
+		t.Fatalf("create file version: %v", err)
+	}
+	row := FileData{FileID: file.ID, Version: 2, RowData: datatypes.JSON([]byte(`{"a":"1"}`))}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatalf("create row: %v", err)
+	}
+	if err := db.Create(&honour.DailyHonour{
+		FileID:      file.ID,
+		FileVersion: 2,
+		SourceRowID: row.ID,
+		HonourDate:  time.Date(2026, time.July, 14, 0, 0, 0, 0, time.UTC),
+		CycleNumber: 1,
+		HonourText:  "Remembered today",
+		Status:      "ready",
+	}).Error; err != nil {
+		t.Fatalf("create honour: %v", err)
+	}
+
+	if err := svc.RevertFile("f2", 2, 99); err != nil {
+		t.Fatalf("revert file: %v", err)
+	}
+
+	var count int64
+	if err := db.Model(&honour.DailyHonour{}).Where("file_id = ?", file.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count honours: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected honours to be cleared, got %d", count)
 	}
 }
 
