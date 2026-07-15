@@ -11,6 +11,7 @@ import (
 	"nordik-drive-api/internal/dataconfig"
 	"nordik-drive-api/internal/file"
 	"nordik-drive-api/internal/formsubmission"
+	"nordik-drive-api/internal/honour"
 	"nordik-drive-api/internal/jobs"
 	"nordik-drive-api/internal/logocontent"
 	"nordik-drive-api/internal/logs"
@@ -101,11 +102,14 @@ func main() {
 	chatService := &chat.ChatService{DB: db, Client: client}
 	chat.RegisterRoutes(r, chatService)
 
+	honourService := honour.NewService(db, chatService)
+	honour.RegisterRoutes(r, honourService)
+
 	adminService := &admin.AdminService{DB: db}
 	admin.RegisterRoutes(r, adminService)
 
 	// --- Cloud Run expects plain HTTP, on $PORT, bind to 0.0.0.0 ---
-	scheduler, err := jobs.NewScheduler(db, mailerService, log.Default())
+	scheduler, err := jobs.NewScheduler(db, mailerService, honourService, log.Default())
 	if err != nil {
 		log.Fatalf("failed to create scheduler: %v", err)
 	}

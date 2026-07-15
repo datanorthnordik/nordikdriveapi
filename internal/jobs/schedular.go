@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"nordik-drive-api/internal/mailer"
+	"time"
 
 	"github.com/robfig/cron/v3"
 	"gorm.io/gorm"
@@ -13,12 +14,17 @@ type Scheduler struct {
 	cron *cron.Cron
 }
 
+type HonourRunner interface {
+	RunDailyHonours() error
+}
+
 func NewScheduler(
 	db *gorm.DB,
 	mailerSvc mailer.EmailSender,
+	honourRunner HonourRunner,
 	logger *log.Logger,
 ) (*Scheduler, error) {
-	c := cron.New()
+	c := cron.New(cron.WithLocation(time.Local))
 
 	fileEditReviewEmailJob := NewFileEditReviewEmailJob(db, mailerSvc, logger)
 
@@ -63,6 +69,17 @@ func NewScheduler(
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to register file version reconciliation cron: %w", err)
+	}
+
+	if honourRunner != nil {
+		_, err = c.AddFunc("0 0 * * *", func() {
+			if err := honourRunner.RunDailyHonours(); err != nil && logger != nil {
+				logger.Printf("daily honour cron failed: %v", err)
+			}
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to register daily honour cron: %w", err)
+		}
 	}
 
 	return &Scheduler{cron: c}, nil

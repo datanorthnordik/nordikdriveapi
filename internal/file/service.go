@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"nordik-drive-api/internal/auth"
+	"nordik-drive-api/internal/honour"
 	"nordik-drive-api/internal/mailer"
 	"nordik-drive-api/internal/util"
 	"os"
@@ -412,6 +413,10 @@ func (fs *FileService) ReplaceFiles(uploadedFile *multipart.FileHeader, fileID u
 			if err := tx.Create(&record).Error; err != nil {
 				return err
 			}
+		}
+
+		if err := honour.ClearForFileTx(tx, lockedFile.ID); err != nil {
+			return err
 		}
 
 		return fs.enqueueVersionTransitionJob(
@@ -1033,6 +1038,10 @@ func (fs *FileService) RevertFile(filename string, version int, userID uint) err
 			if err := tx.Create(&newRow).Error; err != nil {
 				return err
 			}
+		}
+
+		if err := honour.ClearForFileTx(tx, lockedFile.ID); err != nil {
+			return err
 		}
 
 		return fs.enqueueVersionTransitionJob(
