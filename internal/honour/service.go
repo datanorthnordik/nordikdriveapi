@@ -24,6 +24,7 @@ type Service struct {
 	Now       func() time.Time
 	Random    *rand.Rand
 	PickRow   func(rowIDs []uint) uint
+	Location  *time.Location
 }
 
 type TodayResponse struct {
@@ -594,10 +595,16 @@ func honourDayString(date time.Time) string {
 }
 
 func (s *Service) currentTime() time.Time {
+	var now time.Time
 	if s != nil && s.Now != nil {
-		return s.Now()
+		now = s.Now()
+	} else {
+		now = time.Now()
 	}
-	return time.Now()
+	if s != nil && s.Location != nil {
+		return now.In(s.Location)
+	}
+	return now
 }
 
 func (s *Service) pickRandomRowID(rowIDs []uint) uint {

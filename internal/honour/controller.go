@@ -11,6 +11,7 @@ import (
 
 type ServiceAPI interface {
 	GetTodayByFilename(filename string) (*TodayResponse, error)
+	RunDailyHonours() error
 }
 
 type Controller struct {
@@ -35,4 +36,18 @@ func (hc *Controller) GetToday(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, resp)
+}
+
+func (hc *Controller) RunDaily(c *gin.Context) {
+	if hc.Service == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "honour service not configured"})
+		return
+	}
+
+	if err := hc.Service.RunDailyHonours(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }

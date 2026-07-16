@@ -16,6 +16,8 @@ func TestLoadConfig_ReadsEnvVars(t *testing.T) {
 		"GEMINI_KEY":         "gem-key",
 		"GMAIL_USER":         "mail@test.com",
 		"GMAIL_APP_PASSWORD": "app-pass",
+		"APP_TIMEZONE":       "America/Vancouver",
+		"HONOUR_JOB_SECRET":  "job-secret",
 	}
 
 	for k, v := range env {
@@ -54,6 +56,12 @@ func TestLoadConfig_ReadsEnvVars(t *testing.T) {
 	if cfg.GmailPass != env["GMAIL_APP_PASSWORD"] {
 		t.Fatalf("GmailPass=%q want %q", cfg.GmailPass, env["GMAIL_APP_PASSWORD"])
 	}
+	if cfg.AppTimeZone != env["APP_TIMEZONE"] {
+		t.Fatalf("AppTimeZone=%q want %q", cfg.AppTimeZone, env["APP_TIMEZONE"])
+	}
+	if cfg.HonourJobSecret != env["HONOUR_JOB_SECRET"] {
+		t.Fatalf("HonourJobSecret=%q want %q", cfg.HonourJobSecret, env["HONOUR_JOB_SECRET"])
+	}
 }
 
 func TestLoadConfig_MissingVars_ReturnEmptyStrings(t *testing.T) {
@@ -67,6 +75,8 @@ func TestLoadConfig_MissingVars_ReturnEmptyStrings(t *testing.T) {
 		"GEMINI_KEY",
 		"GMAIL_USER",
 		"GMAIL_APP_PASSWORD",
+		"APP_TIMEZONE",
+		"HONOUR_JOB_SECRET",
 	}
 
 	for _, k := range keys {
@@ -76,8 +86,11 @@ func TestLoadConfig_MissingVars_ReturnEmptyStrings(t *testing.T) {
 	cfg := LoadConfig()
 
 	if cfg.DBHost != "" || cfg.DBPort != "" || cfg.DBUser != "" || cfg.DBPassword != "" || cfg.DBName != "" ||
-		cfg.JWTSecret != "" || cfg.GeminiKey != "" || cfg.GmailUser != "" || cfg.GmailPass != "" {
+		cfg.JWTSecret != "" || cfg.GeminiKey != "" || cfg.GmailUser != "" || cfg.GmailPass != "" || cfg.HonourJobSecret != "" {
 		t.Fatalf("expected all empty strings, got: %+v", cfg)
+	}
+	if cfg.AppTimeZone != "America/Toronto" {
+		t.Fatalf("expected default AppTimeZone America/Toronto, got %q", cfg.AppTimeZone)
 	}
 }
 

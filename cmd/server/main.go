@@ -19,6 +19,7 @@ import (
 	"nordik-drive-api/internal/mailer"
 	"nordik-drive-api/internal/role"
 	"os"
+	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -103,13 +104,15 @@ func main() {
 	chat.RegisterRoutes(r, chatService)
 
 	honourService := honour.NewService(db, chatService)
+	appLocation := loadAppLocation(cfg.AppTimeZone)
+	honourService.Location = appLocation
 	honour.RegisterRoutes(r, honourService)
 
 	adminService := &admin.AdminService{DB: db}
 	admin.RegisterRoutes(r, adminService)
 
 	// --- Cloud Run expects plain HTTP, on $PORT, bind to 0.0.0.0 ---
-	scheduler, err := jobs.NewScheduler(db, mailerService, honourService, log.Default())
+	scheduler, err := jobs.NewScheduler(db, mailerService, honourService, appLocation, log.Default())
 	if err != nil {
 		log.Fatalf("failed to create scheduler: %v", err)
 	}
@@ -123,4 +126,23 @@ func main() {
 	}
 	log.Printf("Starting server on 0.0.0.0:%s ...", port)
 	log.Fatal(r.Run("0.0.0.0:" + port))
+}
+
+func loadAppLocation(name string) *time.Location {
+	if name == "" {
+		name = "America/Toronto"
+	}
+
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		log.Printf("invalid APP_TIMEZONE=%q, defaulting to America/Toronto: %v", name, err)
+		fallback, fallbackErr := time.LoadLocation("America/Toronto")
+		if fallbackErr != nil {
+			log.Printf("failed to load fallback timezone America/Toronto: %v", fallbackErr)
+			return time.Local
+		}
+		return fallback
+	}
+
+	return loc
 }
