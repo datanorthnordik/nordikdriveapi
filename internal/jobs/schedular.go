@@ -22,9 +22,13 @@ func NewScheduler(
 	db *gorm.DB,
 	mailerSvc mailer.EmailSender,
 	honourRunner HonourRunner,
+	location *time.Location,
 	logger *log.Logger,
 ) (*Scheduler, error) {
-	c := cron.New(cron.WithLocation(time.Local))
+	if location == nil {
+		location = time.Local
+	}
+	c := cron.New(cron.WithLocation(location))
 
 	fileEditReviewEmailJob := NewFileEditReviewEmailJob(db, mailerSvc, logger)
 

@@ -300,3 +300,38 @@ func TestServiceGetTodayByFilename(t *testing.T) {
 		t.Fatalf("unexpected response: %#v", resp)
 	}
 }
+
+func TestServiceGetTodayByFilenameUsesConfiguredLocation(t *testing.T) {
+	db := newTestDB(t)
+	seedHonourEnabledFile(t, db, 1, 2, 1)
+
+	toronto := time.FixedZone("EDT", -4*60*60)
+	nowUTC := time.Date(2026, time.July, 16, 1, 0, 0, 0, time.UTC)
+	localDate := honourDayValue(nowUTC.In(toronto))
+
+	record := DailyHonour{
+		FileID:      1,
+		FileVersion: 2,
+		SourceRowID: 1,
+		HonourDate:  localDate,
+		CycleNumber: 1,
+		HonourText:  "Toronto day honour",
+		Status:      honourStatusReady,
+	}
+	if err := db.Create(&record).Error; err != nil {
+		t.Fatalf("create honour: %v", err)
+	}
+
+	svc := &Service{
+		DB:       db,
+		Now:      func() time.Time { return nowUTC },
+		Location: toronto,
+	}
+	resp, err := svc.GetTodayByFilename("survivors-1.csv")
+	if err != nil {
+		t.Fatalf("get today honour: %v", err)
+	}
+	if !resp.Available || resp.HonourText != "Toronto day honour" || resp.Date != "2026-07-15" {
+		t.Fatalf("unexpected response: %#v", resp)
+	}
+}

@@ -14,4 +14,10 @@ func RegisterRoutes(r *gin.Engine, service ServiceAPI) {
 	{
 		group.GET("/honour", controller.GetToday)
 	}
+
+	internalGroup := r.Group("/api/internal/jobs")
+	internalGroup.Use(middlewares.JobSecretMiddleware())
+	{
+		internalGroup.POST("/honour/run", controller.RunDaily)
+	}
 }

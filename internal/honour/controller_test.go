@@ -12,12 +12,19 @@ import (
 )
 
 type mockService struct {
-	resp *TodayResponse
-	err  error
+	resp     *TodayResponse
+	err      error
+	runErr   error
+	runCalls int
 }
 
 func (m *mockService) GetTodayByFilename(filename string) (*TodayResponse, error) {
 	return m.resp, m.err
+}
+
+func (m *mockService) RunDailyHonours() error {
+	m.runCalls++
+	return m.runErr
 }
 
 func setupRouter(svc ServiceAPI) *gin.Engine {
@@ -81,5 +88,38 @@ func TestControllerGetTodaySuccess(t *testing.T) {
 	}
 	if !body.Available || body.SourceRowID != 14 || body.HonourText != "Honour text" {
 		t.Fatalf("unexpected body: %#v", body)
+	}
+}
+
+func TestControllerRunDailySuccess(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &mockService{}
+	r := gin.New()
+	r.POST("/api/internal/jobs/honour/run", (&Controller{Service: svc}).RunDaily)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/internal/jobs/honour/run", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 got %d body=%s", w.Code, w.Body.String())
+	}
+	if svc.runCalls != 1 {
+		t.Fatalf("expected RunDailyHonours once, got %d", svc.runCalls)
+	}
+}
+
+func TestControllerRunDailyFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &mockService{runErr: errors.New("boom")}
+	r := gin.New()
+	r.POST("/api/internal/jobs/honour/run", (&Controller{Service: svc}).RunDaily)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/internal/jobs/honour/run", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 got %d body=%s", w.Code, w.Body.String())
 	}
 }
