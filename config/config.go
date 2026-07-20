@@ -2,21 +2,23 @@ package config
 
 import (
 	"os"
+	"strings"
 )
 
 type Config struct {
-	DBHost          string
-	DBPort          string
-	DBUser          string
-	DBPassword      string
-	DBName          string
-	JWTSecret       string
-	GeminiKey       string
-	SMTPKey         string
-	GmailUser       string
-	GmailPass       string
-	AppTimeZone     string
-	HonourJobSecret string
+	DBHost                           string
+	DBPort                           string
+	DBUser                           string
+	DBPassword                       string
+	DBName                           string
+	JWTSecret                        string
+	GeminiKey                        string
+	SMTPKey                          string
+	GmailUser                        string
+	GmailPass                        string
+	AppTimeZone                      string
+	HonourJobSecret                  string
+	SupportRequestNotificationEmails []string
 }
 
 func LoadConfig() Config {
@@ -25,17 +27,55 @@ func LoadConfig() Config {
 		appTimeZone = "America/Toronto"
 	}
 
-	return Config{
-		DBHost:          os.Getenv("DB_HOST"),
-		DBPort:          os.Getenv("DB_PORT"),
-		DBUser:          os.Getenv("DB_USER"),
-		DBPassword:      os.Getenv("DB_PASSWORD"),
-		DBName:          os.Getenv("DB_NAME"),
-		JWTSecret:       os.Getenv("JWT_SECRET"),
-		GeminiKey:       os.Getenv("GEMINI_KEY"),
-		GmailUser:       os.Getenv("GMAIL_USER"),
-		GmailPass:       os.Getenv("GMAIL_APP_PASSWORD"),
-		AppTimeZone:     appTimeZone,
-		HonourJobSecret: os.Getenv("HONOUR_JOB_SECRET"),
+	supportEmails := splitCommaSeparatedEnv(os.Getenv("SUPPORT_REQUEST_NOTIFICATION_EMAILS"))
+	if len(supportEmails) == 0 {
+		gmailUser := strings.TrimSpace(os.Getenv("GMAIL_USER"))
+		if gmailUser != "" {
+			supportEmails = []string{gmailUser}
+		}
 	}
+
+	return Config{
+		DBHost:                           os.Getenv("DB_HOST"),
+		DBPort:                           os.Getenv("DB_PORT"),
+		DBUser:                           os.Getenv("DB_USER"),
+		DBPassword:                       os.Getenv("DB_PASSWORD"),
+		DBName:                           os.Getenv("DB_NAME"),
+		JWTSecret:                        os.Getenv("JWT_SECRET"),
+		GeminiKey:                        os.Getenv("GEMINI_KEY"),
+		GmailUser:                        os.Getenv("GMAIL_USER"),
+		GmailPass:                        os.Getenv("GMAIL_APP_PASSWORD"),
+		AppTimeZone:                      appTimeZone,
+		HonourJobSecret:                  os.Getenv("HONOUR_JOB_SECRET"),
+		SupportRequestNotificationEmails: supportEmails,
+	}
+}
+
+func splitCommaSeparatedEnv(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+
+		seen[trimmed] = struct{}{}
+		result = append(result, trimmed)
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+
+	return result
 }

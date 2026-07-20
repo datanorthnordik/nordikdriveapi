@@ -18,6 +18,7 @@ import (
 	"nordik-drive-api/internal/lookup"
 	"nordik-drive-api/internal/mailer"
 	"nordik-drive-api/internal/role"
+	"nordik-drive-api/internal/supportrequest"
 	"os"
 	"time"
 
@@ -84,6 +85,13 @@ func main() {
 
 	formSubmissionService := &formsubmission.FormSubmissionService{DB: db, Mailer: mailerService}
 	formsubmission.RegisterRoutes(r, formSubmissionService)
+
+	supportRequestService := &supportrequest.SupportRequestService{
+		DB:                     db,
+		Mailer:                 mailerService,
+		NotificationRecipients: cfg.SupportRequestNotificationEmails,
+	}
+	supportrequest.RegisterRoutes(r, supportRequestService)
 
 	lookupService := &lookup.LookupService{DB: db}
 	lookup.RegisterRoutes(r, lookupService)
