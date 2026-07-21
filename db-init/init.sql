@@ -564,6 +564,33 @@ CREATE INDEX idx_form_submission_details_key
 CREATE INDEX idx_form_submission_uploads_submission
     ON form_submission_uploads (submission_id);
 
+CREATE TABLE IF NOT EXISTS support_requests (
+    id BIGSERIAL PRIMARY KEY,
+    created_by BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    requester_name VARCHAR(120) NOT NULL,
+    requester_email VARCHAR(255) NOT NULL,
+    request_type VARCHAR(30) NOT NULL
+        CHECK (request_type IN ('question', 'technical_issue')),
+    subject VARCHAR(140) NOT NULL,
+    message TEXT NOT NULL,
+    screenshot_file_name TEXT NOT NULL DEFAULT '',
+    screenshot_mime_type TEXT NOT NULL DEFAULT '',
+    screenshot_size_bytes BIGINT NOT NULL DEFAULT 0
+        CHECK (screenshot_size_bytes >= 0),
+    screenshot_url TEXT NOT NULL DEFAULT '',
+    status VARCHAR(20) NOT NULL DEFAULT 'open'
+        CHECK (status IN ('open', 'in_progress', 'resolved')),
+    notification_email_sent BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_support_requests_created_by
+    ON support_requests (created_by, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_support_requests_status_created
+    ON support_requests (status, created_at DESC);
+
 
 
 CREATE INDEX IF NOT EXISTS idx_file_edit_request_community_gin
