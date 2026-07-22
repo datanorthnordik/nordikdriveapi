@@ -89,6 +89,7 @@ func newTestService(t *testing.T) (*SupportRequestService, *fakeSupportRequestMa
 		{ID: 1, Email: "user1@example.com", FirstName: "User", LastName: "One"},
 		{ID: 7, Email: "user7@example.com", FirstName: "User", LastName: "Seven"},
 		{ID: 8, Email: "user8@example.com", FirstName: "User", LastName: "Eight"},
+		{ID: 99, Email: "admin@example.com", FirstName: "Admin", LastName: "User", Role: "Admin"},
 	}
 	if err := db.Create(&users).Error; err != nil {
 		t.Fatalf("seed users: %v", err)
