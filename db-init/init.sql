@@ -579,17 +579,51 @@ CREATE TABLE IF NOT EXISTS support_requests (
         CHECK (screenshot_size_bytes >= 0),
     screenshot_url TEXT NOT NULL DEFAULT '',
     status VARCHAR(20) NOT NULL DEFAULT 'open'
-        CHECK (status IN ('open', 'in_progress', 'resolved')),
+        CHECK (status IN ('open', 'in_progress', 'closed')),
+    assigned_team VARCHAR(120) NOT NULL DEFAULT '',
+    assigned_team_recipients TEXT NOT NULL DEFAULT '',
+    assigned_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+    assigned_at TIMESTAMPTZ,
+    admin_note TEXT NOT NULL DEFAULT '',
+    closed_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+    closed_at TIMESTAMPTZ,
     notification_email_sent BOOLEAN NOT NULL DEFAULT FALSE,
+    requester_email_sent BOOLEAN NOT NULL DEFAULT FALSE,
+    status_email_sent BOOLEAN NOT NULL DEFAULT FALSE,
+    team_forward_email_sent BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Backwards-compatible support-request lifecycle migration for existing databases.
+ALTER TABLE support_requests
+    ADD COLUMN IF NOT EXISTS assigned_team VARCHAR(120) NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS assigned_team_recipients TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS assigned_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS admin_note TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS closed_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS requester_email_sent BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS status_email_sent BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS team_forward_email_sent BOOLEAN NOT NULL DEFAULT FALSE;
+
+UPDATE support_requests SET status = 'closed' WHERE status = 'resolved';
+
+ALTER TABLE support_requests DROP CONSTRAINT IF EXISTS support_requests_status_check;
+ALTER TABLE support_requests
+    ADD CONSTRAINT support_requests_status_check
+    CHECK (status IN ('open', 'in_progress', 'closed'));
 
 CREATE INDEX IF NOT EXISTS idx_support_requests_created_by
     ON support_requests (created_by, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_support_requests_status_created
     ON support_requests (status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_support_requests_assigned_team
+    ON support_requests (assigned_team, updated_at DESC)
+    WHERE assigned_team <> '';
 
 
 

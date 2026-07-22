@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"net/mail"
@@ -37,6 +38,13 @@ type preparedScreenshot struct {
 }
 
 var ErrInvalidSupportRequest = errors.New("invalid support request")
+var ErrSupportRequestForbidden = errors.New("support request access is forbidden")
+var ErrSupportRequestNotFound = errors.New("support request not found")
+
+const (
+	defaultSupportRequestPageSize = 20
+	maxSupportRequestPageSize     = 100
+)
 
 var uploadSupportRequestScreenshotHook = util.UploadPhotoToGCS
 var supportRequestGoHook = func(fn func()) {
@@ -61,6 +69,52 @@ var triggerSupportRequestNotificationHook = func(
 	}
 
 	return sender.Send(recipients, subject, body)
+}
+
+var triggerSupportRequestReceiptEmailHook = func(
+	req *SupportRequest,
+	sender SupportRequestMailer,
+) error {
+	if sender == nil || strings.TrimSpace(req.RequesterEmail) == "" {
+		return nil
+	}
+
+	return sender.Send(
+		[]string{req.RequesterEmail},
+		fmt.Sprintf("We received your support request #%d", req.ID),
+		BuildSupportRequestReceiptEmailBody(req),
+	)
+}
+
+var triggerSupportRequestStatusEmailHook = func(
+	req *SupportRequest,
+	sender SupportRequestMailer,
+) error {
+	if sender == nil || strings.TrimSpace(req.RequesterEmail) == "" {
+		return nil
+	}
+
+	return sender.Send(
+		[]string{req.RequesterEmail},
+		fmt.Sprintf("Support request #%d is now %s", req.ID, supportRequestStatusLabel(req.Status)),
+		BuildSupportRequestStatusEmailBody(req),
+	)
+}
+
+var triggerSupportRequestForwardEmailHook = func(
+	req *SupportRequest,
+	recipients []string,
+	sender SupportRequestMailer,
+) error {
+	if sender == nil || len(recipients) == 0 {
+		return nil
+	}
+
+	return sender.Send(
+		recipients,
+		fmt.Sprintf("Support request #%d forwarded: %s", req.ID, req.Subject),
+		BuildSupportRequestForwardEmailBody(req),
+	)
 }
 
 func normalizeSupportRequestType(value string) string {
@@ -159,14 +213,14 @@ func (s *SupportRequestService) Create(
 		return nil, err
 	}
 
-	if s.Mailer != nil && len(s.NotificationRecipients) > 0 {
+	if s.Mailer != nil {
 		recordCopy := record
 		var attachmentCopy *mailer.Attachment
 		if prepared != nil {
 			attachment := prepared.Attachment
 			attachmentCopy = &attachment
 		}
-		s.triggerNotificationAsync(&recordCopy, attachmentCopy)
+		s.triggerInitialNotificationsAsync(&recordCopy, attachmentCopy)
 	}
 
 	return &CreateSupportRequestResponse{
@@ -245,7 +299,7 @@ func (s *SupportRequestService) prepareScreenshotUpload(
 	}, nil
 }
 
-func (s *SupportRequestService) triggerNotificationAsync(
+func (s *SupportRequestService) triggerInitialNotificationsAsync(
 	request *SupportRequest,
 	attachment *mailer.Attachment,
 ) {
@@ -254,23 +308,279 @@ func (s *SupportRequestService) triggerNotificationAsync(
 			if recover() != nil {
 				_ = s.DB.Model(&SupportRequest{}).
 					Where("id = ?", request.ID).
-					Update("notification_email_sent", false).Error
+					Updates(map[string]interface{}{
+						"notification_email_sent": false,
+						"requester_email_sent":    false,
+					}).Error
 			}
 		}()
 
-		if err := triggerSupportRequestNotificationHook(
-			request,
-			attachment,
-			s.NotificationRecipients,
-			s.Mailer,
-		); err != nil {
+		if len(s.NotificationRecipients) > 0 {
+			if err := triggerSupportRequestNotificationHook(
+				request,
+				attachment,
+				s.NotificationRecipients,
+				s.Mailer,
+			); err != nil {
+				log.Printf("support request admin notification failed for request_id=%d: %v", request.ID, err)
+			} else {
+				_ = s.DB.Model(&SupportRequest{}).
+					Where("id = ?", request.ID).
+					Update("notification_email_sent", true).Error
+			}
+		}
+
+		if err := triggerSupportRequestReceiptEmailHook(request, s.Mailer); err != nil {
+			log.Printf("support request receipt email failed for request_id=%d: %v", request.ID, err)
 			return
 		}
 
 		_ = s.DB.Model(&SupportRequest{}).
 			Where("id = ?", request.ID).
-			Update("notification_email_sent", true).Error
+			Update("requester_email_sent", true).Error
 	})
+}
+
+func (s *SupportRequestService) ListMine(userID, page, pageSize int) (*SupportRequestListResponse, error) {
+	if userID <= 0 {
+		return nil, fmt.Errorf("%w: valid user ID is required", ErrInvalidSupportRequest)
+	}
+
+	return s.list(page, pageSize, s.DB.Where("created_by = ?", userID), true)
+}
+
+func (s *SupportRequestService) ListForAdmin(userID, page, pageSize int) (*SupportRequestListResponse, error) {
+	if err := s.ensureAdmin(userID); err != nil {
+		return nil, err
+	}
+
+	return s.list(page, pageSize, s.DB, false)
+}
+
+func (s *SupportRequestService) list(
+	page, pageSize int,
+	query *gorm.DB,
+	redactManagementFields bool,
+) (*SupportRequestListResponse, error) {
+	page, pageSize = normalizeSupportRequestPagination(page, pageSize)
+
+	var totalItems int64
+	if err := query.Model(&SupportRequest{}).Count(&totalItems).Error; err != nil {
+		return nil, err
+	}
+
+	items := make([]SupportRequest, 0)
+	if err := query.
+		Order("created_at DESC").
+		Limit(pageSize).
+		Offset((page - 1) * pageSize).
+		Find(&items).Error; err != nil {
+		return nil, err
+	}
+
+	if redactManagementFields {
+		for index := range items {
+			items[index].AssignedTeamRecipients = ""
+			items[index].AssignedByID = nil
+			items[index].ClosedByID = nil
+		}
+	}
+
+	totalPages := int((totalItems + int64(pageSize) - 1) / int64(pageSize))
+	if totalPages == 0 {
+		totalPages = 1
+	}
+
+	return &SupportRequestListResponse{
+		Page:       page,
+		PageSize:   pageSize,
+		TotalItems: totalItems,
+		TotalPages: totalPages,
+		Items:      items,
+	}, nil
+}
+
+func (s *SupportRequestService) Update(
+	id int64,
+	request *UpdateSupportRequestRequest,
+	adminUserID int,
+) (*SupportRequest, error) {
+	if id <= 0 {
+		return nil, fmt.Errorf("%w: valid request ID is required", ErrInvalidSupportRequest)
+	}
+	if request == nil {
+		return nil, fmt.Errorf("%w: request is required", ErrInvalidSupportRequest)
+	}
+	if err := s.ensureAdmin(adminUserID); err != nil {
+		return nil, err
+	}
+
+	status := strings.TrimSpace(strings.ToLower(request.Status))
+	if _, ok := validSupportRequestStatuses[status]; !ok {
+		return nil, fmt.Errorf("%w: status must be open, in_progress, or closed", ErrInvalidSupportRequest)
+	}
+
+	teamName := strings.TrimSpace(request.AssignedTeam)
+	if len(teamName) > MaxTeamNameLength {
+		return nil, fmt.Errorf("%w: assigned_team must be %d characters or fewer", ErrInvalidSupportRequest, MaxTeamNameLength)
+	}
+
+	adminNote := strings.TrimSpace(request.AdminNote)
+	if len(adminNote) > MaxAdminNoteLength {
+		return nil, fmt.Errorf("%w: admin_note must be %d characters or fewer", ErrInvalidSupportRequest, MaxAdminNoteLength)
+	}
+
+	teamRecipients, err := parseSupportRequestEmailRecipients(request.AssignedTeamRecipients)
+	if err != nil {
+		return nil, err
+	}
+
+	var record SupportRequest
+	if err := s.DB.First(&record, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrSupportRequestNotFound
+		}
+		return nil, err
+	}
+
+	if status == RequestStatusInProgress {
+		if teamName == "" {
+			teamName = record.AssignedTeam
+		}
+		if len(teamRecipients) == 0 {
+			teamRecipients, err = parseSupportRequestEmailRecipients(record.AssignedTeamRecipients)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if teamName == "" || len(teamRecipients) == 0 {
+			return nil, fmt.Errorf("%w: forwarding to a team and at least one team email are required for in_progress", ErrInvalidSupportRequest)
+		}
+	}
+
+	now := time.Now().UTC()
+	record.Status = status
+	record.AdminNote = adminNote
+	if status == RequestStatusInProgress {
+		record.AssignedTeam = teamName
+		record.AssignedTeamRecipients = strings.Join(teamRecipients, ", ")
+		record.AssignedByID = &adminUserID
+		record.AssignedAt = &now
+	}
+	if status == RequestStatusClosed {
+		record.ClosedByID = &adminUserID
+		record.ClosedAt = &now
+	} else {
+		record.ClosedByID = nil
+		record.ClosedAt = nil
+	}
+
+	if err := s.DB.Save(&record).Error; err != nil {
+		return nil, err
+	}
+
+	if s.Mailer != nil {
+		recordCopy := record
+		s.triggerManagementNotificationsAsync(&recordCopy, teamRecipients, status == RequestStatusInProgress)
+	}
+
+	return &record, nil
+}
+
+func (s *SupportRequestService) triggerManagementNotificationsAsync(
+	request *SupportRequest,
+	teamRecipients []string,
+	forwarded bool,
+) {
+	supportRequestGoHook(func() {
+		defer func() {
+			if recover() != nil {
+				_ = s.DB.Model(&SupportRequest{}).
+					Where("id = ?", request.ID).
+					Updates(map[string]interface{}{
+						"status_email_sent":       false,
+						"team_forward_email_sent": false,
+					}).Error
+			}
+		}()
+
+		if forwarded {
+			if err := triggerSupportRequestForwardEmailHook(request, teamRecipients, s.Mailer); err != nil {
+				log.Printf("support request forward email failed for request_id=%d: %v", request.ID, err)
+			} else {
+				_ = s.DB.Model(&SupportRequest{}).
+					Where("id = ?", request.ID).
+					Update("team_forward_email_sent", true).Error
+			}
+		}
+
+		if err := triggerSupportRequestStatusEmailHook(request, s.Mailer); err != nil {
+			log.Printf("support request status email failed for request_id=%d: %v", request.ID, err)
+			return
+		}
+
+		_ = s.DB.Model(&SupportRequest{}).
+			Where("id = ?", request.ID).
+			Update("status_email_sent", true).Error
+	})
+}
+
+func (s *SupportRequestService) ensureAdmin(userID int) error {
+	if userID <= 0 {
+		return ErrSupportRequestForbidden
+	}
+
+	var count int64
+	if err := s.DB.Model(&SupportRequestUserRef{}).
+		Where("id = ? AND LOWER(role) = ?", userID, "admin").
+		Count(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
+		return ErrSupportRequestForbidden
+	}
+
+	return nil
+}
+
+func normalizeSupportRequestPagination(page, pageSize int) (int, int) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = defaultSupportRequestPageSize
+	}
+	if pageSize > maxSupportRequestPageSize {
+		pageSize = maxSupportRequestPageSize
+	}
+
+	return page, pageSize
+}
+
+func parseSupportRequestEmailRecipients(value string) ([]string, error) {
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n'
+	})
+	recipients := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		email := strings.TrimSpace(part)
+		if email == "" {
+			continue
+		}
+		parsed, err := mail.ParseAddress(email)
+		if err != nil || parsed.Address != email {
+			return nil, fmt.Errorf("%w: assigned_team_recipients must contain valid email addresses", ErrInvalidSupportRequest)
+		}
+		key := strings.ToLower(email)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		recipients = append(recipients, email)
+	}
+
+	return recipients, nil
 }
 
 func allowedScreenshotContentType(values ...string) string {

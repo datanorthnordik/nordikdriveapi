@@ -13,11 +13,35 @@ import (
 )
 
 type mockSupportRequestService struct {
-	createFn func(req *CreateSupportRequestRequest, userID int, screenshot *multipart.FileHeader) (*CreateSupportRequestResponse, error)
+	createFn       func(req *CreateSupportRequestRequest, userID int, screenshot *multipart.FileHeader) (*CreateSupportRequestResponse, error)
+	listMineFn     func(userID, page, pageSize int) (*SupportRequestListResponse, error)
+	listForAdminFn func(userID, page, pageSize int) (*SupportRequestListResponse, error)
+	updateFn       func(id int64, req *UpdateSupportRequestRequest, adminUserID int) (*SupportRequest, error)
 }
 
 func (m *mockSupportRequestService) Create(req *CreateSupportRequestRequest, userID int, screenshot *multipart.FileHeader) (*CreateSupportRequestResponse, error) {
 	return m.createFn(req, userID, screenshot)
+}
+
+func (m *mockSupportRequestService) ListMine(userID, page, pageSize int) (*SupportRequestListResponse, error) {
+	if m.listMineFn == nil {
+		return nil, nil
+	}
+	return m.listMineFn(userID, page, pageSize)
+}
+
+func (m *mockSupportRequestService) ListForAdmin(userID, page, pageSize int) (*SupportRequestListResponse, error) {
+	if m.listForAdminFn == nil {
+		return nil, nil
+	}
+	return m.listForAdminFn(userID, page, pageSize)
+}
+
+func (m *mockSupportRequestService) Update(id int64, req *UpdateSupportRequestRequest, adminUserID int) (*SupportRequest, error) {
+	if m.updateFn == nil {
+		return nil, nil
+	}
+	return m.updateFn(id, req, adminUserID)
 }
 
 func TestRegisterRoutes(t *testing.T) {
@@ -29,8 +53,8 @@ func TestRegisterRoutes(t *testing.T) {
 		})
 	})
 
-	if len(r.Routes()) != 1 {
-		t.Fatalf("expected 1 route, got %d", len(r.Routes()))
+	if len(r.Routes()) != 4 {
+		t.Fatalf("expected 4 routes, got %d", len(r.Routes()))
 	}
 }
 

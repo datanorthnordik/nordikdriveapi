@@ -136,6 +136,95 @@ func TestCreateSupportRequestNotificationFailureKeepsFlagFalse(t *testing.T) {
 	}
 }
 
+func TestSupportRequestManagementLifecycle(t *testing.T) {
+	svc, fakeMailer := newTestService(t)
+
+	oldGo := supportRequestGoHook
+	defer func() { supportRequestGoHook = oldGo }()
+	supportRequestGoHook = func(fn func()) { fn() }
+
+	created, err := svc.Create(&CreateSupportRequestRequest{
+		RequestType: RequestTypeQuestion,
+		Subject:     "Need help with filters",
+		Message:     "How do I search for a student?",
+	}, 1, nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	updated, err := svc.Update(created.ID, &UpdateSupportRequestRequest{
+		Status:                 RequestStatusInProgress,
+		AssignedTeam:           "Platform Support",
+		AssignedTeamRecipients: "platform@example.com, second@example.com",
+		AdminNote:              "The support team is reviewing the search filters.",
+	}, 99)
+	if err != nil {
+		t.Fatalf("forward request: %v", err)
+	}
+	if updated.Status != RequestStatusInProgress || updated.AssignedTeam != "Platform Support" {
+		t.Fatalf("unexpected update: %+v", updated)
+	}
+	if updated.AssignedByID == nil || *updated.AssignedByID != 99 || updated.AssignedAt == nil {
+		t.Fatalf("expected assignment audit data: %+v", updated)
+	}
+
+	var forwarded SupportRequest
+	if err := svc.DB.First(&forwarded, created.ID).Error; err != nil {
+		t.Fatalf("load forwarded request: %v", err)
+	}
+	if !forwarded.StatusEmailSent || !forwarded.TeamForwardEmailSent {
+		t.Fatalf("expected lifecycle email flags true: %+v", forwarded)
+	}
+	if len(fakeMailer.sendCalls) != 4 {
+		t.Fatalf("expected receipt, admin, forward, and status emails; got %d", len(fakeMailer.sendCalls))
+	}
+	if got := fakeMailer.sendCalls[2].To; len(got) != 2 || got[0] != "platform@example.com" {
+		t.Fatalf("unexpected team recipients: %+v", got)
+	}
+
+	closed, err := svc.Update(created.ID, &UpdateSupportRequestRequest{
+		Status:    RequestStatusClosed,
+		AdminNote: "This has been resolved.",
+	}, 99)
+	if err != nil {
+		t.Fatalf("close request: %v", err)
+	}
+	if closed.Status != RequestStatusClosed || closed.ClosedByID == nil || *closed.ClosedByID != 99 || closed.ClosedAt == nil {
+		t.Fatalf("expected closed audit data: %+v", closed)
+	}
+
+	adminList, err := svc.ListForAdmin(99, 1, 20)
+	if err != nil || adminList.TotalItems != 1 || len(adminList.Items) != 1 {
+		t.Fatalf("unexpected admin list: %+v err=%v", adminList, err)
+	}
+	myList, err := svc.ListMine(1, 1, 20)
+	if err != nil || len(myList.Items) != 1 || myList.Items[0].AssignedTeamRecipients != "" {
+		t.Fatalf("unexpected requester list: %+v err=%v", myList, err)
+	}
+	if _, err := svc.ListForAdmin(1, 1, 20); !errors.Is(err, ErrSupportRequestForbidden) {
+		t.Fatalf("expected forbidden non-admin list, got %v", err)
+	}
+}
+
+func TestSupportRequestInProgressRequiresForwardingDetails(t *testing.T) {
+	svc, _ := newTestService(t)
+	created, err := svc.Create(&CreateSupportRequestRequest{
+		RequestType: RequestTypeQuestion,
+		Subject:     "Need help",
+		Message:     "Please help with filters.",
+	}, 1, nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	_, err = svc.Update(created.ID, &UpdateSupportRequestRequest{
+		Status: RequestStatusInProgress,
+	}, 99)
+	if err == nil || !strings.Contains(err.Error(), "forwarding to a team") {
+		t.Fatalf("expected forwarding validation error, got %v", err)
+	}
+}
+
 func TestPrepareScreenshotUploadRejectsInvalidFiles(t *testing.T) {
 	svc, _ := newTestService(t)
 

@@ -15,5 +15,8 @@ func RegisterRoutes(r *gin.Engine, service SupportRequestServiceInterface) {
 	group.Use(middlewares.AuthMiddleware())
 	{
 		group.POST("", controller.Create)
+		group.GET("/mine", controller.ListMine)
+		group.GET("/admin", controller.ListForAdmin)
+		group.PUT("/:id", controller.Update)
 	}
 }
