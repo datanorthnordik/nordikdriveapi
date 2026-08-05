@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var (
@@ -16,7 +17,7 @@ var (
 	ErrNotFound            = errors.New("support schedule record not found")
 	ErrInvalidInput        = errors.New("invalid support schedule input")
 	ErrUnavailable         = errors.New("requested support time is unavailable")
-	ErrNoSupportStaff      = errors.New("no support team member is available")
+	ErrNoSupportStaff      = errors.New("no support admin is available")
 	ErrInvalidStatusChange = errors.New("invalid support call status change")
 )
 
@@ -66,7 +67,7 @@ func defaultSettings() SupportScheduleSettings {
 
 func (s *Service) settings() (*SupportScheduleSettings, error) {
 	if s == nil || s.DB == nil {
-		return nil, errors.New("db not initialized")
+		return nil, errors.New("support schedule database is not initialized")
 	}
 	var settings SupportScheduleSettings
 	err := s.DB.First(&settings, 1).Error
@@ -95,13 +96,13 @@ func durationList(settings *SupportScheduleSettings) []int {
 }
 
 func normalizeDurations(input []int) []int {
-	seen := map[int]struct{}{}
+	seen := make(map[int]struct{}, len(input))
 	result := make([]int, 0, len(input))
 	for _, duration := range input {
 		if duration < 15 || duration > 240 || duration%15 != 0 {
 			continue
 		}
-		if _, exists := seen[duration]; exists {
+		if _, ok := seen[duration]; ok {
 			continue
 		}
 		seen[duration] = struct{}{}
@@ -109,6 +110,15 @@ func normalizeDurations(input []int) []int {
 	}
 	sort.Ints(result)
 	return result
+}
+
+func containsDuration(durations []int, wanted int) bool {
+	for _, duration := range durations {
+		if duration == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func settingsResponse(settings *SupportScheduleSettings) *SettingsResponse {
@@ -150,7 +160,7 @@ func (s *Service) UpdateSettings(actorID uint, input UpdateSettingsInput) (*Sett
 	if strings.TrimSpace(input.WorkdayEnd) != "" {
 		settings.WorkdayEnd = strings.TrimSpace(input.WorkdayEnd)
 	}
-	if _, _, err := serviceWindow(settings, s.now()); err != nil {
+	if _, _, err := windowForDate(settings, scheduleDateFor(s.now(), mustLocation(settings))); err != nil {
 		return nil, err
 	}
 	if input.AllowedDurations != nil {
@@ -171,62 +181,50 @@ func (s *Service) UpdateSettings(actorID uint, input UpdateSettingsInput) (*Sett
 	if err := s.DB.Save(settings).Error; err != nil {
 		return nil, err
 	}
-	if err := s.EnsureRollingSchedule(); err != nil {
-		return nil, err
-	}
-	return settingsResponse(settings), nil
+	return settingsResponse(settings), s.EnsureRollingSchedule()
 }
 
-func containsDuration(durations []int, want int) bool {
-	for _, duration := range durations {
-		if duration == want {
-			return true
-		}
-	}
-	return false
-}
-
-func serviceWindow(settings *SupportScheduleSettings, now time.Time) (time.Time, time.Time, error) {
+func mustLocation(settings *SupportScheduleSettings) *time.Location {
 	loc, err := time.LoadLocation(settings.TimeZone)
 	if err != nil {
-		return time.Time{}, time.Time{}, err
+		return time.Local
 	}
-	localNow := now.In(loc)
-	start, err := parseDateAndTime(localNow.Format("2006-01-02"), settings.WorkdayStart, loc)
-	if err != nil {
-		return time.Time{}, time.Time{}, err
-	}
-	end, err := parseDateAndTime(localNow.Format("2006-01-02"), settings.WorkdayEnd, loc)
-	if err != nil || !end.After(start) {
-		return time.Time{}, time.Time{}, fmt.Errorf("%w: workday end must be after workday start", ErrInvalidInput)
-	}
-	return start, end, nil
+	return loc
 }
 
 func parseDateAndTime(date, hhmm string, loc *time.Location) (time.Time, error) {
 	date = strings.TrimSpace(date)
-	// PostgreSQL DATE values normally scan as YYYY-MM-DD. SQLite and some
-	// drivers may return legacy date-only values as RFC3339 instead.
 	if len(date) >= len("2006-01-02") {
 		date = date[:len("2006-01-02")]
 	}
-	value := date + " " + strings.TrimSpace(hhmm)
-	parsed, err := time.ParseInLocation("2006-01-02 15:04", value, loc)
+	parsed, err := time.ParseInLocation("2006-01-02 15:04", date+" "+strings.TrimSpace(hhmm), loc)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("%w: invalid date or time", ErrInvalidInput)
 	}
 	return parsed, nil
 }
 
-func scheduleDateFor(t time.Time, loc *time.Location) string { return t.In(loc).Format("2006-01-02") }
-
-func isWeekday(date time.Time) bool {
-	return date.Weekday() != time.Saturday && date.Weekday() != time.Sunday
+func windowForDate(settings *SupportScheduleSettings, date string) (time.Time, time.Time, error) {
+	loc, err := time.LoadLocation(settings.TimeZone)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	start, err := parseDateAndTime(date, settings.WorkdayStart, loc)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	end, err := parseDateAndTime(date, settings.WorkdayEnd, loc)
+	if err != nil || !end.After(start) {
+		return time.Time{}, time.Time{}, fmt.Errorf("%w: invalid support-hours window", ErrInvalidInput)
+	}
+	return start, end, nil
 }
 
-// EnsureRollingSchedule makes the current business day plus the next thirteen
-// calendar days available. Because it runs daily and frequently, the horizon
-// advances one day at a time after the initial two-week seed.
+func scheduleDateFor(t time.Time, loc *time.Location) string { return t.In(loc).Format("2006-01-02") }
+
+// EnsureRollingSchedule creates exactly one assignment record for each of the
+// next 14 calendar days. Repeated invocations only fill a genuinely missing
+// date, which makes startup and the daily job idempotent.
 func (s *Service) EnsureRollingSchedule() error {
 	settings, err := s.settings()
 	if err != nil {
@@ -238,39 +236,48 @@ func (s *Service) EnsureRollingSchedule() error {
 	}
 	start := s.now().In(loc)
 	start = time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, loc)
-	for offset := 0; offset < settings.BookingHorizonDays; offset++ {
-		date := start.AddDate(0, 0, offset)
-		if !isWeekday(date) {
-			continue
-		}
-		if err := s.ensureAssignment(scheduleDateFor(date, loc), nil, ""); err != nil {
+	for offset := 0; offset < DefaultHorizonDays; offset++ {
+		if err := s.ensureAssignment(scheduleDateFor(start.AddDate(0, 0, offset), loc)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *Service) ensureAssignment(date string, assignedBy *uint, reason string) error {
-	var existing SupportDailyAssignment
-	err := s.DB.Where("schedule_date = ?", date).First(&existing).Error
-	if err == nil {
+func (s *Service) ensureAssignment(date string) error {
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		var existing SupportAssignment
+		if err := tx.Where("assignment_date = ?", date).First(&existing).Error; err == nil {
+			return nil
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		assignment := SupportAssignment{AssignmentDate: date, AssignmentSource: AssignmentSourceUncovered}
+		assigneeID, err := s.pickFairStaffTx(tx, date, nil)
+		if err == nil {
+			assignment.PrimaryAssigneeID = &assigneeID
+			assignment.AssignmentSource = AssignmentSourceAutomatic
+		} else if !errors.Is(err, ErrNoSupportStaff) {
+			return err
+		}
+		result := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "assignment_date"}},
+			DoNothing: true,
+		}).Create(&assignment)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected > 0 {
+			return s.recordAudit(tx, "assignment", &assignment.ID, "automatic_daily_assignment", nil, map[string]interface{}{
+				"assignment_date": date, "primary_assignee_id": assignment.PrimaryAssigneeID,
+			})
+		}
 		return nil
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
-	}
-	userID, err := s.pickFairStaff(date, nil)
-	assignment := SupportDailyAssignment{ScheduleDate: date, Status: AssignmentStatusUncovered, Reason: reason, AssignedByID: assignedBy}
-	if err == nil {
-		assignment.AssignedUserID = &userID
-		assignment.Status = AssignmentStatusScheduled
-	} else if !errors.Is(err, ErrNoSupportStaff) {
-		return err
-	}
-	return s.DB.Create(&assignment).Error
+	})
 }
 
-func (s *Service) ListSchedule(from, to string) ([]SupportDailyAssignment, error) {
+func (s *Service) ListSchedule(from, to string) ([]SupportAssignment, error) {
 	if err := s.EnsureRollingSchedule(); err != nil {
 		return nil, err
 	}
@@ -278,58 +285,28 @@ func (s *Service) ListSchedule(from, to string) ([]SupportDailyAssignment, error
 	if err != nil {
 		return nil, err
 	}
-	loc, _ := s.location(settings)
+	loc, err := s.location(settings)
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(from) == "" {
 		from = scheduleDateFor(s.now(), loc)
 	}
 	if strings.TrimSpace(to) == "" {
-		to = scheduleDateFor(s.now().In(loc).AddDate(0, 0, settings.BookingHorizonDays-1), loc)
+		to = scheduleDateFor(s.now().In(loc).AddDate(0, 0, DefaultHorizonDays-1), loc)
 	}
-	var assignments []SupportDailyAssignment
-	err = s.DB.Preload("AssignedUser").Where("schedule_date >= ? AND schedule_date <= ?", from, to).Order("schedule_date ASC").Find(&assignments).Error
+	var assignments []SupportAssignment
+	err = s.DB.Preload("PrimaryAssignee").Preload("PreviousAssignee").
+		Where("assignment_date >= ? AND assignment_date <= ?", from, to).
+		Order("assignment_date ASC").Find(&assignments).Error
 	return assignments, err
 }
 
-func (s *Service) ListTeam(actorID uint) ([]SupportTeamMember, error) {
+func (s *Service) ListScheduleFor(actorID uint, from, to string) ([]SupportAssignment, error) {
 	if err := s.requireManager(actorID); err != nil {
 		return nil, err
 	}
-	var members []SupportTeamMember
-	err := s.DB.Preload("User").Order("is_active DESC, user_id ASC").Find(&members).Error
-	return members, err
-}
-
-// ListSelectableStaff is intentionally limited to the fields a caller needs
-// to request a particular support person; email addresses remain private.
-func (s *Service) ListSelectableStaff() ([]SupportStaffOption, error) {
-	var members []SupportTeamMember
-	if err := s.DB.Preload("User").Where("is_active = ?", true).Order("user_id ASC").Find(&members).Error; err != nil {
-		return nil, err
-	}
-	options := make([]SupportStaffOption, 0, len(members))
-	for _, member := range members {
-		options = append(options, SupportStaffOption{UserID: member.UserID, FirstName: member.User.FirstName, LastName: member.User.LastName})
-	}
-	return options, nil
-}
-
-func (s *Service) SetTeamMember(actorID, userID uint, active bool) (*SupportTeamMember, error) {
-	if err := s.requireManager(actorID); err != nil {
-		return nil, err
-	}
-	if _, err := s.user(userID); err != nil {
-		return nil, err
-	}
-	member := SupportTeamMember{UserID: userID, IsActive: active, AddedByID: &actorID}
-	if err := s.DB.Where("user_id = ?", userID).Assign(member).FirstOrCreate(&member).Error; err != nil {
-		return nil, err
-	}
-	if !active {
-		if err := s.RebalanceSchedule(actorID, "team member deactivated"); err != nil {
-			return nil, err
-		}
-	}
-	return &member, nil
+	return s.ListSchedule(from, to)
 }
 
 func (s *Service) user(userID uint) (*SupportUser, error) {
@@ -348,8 +325,7 @@ func (s *Service) isManager(userID uint) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	role := strings.ToLower(strings.TrimSpace(user.Role))
-	return role == strings.ToLower(RoleAdmin) || role == strings.ToLower(RoleManager), nil
+	return strings.EqualFold(strings.TrimSpace(user.Role), RoleManager), nil
 }
 
 func (s *Service) requireManager(userID uint) error {
@@ -363,77 +339,255 @@ func (s *Service) requireManager(userID uint) error {
 	return nil
 }
 
-func (s *Service) isActiveTeamMember(userID uint) (bool, error) {
+func (s *Service) isSupportAdmin(userID uint) (bool, error) {
+	user, err := s.user(userID)
+	if err != nil {
+		return false, err
+	}
+	if !strings.EqualFold(strings.TrimSpace(user.Role), RoleAdmin) {
+		return false, nil
+	}
 	var member SupportTeamMember
-	err := s.DB.Where("user_id = ? AND is_active = ?", userID, true).First(&member).Error
+	err = s.DB.Where("user_id = ? AND is_active = ?", userID, true).First(&member).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return false, nil
 	}
 	return err == nil, err
 }
 
+func (s *Service) requireSupportAdmin(userID uint) error {
+	ok, err := s.isSupportAdmin(userID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrForbidden
+	}
+	return nil
+}
+
+func (s *Service) ListTeam(actorID uint) ([]SupportTeamMember, error) {
+	if err := s.requireManager(actorID); err != nil {
+		return nil, err
+	}
+	var members []SupportTeamMember
+	err := s.DB.Preload("User").Order("is_active DESC, user_id ASC").Find(&members).Error
+	return members, err
+}
+
+func (s *Service) ListSelectableStaff() ([]SupportStaffOption, error) {
+	var members []SupportTeamMember
+	if err := s.DB.Preload("User").Where("is_active = ?", true).Order("user_id ASC").Find(&members).Error; err != nil {
+		return nil, err
+	}
+	result := make([]SupportStaffOption, 0, len(members))
+	for _, member := range members {
+		if strings.EqualFold(member.User.Role, RoleAdmin) {
+			result = append(result, SupportStaffOption{UserID: member.UserID, FirstName: member.User.FirstName, LastName: member.User.LastName})
+		}
+	}
+	return result, nil
+}
+
+func (s *Service) SetTeamMember(actorID, userID uint, active bool) (*SupportTeamMember, error) {
+	if err := s.requireManager(actorID); err != nil {
+		return nil, err
+	}
+	user, err := s.user(userID)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.EqualFold(user.Role, RoleAdmin) {
+		return nil, fmt.Errorf("%w: only Admin-role users can be support admins", ErrInvalidInput)
+	}
+	member := SupportTeamMember{UserID: userID, IsActive: active, AddedByID: &actorID}
+	if err := s.DB.Where("user_id = ?", userID).Assign(member).FirstOrCreate(&member).Error; err != nil {
+		return nil, err
+	}
+	if err := s.recordAudit(s.DB, "team_member", &member.ID, "support_admin_membership_changed", &actorID, map[string]interface{}{"user_id": userID, "is_active": active}); err != nil {
+		return nil, err
+	}
+	if err := s.RunScheduledMaintenance(); err != nil {
+		return nil, err
+	}
+	return &member, nil
+}
+
 type fairStaffCandidate struct {
-	UserID       uint
-	WorkedMinute int64
-	LastAssigned string
+	UserID         uint
+	WorkedMinutes  int64
+	AssignedDays   int64
+	LastAssignedAt string
 }
 
 func (s *Service) pickFairStaff(date string, excluded map[uint]struct{}) (uint, error) {
-	settings, err := s.settings()
+	return s.pickFairStaffTx(s.DB, date, excluded)
+}
+
+func (s *Service) pickFairStaffTx(tx *gorm.DB, date string, excluded map[uint]struct{}) (uint, error) {
+	candidates, err := s.fairStaffCandidatesTx(tx, date, excluded)
 	if err != nil {
 		return 0, err
-	}
-	loc, err := s.location(settings)
-	if err != nil {
-		return 0, err
-	}
-	dayStart, err := parseDateAndTime(date, "00:00", loc)
-	if err != nil {
-		return 0, err
-	}
-	dayEnd := dayStart.AddDate(0, 0, 1)
-	var members []SupportTeamMember
-	if err := s.DB.Preload("User").Where("is_active = ?", true).Find(&members).Error; err != nil {
-		return 0, err
-	}
-	candidates := make([]fairStaffCandidate, 0, len(members))
-	for _, member := range members {
-		if _, skip := excluded[member.UserID]; skip {
-			continue
-		}
-		unavailable, err := s.isUnavailable(member.UserID, dayStart, dayEnd)
-		if err != nil || unavailable {
-			if err != nil {
-				return 0, err
-			}
-			continue
-		}
-		candidate := fairStaffCandidate{UserID: member.UserID}
-		if err := s.DB.Model(&SupportCallRequest{}).
-			Where("assigned_user_id = ? AND status = ?", member.UserID, CallStatusCompleted).
-			Select("COALESCE(SUM(actual_minutes), 0)").Scan(&candidate.WorkedMinute).Error; err != nil {
-			return 0, err
-		}
-		var previous SupportDailyAssignment
-		if err := s.DB.Where("assigned_user_id = ? AND schedule_date < ?", member.UserID, date).
-			Order("schedule_date DESC").First(&previous).Error; err == nil {
-			candidate.LastAssigned = previous.ScheduleDate
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return 0, err
-		}
-		candidates = append(candidates, candidate)
-	}
-	if len(candidates) == 0 {
-		return 0, ErrNoSupportStaff
 	}
 	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].WorkedMinute != candidates[j].WorkedMinute {
-			return candidates[i].WorkedMinute < candidates[j].WorkedMinute
+		if candidates[i].WorkedMinutes != candidates[j].WorkedMinutes {
+			return candidates[i].WorkedMinutes < candidates[j].WorkedMinutes
 		}
-		if candidates[i].LastAssigned != candidates[j].LastAssigned {
-			return candidates[i].LastAssigned < candidates[j].LastAssigned
+		if candidates[i].AssignedDays != candidates[j].AssignedDays {
+			return candidates[i].AssignedDays < candidates[j].AssignedDays
+		}
+		if candidates[i].LastAssignedAt != candidates[j].LastAssignedAt {
+			return candidates[i].LastAssignedAt < candidates[j].LastAssignedAt
 		}
 		return candidates[i].UserID < candidates[j].UserID
 	})
 	return candidates[0].UserID, nil
+}
+
+func (s *Service) fairStaffCandidatesTx(tx *gorm.DB, date string, excluded map[uint]struct{}) ([]fairStaffCandidate, error) {
+	var members []SupportTeamMember
+	if err := tx.Preload("User").Where("is_active = ?", true).Find(&members).Error; err != nil {
+		return nil, err
+	}
+	candidates := make([]fairStaffCandidate, 0, len(members))
+	for _, member := range members {
+		if _, skip := excluded[member.UserID]; skip || !strings.EqualFold(member.User.Role, RoleAdmin) {
+			continue
+		}
+		unavailable, err := s.fullDayUnavailableTx(tx, member.UserID, date)
+		if err != nil {
+			return nil, err
+		}
+		if unavailable {
+			continue
+		}
+		candidate := fairStaffCandidate{UserID: member.UserID}
+		if err := tx.Model(&SupportCall{}).
+			Where("assigned_staff_id = ? AND status = ?", member.UserID, RequestStatusCompleted).
+			Select("COALESCE(SUM(actual_duration_minutes), 0)").Scan(&candidate.WorkedMinutes).Error; err != nil {
+			return nil, err
+		}
+		if err := tx.Model(&SupportAssignment{}).Where("primary_assignee_id = ?", member.UserID).Count(&candidate.AssignedDays).Error; err != nil {
+			return nil, err
+		}
+		var previous SupportAssignment
+		if err := tx.Where("primary_assignee_id = ? AND assignment_date < ?", member.UserID, date).
+			Order("assignment_date DESC").First(&previous).Error; err == nil {
+			candidate.LastAssignedAt = previous.AssignmentDate
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+		candidates = append(candidates, candidate)
+	}
+	if len(candidates) == 0 {
+		return nil, ErrNoSupportStaff
+	}
+	return candidates, nil
+}
+
+func (s *Service) ListFairnessStats(actorID uint) ([]FairnessStat, error) {
+	if err := s.requireManager(actorID); err != nil {
+		return nil, err
+	}
+	candidates, err := s.fairStaffCandidatesTx(s.DB, "9999-12-31", nil)
+	if err != nil {
+		if errors.Is(err, ErrNoSupportStaff) {
+			return []FairnessStat{}, nil
+		}
+		return nil, err
+	}
+	var members []SupportTeamMember
+	if err := s.DB.Preload("User").Where("is_active = ?", true).Find(&members).Error; err != nil {
+		return nil, err
+	}
+	users := make(map[uint]SupportUser, len(members))
+	for _, member := range members {
+		users[member.UserID] = member.User
+	}
+	stats := make([]FairnessStat, 0, len(candidates))
+	for _, candidate := range candidates {
+		user := users[candidate.UserID]
+		stats = append(stats, FairnessStat{
+			Staff:              SupportStaffOption{UserID: candidate.UserID, FirstName: user.FirstName, LastName: user.LastName},
+			ActualMinutes:      candidate.WorkedMinutes,
+			ActualHours:        float64(candidate.WorkedMinutes) / 60,
+			AssignedDays:       candidate.AssignedDays,
+			LastAssignmentDate: candidate.LastAssignedAt,
+		})
+	}
+	sort.Slice(stats, func(i, j int) bool { return stats[i].Staff.UserID < stats[j].Staff.UserID })
+	return stats, nil
+}
+
+func (s *Service) ListAuditLog(actorID uint) ([]SupportScheduleAuditLog, error) {
+	if err := s.requireManager(actorID); err != nil {
+		return nil, err
+	}
+	var logs []SupportScheduleAuditLog
+	return logs, s.DB.Order("created_at DESC, id DESC").Limit(500).Find(&logs).Error
+}
+
+func (s *Service) fullDayUnavailableTx(tx *gorm.DB, staffID uint, date string) (bool, error) {
+	var count int64
+	err := tx.Model(&StaffAvailability{}).
+		Where("staff_id = ? AND availability_date = ? AND full_day_unavailable = ?", staffID, date, true).
+		Count(&count).Error
+	return count > 0, err
+}
+
+func (s *Service) recordAudit(tx *gorm.DB, entityType string, entityID *uint, action string, actorID *uint, details map[string]interface{}) error {
+	encoded, err := json.Marshal(details)
+	if err != nil {
+		return err
+	}
+	return tx.Create(&SupportScheduleAuditLog{EntityType: entityType, EntityID: entityID, Action: action, ActorID: actorID, Details: encoded}).Error
+}
+
+func (s *Service) RunScheduledMaintenance() error {
+	if err := s.EnsureRollingSchedule(); err != nil {
+		return err
+	}
+	return s.rebalanceUnavailableAssignments("daily availability check")
+}
+
+func (s *Service) RebalanceSchedule(actorID uint, reason string) error {
+	if err := s.requireManager(actorID); err != nil {
+		return err
+	}
+	return s.rebalanceUnavailableAssignments(reason)
+}
+
+func (s *Service) rebalanceUnavailableAssignments(reason string) error {
+	settings, err := s.settings()
+	if err != nil {
+		return err
+	}
+	loc, err := s.location(settings)
+	if err != nil {
+		return err
+	}
+	from := scheduleDateFor(s.now(), loc)
+	to := scheduleDateFor(s.now().In(loc).AddDate(0, 0, DefaultHorizonDays-1), loc)
+	var assignments []SupportAssignment
+	if err := s.DB.Where("assignment_date >= ? AND assignment_date <= ?", from, to).Find(&assignments).Error; err != nil {
+		return err
+	}
+	for _, assignment := range assignments {
+		if assignment.PrimaryAssigneeID == nil {
+			if err := s.reassignUnavailableDay(assignment.AssignmentDate, reason); err != nil {
+				return err
+			}
+			continue
+		}
+		unavailable, err := s.fullDayUnavailableTx(s.DB, *assignment.PrimaryAssigneeID, assignment.AssignmentDate)
+		if err != nil {
+			return err
+		}
+		if unavailable {
+			if err := s.reassignUnavailableDay(assignment.AssignmentDate, reason); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

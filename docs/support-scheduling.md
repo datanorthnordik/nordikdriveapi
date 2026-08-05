@@ -1,93 +1,89 @@
-# Support scheduling
+# Support-call scheduling
 
-The `internal/supportschedule` package provides survivor-facing support-call
-booking and a fair on-call rota. It is registered by `cmd/server/main.go` and
-uses the application's existing PostgreSQL database, authentication cookie,
-and mail service.
+The support-call feature is a role-separated scheduling workflow. Its backend
+is authoritative for availability, approval, fairness, concurrency and audit
+history; a client cannot create a daily assignment or book a conflicting slot.
 
-## Defaults and configuration
+## Deployment and schema
 
-- Service window: Monday to Friday, **08:30–16:30 America/Toronto**.
-- Initial horizon: the current day plus the next thirteen calendar days. This
-  yields the next two weeks of weekdays; the recurring job advances the last
-  day as time moves forward.
-- Enabled durations: 30 and 60 minutes. A Manager can update this list to
-  15/30/45/60 (or any 15-minute increment from 15 to 240) through the settings
-  API. The default duration must be one of the enabled values.
-- A staff member accrues fairness time only when a scheduled call is marked
-  `completed`; the actual start/end entries determine the recorded minutes.
+Fresh installations use the support-call tables in `db-init/init.sql`:
 
-The reviewed PostgreSQL DDL and idempotent `Manager` role seed are in
-`db-init/init.sql`; this feature does **not** use GORM AutoMigrate. Apply that
-SQL as part of the normal database-initialization/deployment process. Promote
-the one or two authorized people by changing their existing `users.role` to
-`Manager`. Administrators retain all manager capabilities.
+- `support_assignments` — one primary assignee for every calendar date.
+- `support_staff_availabilities` — full-day and multiple partial-day records.
+- `support_call_requests` — requester intent, approval and alternatives.
+- `support_calls` — the reserved/scheduled call and actual completed time.
+- `support_schedule_audit_logs` — assignment, availability, approval and
+  actual-duration history.
 
-## Workflow
+Existing deployments of the superseded implementation must export any data
+they need, run `db-init/remove-legacy-support-scheduling.sql` once, then apply
+`db-init/init.sql`. The cleanup removes only the old denormalized scheduling
+tables (`support_daily_assignments`, `support_staff_unavailabilities`, and the
+old `support_call_requests`); the unrelated general `support_requests` table,
+settings, and support-team membership remain.
 
-1. Managers add active support-team members using `PUT /api/support-schedule/team/:userID`.
-2. The scheduler assigns one active member to every weekday. It selects the
-   eligible person with the fewest completed support minutes, then uses least
-   recently assigned and user ID as deterministic tie-breakers.
-3. A normal booking uses the on-call person and immediately sends that person
-   the existing application email notification. A named-person booking holds
-   the selected person's slot in `awaiting_staff_approval` until that person
-   approves or declines it in **My Support**.
-4. Staff enter actual start and end times when they mark a call done. The
-   calculated duration updates the fairness total.
-5. A staff member can record their own absence. Managers can record an absence
-   for another staff member or the whole team. Partial absences remove only
-   overlapping slots. Full workday coverage immediately triggers a fair daily
-   reassignment. Calls that now overlap an absence are marked
-   `needs_reschedule` for manager action.
+## Roles
 
-The support maintenance runner executes at application startup and every five
-minutes. It maintains the two-week rolling horizon and rechecks assignments.
-Managers can also call the maintenance API for an immediate check.
+- Regular users can create and view their own support-call requests and calls.
+- Support admins are active `support_team_members` whose user role is `Admin`.
+  They manage only their own availability in their Profile, review requests
+  assigned to them, and record actual call times.
+- Managers administer the support-admin membership, view the complete rota,
+  availability, requests and calls, and can reassign an existing daily primary
+  assignee or an individual call. Managers cannot create normal daily slots.
 
-## API surface
+Availability endpoints live only below `/api/support-schedule/profile` so the
+frontend can keep availability controls in the admin Profile rather than a
+header, Requests, or Support Calls page.
 
-All routes are authenticated and begin with `/api/support-schedule`.
+## Scheduler and fairness
+
+At startup, `RunScheduledMaintenance` creates one assignment for today and
+the following thirteen calendar days. The daily midnight job invokes the same
+idempotent operation; it never duplicates an assignment and fills only a
+missing date in the rolling horizon.
+
+Automatic selection is deterministic:
+
+1. Lowest completed `actual_duration_minutes`.
+2. Fewest primary assignment days.
+3. Oldest preceding assignment date.
+4. Lowest user ID.
+
+An active support admin marked fully unavailable cannot be selected. If the
+current primary assignee becomes fully unavailable, the service replaces them
+using those same rules and moves compatible normal requests. Direct requests
+or calls that cannot safely move are marked `alternative_time_proposed`.
+
+## API
+
+All routes are authenticated and start with `/api/support-schedule`.
 
 | Route | Purpose |
 | --- | --- |
-| `GET /settings`, `PUT /settings` | Read settings; Manager/Admin updates settings. |
-| `GET /availability?date=YYYY-MM-DD&duration_minutes=30&staff_id=` | Bookable slots and the relevant staff member. `staff_id` is optional for a named-person request. |
-| `GET /schedule` | Current two-week rota, including the assigned person for each weekday. |
-| `GET /team` | Active staff choices without email addresses. |
-| `GET /team/manage`, `PUT /team/:userID` | Manager team administration. |
-| `GET/POST /calls` | A caller's/assignee's calls and new booking requests. Managers can use `?scope=manage`. |
-| `PUT /calls/:id/approval` | The requested staff member approves or declines an off-rota request. |
-| `PUT /calls/:id/complete` | Assignee or Manager records actual start/end and completion. |
-| `PUT /calls/:id/reassign`, `PUT /schedule/:date/reassign` | Manager/Admin call or rota reassignment with a reason. |
-| `GET/POST /unavailability` | Personal/team absence management. |
-| `POST /maintenance` | Manager/Admin immediate rolling-horizon and rebalance check. |
+| `GET /availability` | Available slots for the date's primary assignee, or a selected support admin. |
+| `GET/POST /requests` | User requests; `scope=staff` for the active admin queue and `scope=manage` for managers. |
+| `PUT /requests/:id/decision` | Assigned support admin approves, rejects, or proposes an alternative. |
+| `PUT /requests/:id/accept-alternative`, `PUT /requests/:id/cancel` | Requester actions. |
+| `GET /calls` | Calls for the caller/assignee; staff and manager scopes are role checked. |
+| `PUT /calls/:id/complete` | Assigned support admin or manager records actual start/end and notes. |
+| `PUT /calls/:id/reassign`, `GET /schedule`, `PUT /schedule/:date/reassign` | Manager-only conflict and rota controls. |
+| `GET /fairness`, `GET /audit-log` | Manager-only actual-hours, assignment-history, and audit views. |
+| `GET /profile` | Support admin's assignments, approved calls, direct requests, and availability. |
+| `GET/POST /profile/availability`, `PUT/DELETE /profile/availability/:id` | Support admin's own availability only. |
 
-## Deferred integrations
-
-`MeetingProvider` and `HRAvailabilityProvider` are deliberately explicit
-interfaces in `providers.go`:
-
-- Zoom is not called yet. New records are persisted as
-  `meeting_provider=zoom`, `meeting_status=pending_provider`, which is the
-  safe placeholder for a future OAuth/API implementation.
-- SageHR is not called yet. HR-driven absence synchronization can implement
-  `HRAvailabilityProvider` and create the same local availability records used
-  by the application.
-
-No unresolved remote URLs or credentials were introduced for either provider.
+The PostgreSQL exclusion constraint on `support_calls` prevents overlapping
+active reservations even when two bookings race. The service also uses
+transactions and locks around booking, approval, reassignment and completion.
 
 ## Verification
-
-Run from `nordikdriveapi`:
 
 ```powershell
 $env:GOCACHE = 'C:\Nordik Projects\nordikdriveapi\.gocache'
 go test ./internal/supportschedule
-go test ./cmd/server
+go test ./internal/jobs ./cmd/server
 ```
 
-The package test suite verifies the two-week weekday rota, a full-day
-unavailability reassignment, named-person approval, actual-minute recording,
-and fairness ordering. Run `npm run build` from `nordik-drive` to verify the
-Contact Us dialog, My Support page, manager controls, and routing compile.
+The support-schedule suite covers the 14-day idempotent horizon, full-day
+fair reassignment, partial availability, overlap prevention, specific-person
+approval, actual-duration fairness, audit entries, and role separation.
