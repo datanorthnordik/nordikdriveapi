@@ -18,10 +18,15 @@ type HonourRunner interface {
 	RunDailyHonours() error
 }
 
+type SupportScheduleRunner interface {
+	RunScheduledMaintenance() error
+}
+
 func NewScheduler(
 	db *gorm.DB,
 	mailerSvc mailer.EmailSender,
 	honourRunner HonourRunner,
+	supportScheduleRunner SupportScheduleRunner,
 	location *time.Location,
 	logger *log.Logger,
 ) (*Scheduler, error) {
@@ -83,6 +88,17 @@ func NewScheduler(
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to register daily honour cron: %w", err)
+		}
+	}
+
+	if supportScheduleRunner != nil {
+		_, err = c.AddFunc("*/5 * * * *", func() {
+			if err := supportScheduleRunner.RunScheduledMaintenance(); err != nil && logger != nil {
+				logger.Printf("support schedule maintenance cron failed: %v", err)
+			}
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to register support schedule maintenance cron: %w", err)
 		}
 	}
 

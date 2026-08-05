@@ -17,6 +17,113 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Support scheduling. These tables are intentionally maintained here instead
+-- of by GORM AutoMigrate so fresh and existing PostgreSQL deployments have a
+-- reviewed, explicit schema.
+CREATE TABLE IF NOT EXISTS support_schedule_settings (
+    id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    time_zone VARCHAR(100) NOT NULL DEFAULT 'America/Toronto',
+    workday_start VARCHAR(5) NOT NULL DEFAULT '08:30',
+    workday_end VARCHAR(5) NOT NULL DEFAULT '16:30',
+    allowed_durations_json JSONB NOT NULL DEFAULT '[30, 60]'::jsonb,
+    default_duration_minutes INTEGER NOT NULL DEFAULT 30,
+    booking_horizon_days INTEGER NOT NULL DEFAULT 14,
+    updated_by_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS support_team_members (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    added_by_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_support_team_members_active
+    ON support_team_members(is_active);
+
+CREATE TABLE IF NOT EXISTS support_daily_assignments (
+    id SERIAL PRIMARY KEY,
+    schedule_date VARCHAR(10) NOT NULL UNIQUE,
+    assigned_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    status VARCHAR(24) NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    assigned_by_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_support_daily_assignments_assigned_user
+    ON support_daily_assignments(assigned_user_id);
+CREATE INDEX IF NOT EXISTS idx_support_daily_assignments_status
+    ON support_daily_assignments(status);
+
+CREATE TABLE IF NOT EXISTS support_staff_unavailabilities (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    all_team BOOLEAN NOT NULL DEFAULT FALSE,
+    starts_at TIMESTAMPTZ NOT NULL,
+    ends_at TIMESTAMPTZ NOT NULL,
+    reason TEXT NOT NULL,
+    created_by_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (ends_at > starts_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_support_staff_unavailability_user
+    ON support_staff_unavailabilities(user_id);
+CREATE INDEX IF NOT EXISTS idx_support_staff_unavailability_all_team
+    ON support_staff_unavailabilities(all_team);
+CREATE INDEX IF NOT EXISTS idx_support_staff_unavailability_starts_at
+    ON support_staff_unavailabilities(starts_at);
+CREATE INDEX IF NOT EXISTS idx_support_staff_unavailability_ends_at
+    ON support_staff_unavailabilities(ends_at);
+
+CREATE TABLE IF NOT EXISTS support_call_requests (
+    id SERIAL PRIMARY KEY,
+    created_by_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    requested_staff_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    assigned_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    schedule_date VARCHAR(10) NOT NULL,
+    scheduled_start TIMESTAMPTZ NOT NULL,
+    scheduled_end TIMESTAMPTZ NOT NULL,
+    duration_minutes INTEGER NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    subject VARCHAR(160) NOT NULL,
+    message TEXT NOT NULL DEFAULT '',
+    meeting_provider VARCHAR(32) NOT NULL DEFAULT 'zoom',
+    meeting_status VARCHAR(32) NOT NULL DEFAULT 'pending_provider',
+    meeting_url TEXT NOT NULL DEFAULT '',
+    external_meeting_id TEXT NOT NULL DEFAULT '',
+    approval_note TEXT NOT NULL DEFAULT '',
+    reassignment_reason TEXT NOT NULL DEFAULT '',
+    actual_start TIMESTAMPTZ,
+    actual_end TIMESTAMPTZ,
+    actual_minutes INTEGER NOT NULL DEFAULT 0,
+    completed_by_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    completed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (scheduled_end > scheduled_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_support_call_requests_created_by
+    ON support_call_requests(created_by_id);
+CREATE INDEX IF NOT EXISTS idx_support_call_requests_requested_staff
+    ON support_call_requests(requested_staff_id);
+CREATE INDEX IF NOT EXISTS idx_support_call_requests_assigned_user
+    ON support_call_requests(assigned_user_id);
+CREATE INDEX IF NOT EXISTS idx_support_call_requests_schedule_date
+    ON support_call_requests(schedule_date);
+CREATE INDEX IF NOT EXISTS idx_support_call_requests_scheduled_start
+    ON support_call_requests(scheduled_start);
+CREATE INDEX IF NOT EXISTS idx_support_call_requests_status
+    ON support_call_requests(status);
+
 
 
 CREATE TABLE otps (
@@ -260,7 +367,9 @@ EXECUTE FUNCTION set_file_data_normalized_updated_at();
 INSERT INTO roles (role, priority)
 VALUES
     ('Admin',        1),
-    ('User',         2);
+    ('User',         2),
+    ('Manager',      0)
+ON CONFLICT (role) DO NOTHING;
 
 -- INSERT INTO community (community_name) VALUES
 -- ('Shoal Lake 40 First Nation'),

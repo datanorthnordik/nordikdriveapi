@@ -19,6 +19,7 @@ import (
 	"nordik-drive-api/internal/mailer"
 	"nordik-drive-api/internal/role"
 	"nordik-drive-api/internal/supportrequest"
+	"nordik-drive-api/internal/supportschedule"
 	"os"
 	"time"
 
@@ -43,7 +44,6 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to connect to database:", err)
 	}
-
 	r := gin.Default()
 
 	r.Use(cors.New(cors.Config{
@@ -93,6 +93,12 @@ func main() {
 	}
 	supportrequest.RegisterRoutes(r, supportRequestService)
 
+	supportScheduleService := &supportschedule.Service{DB: db, Mailer: mailerService}
+	if err := supportScheduleService.RunScheduledMaintenance(); err != nil {
+		log.Printf("initial support schedule maintenance failed: %v", err)
+	}
+	supportschedule.RegisterRoutes(r, supportScheduleService)
+
 	lookupService := &lookup.LookupService{DB: db}
 	lookup.RegisterRoutes(r, lookupService)
 
@@ -120,7 +126,7 @@ func main() {
 	admin.RegisterRoutes(r, adminService)
 
 	// --- Cloud Run expects plain HTTP, on $PORT, bind to 0.0.0.0 ---
-	scheduler, err := jobs.NewScheduler(db, mailerService, honourService, appLocation, log.Default())
+	scheduler, err := jobs.NewScheduler(db, mailerService, honourService, supportScheduleService, appLocation, log.Default())
 	if err != nil {
 		log.Fatalf("failed to create scheduler: %v", err)
 	}
