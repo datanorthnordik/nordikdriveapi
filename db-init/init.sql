@@ -17,9 +17,10 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Support scheduling. These tables are intentionally maintained here instead
--- of by GORM AutoMigrate so fresh and existing PostgreSQL deployments have a
--- reviewed, explicit schema.
+-- Support-call scheduling. These tables are intentionally maintained here
+-- rather than by GORM AutoMigrate.  The legacy tables are deliberately not
+-- recreated here; existing deployments must run
+-- db-init/remove-legacy-support-scheduling.sql once before applying this DDL.
 CREATE TABLE IF NOT EXISTS support_schedule_settings (
     id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
     time_zone VARCHAR(100) NOT NULL DEFAULT 'America/Toronto',
@@ -45,85 +46,135 @@ CREATE TABLE IF NOT EXISTS support_team_members (
 CREATE INDEX IF NOT EXISTS idx_support_team_members_active
     ON support_team_members(is_active);
 
-CREATE TABLE IF NOT EXISTS support_daily_assignments (
+CREATE TABLE IF NOT EXISTS support_assignments (
     id SERIAL PRIMARY KEY,
-    schedule_date VARCHAR(10) NOT NULL UNIQUE,
-    assigned_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    status VARCHAR(24) NOT NULL,
-    reason TEXT NOT NULL DEFAULT '',
-    assigned_by_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_support_daily_assignments_assigned_user
-    ON support_daily_assignments(assigned_user_id);
-CREATE INDEX IF NOT EXISTS idx_support_daily_assignments_status
-    ON support_daily_assignments(status);
-
-CREATE TABLE IF NOT EXISTS support_staff_unavailabilities (
-    id SERIAL PRIMARY KEY,
-    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    all_team BOOLEAN NOT NULL DEFAULT FALSE,
-    starts_at TIMESTAMPTZ NOT NULL,
-    ends_at TIMESTAMPTZ NOT NULL,
-    reason TEXT NOT NULL,
-    created_by_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    assignment_date VARCHAR(10) NOT NULL UNIQUE,
+    primary_assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    assignment_source VARCHAR(40) NOT NULL,
+    previous_assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    reassigned_by_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    reassignment_reason TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CHECK (ends_at > starts_at)
+    CHECK (assignment_source IN ('automatic', 'manager_reassignment', 'full_day_reassignment', 'uncovered'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_support_staff_unavailability_user
-    ON support_staff_unavailabilities(user_id);
-CREATE INDEX IF NOT EXISTS idx_support_staff_unavailability_all_team
-    ON support_staff_unavailabilities(all_team);
-CREATE INDEX IF NOT EXISTS idx_support_staff_unavailability_starts_at
-    ON support_staff_unavailabilities(starts_at);
-CREATE INDEX IF NOT EXISTS idx_support_staff_unavailability_ends_at
-    ON support_staff_unavailabilities(ends_at);
+CREATE INDEX IF NOT EXISTS idx_support_assignments_primary_assignee
+    ON support_assignments(primary_assignee_id, assignment_date);
+
+CREATE TABLE IF NOT EXISTS support_staff_availabilities (
+    id SERIAL PRIMARY KEY,
+    staff_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    availability_date VARCHAR(10) NOT NULL,
+    full_day_unavailable BOOLEAN NOT NULL DEFAULT FALSE,
+    unavailable_start_time TIMESTAMPTZ,
+    unavailable_end_time TIMESTAMPTZ,
+    reason TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (
+        (full_day_unavailable = TRUE AND unavailable_start_time IS NULL AND unavailable_end_time IS NULL)
+        OR
+        (full_day_unavailable = FALSE AND unavailable_start_time IS NOT NULL
+         AND unavailable_end_time IS NOT NULL AND unavailable_end_time > unavailable_start_time)
+    )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_support_staff_availability_full_day
+    ON support_staff_availabilities(staff_id, availability_date)
+    WHERE full_day_unavailable = TRUE;
+CREATE INDEX IF NOT EXISTS idx_support_staff_availability_staff_date
+    ON support_staff_availabilities(staff_id, availability_date);
 
 CREATE TABLE IF NOT EXISTS support_call_requests (
     id SERIAL PRIMARY KEY,
-    created_by_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    requested_by_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    request_type VARCHAR(40) NOT NULL,
+    requested_date VARCHAR(10) NOT NULL,
+    preferred_start_time TIMESTAMPTZ,
+    preferred_end_time TIMESTAMPTZ,
     requested_staff_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    assigned_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    schedule_date VARCHAR(10) NOT NULL,
-    scheduled_start TIMESTAMPTZ NOT NULL,
-    scheduled_end TIMESTAMPTZ NOT NULL,
-    duration_minutes INTEGER NOT NULL,
-    status VARCHAR(32) NOT NULL,
+    assigned_staff_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    status VARCHAR(40) NOT NULL,
     subject VARCHAR(160) NOT NULL,
-    message TEXT NOT NULL DEFAULT '',
-    meeting_provider VARCHAR(32) NOT NULL DEFAULT 'zoom',
-    meeting_status VARCHAR(32) NOT NULL DEFAULT 'pending_provider',
-    meeting_url TEXT NOT NULL DEFAULT '',
-    external_meeting_id TEXT NOT NULL DEFAULT '',
-    approval_note TEXT NOT NULL DEFAULT '',
-    reassignment_reason TEXT NOT NULL DEFAULT '',
-    actual_start TIMESTAMPTZ,
-    actual_end TIMESTAMPTZ,
-    actual_minutes INTEGER NOT NULL DEFAULT 0,
+    description TEXT NOT NULL DEFAULT '',
+    rejection_reason TEXT NOT NULL DEFAULT '',
+    alternative_start_time TIMESTAMPTZ,
+    alternative_end_time TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (request_type IN ('automatic_daily_assignee', 'specific_support_person')),
+    CHECK (status IN ('pending', 'awaiting_assignee_approval', 'approved', 'alternative_time_proposed', 'rejected', 'cancelled', 'completed')),
+    CHECK (preferred_end_time IS NULL OR preferred_start_time IS NULL OR preferred_end_time > preferred_start_time),
+    CHECK (alternative_end_time IS NULL OR alternative_start_time IS NULL OR alternative_end_time > alternative_start_time)
+);
+
+CREATE INDEX IF NOT EXISTS idx_support_call_requests_requested_by
+    ON support_call_requests(requested_by_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_support_call_requests_requested_staff
+    ON support_call_requests(requested_staff_id);
+CREATE INDEX IF NOT EXISTS idx_support_call_requests_assigned_staff
+    ON support_call_requests(assigned_staff_id, requested_date);
+CREATE INDEX IF NOT EXISTS idx_support_call_requests_status
+    ON support_call_requests(status);
+
+CREATE TABLE IF NOT EXISTS support_calls (
+    id SERIAL PRIMARY KEY,
+    support_request_id INTEGER NOT NULL UNIQUE REFERENCES support_call_requests(id) ON DELETE CASCADE,
+    assigned_staff_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    scheduled_start_time TIMESTAMPTZ NOT NULL,
+    scheduled_end_time TIMESTAMPTZ NOT NULL,
+    actual_start_time TIMESTAMPTZ,
+    actual_end_time TIMESTAMPTZ,
+    actual_duration_minutes INTEGER NOT NULL DEFAULT 0,
+    status VARCHAR(40) NOT NULL,
+    internal_notes TEXT NOT NULL DEFAULT '',
     completed_by_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     completed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CHECK (scheduled_end > scheduled_start)
+    CHECK (scheduled_end_time > scheduled_start_time),
+    CHECK (actual_end_time IS NULL OR actual_start_time IS NULL OR actual_end_time > actual_start_time),
+    CHECK (actual_duration_minutes >= 0),
+    CHECK (status IN ('pending', 'awaiting_assignee_approval', 'approved', 'alternative_time_proposed', 'rejected', 'cancelled', 'completed'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_support_call_requests_created_by
-    ON support_call_requests(created_by_id);
-CREATE INDEX IF NOT EXISTS idx_support_call_requests_requested_staff
-    ON support_call_requests(requested_staff_id);
-CREATE INDEX IF NOT EXISTS idx_support_call_requests_assigned_user
-    ON support_call_requests(assigned_user_id);
-CREATE INDEX IF NOT EXISTS idx_support_call_requests_schedule_date
-    ON support_call_requests(schedule_date);
-CREATE INDEX IF NOT EXISTS idx_support_call_requests_scheduled_start
-    ON support_call_requests(scheduled_start);
-CREATE INDEX IF NOT EXISTS idx_support_call_requests_status
-    ON support_call_requests(status);
+CREATE INDEX IF NOT EXISTS idx_support_calls_assigned_staff_time
+    ON support_calls(assigned_staff_id, scheduled_start_time);
+CREATE INDEX IF NOT EXISTS idx_support_calls_status
+    ON support_calls(status);
 
+-- This constraint is the database-level backstop for concurrent booking
+-- attempts. It reserves a slot while a request is pending approval as well.
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'support_calls_no_overlapping_slots'
+    ) THEN
+        ALTER TABLE support_calls
+        ADD CONSTRAINT support_calls_no_overlapping_slots
+        EXCLUDE USING gist (
+            assigned_staff_id WITH =,
+            tstzrange(scheduled_start_time, scheduled_end_time, '[)') WITH &&
+        ) WHERE (status IN ('pending', 'awaiting_assignee_approval', 'approved'));
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS support_schedule_audit_logs (
+    id BIGSERIAL PRIMARY KEY,
+    entity_type VARCHAR(40) NOT NULL,
+    entity_id BIGINT,
+    action VARCHAR(80) NOT NULL,
+    actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    details JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_support_schedule_audit_entity
+    ON support_schedule_audit_logs(entity_type, entity_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_support_schedule_audit_actor
+    ON support_schedule_audit_logs(actor_id, created_at DESC);
 
 
 CREATE TABLE otps (

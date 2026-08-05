@@ -20,17 +20,25 @@ func RegisterRoutes(r *gin.Engine, service *Service) {
 		group.PUT("/settings", controller.UpdateSettings)
 		group.GET("/availability", controller.ListAvailability)
 		group.GET("/schedule", controller.ListSchedule)
+		group.GET("/fairness", controller.ListFairnessStats)
+		group.GET("/audit-log", controller.ListAuditLog)
 		group.GET("/team", controller.ListSelectableStaff)
 		group.GET("/team/manage", controller.ListTeam)
 		group.PUT("/team/:userID", controller.SetTeamMember)
+		group.GET("/requests", controller.ListRequests)
+		group.POST("/requests", controller.CreateCall)
+		group.PUT("/requests/:id/decision", controller.DecideRequest)
+		group.PUT("/requests/:id/accept-alternative", controller.AcceptAlternative)
+		group.PUT("/requests/:id/cancel", controller.CancelRequest)
 		group.GET("/calls", controller.ListCalls)
-		group.POST("/calls", controller.CreateCall)
-		group.PUT("/calls/:id/approval", controller.ApproveSpecificCall)
 		group.PUT("/calls/:id/complete", controller.CompleteCall)
 		group.PUT("/calls/:id/reassign", controller.ReassignCall)
 		group.PUT("/schedule/:date/reassign", controller.ReassignDay)
-		group.GET("/unavailability", controller.ListUnavailability)
-		group.POST("/unavailability", controller.CreateUnavailability)
+		group.GET("/profile", controller.GetProfile)
+		group.GET("/profile/availability", controller.ListUnavailability)
+		group.POST("/profile/availability", controller.CreateUnavailability)
+		group.PUT("/profile/availability/:id", controller.UpdateAvailability)
+		group.DELETE("/profile/availability/:id", controller.DeleteAvailability)
 		group.POST("/maintenance", controller.RunMaintenance)
 	}
 }
@@ -75,7 +83,32 @@ func (cc *Controller) ListAvailability(c *gin.Context) {
 }
 
 func (cc *Controller) ListSchedule(c *gin.Context) {
-	result, err := cc.Service.ListSchedule(c.Query("from"), c.Query("to"))
+	actorID, ok := contextUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+	result, err := cc.Service.ListScheduleFor(actorID, c.Query("from"), c.Query("to"))
+	cc.respond(c, result, err)
+}
+
+func (cc *Controller) ListFairnessStats(c *gin.Context) {
+	actorID, ok := contextUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+	result, err := cc.Service.ListFairnessStats(actorID)
+	cc.respond(c, result, err)
+}
+
+func (cc *Controller) ListAuditLog(c *gin.Context) {
+	actorID, ok := contextUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+	result, err := cc.Service.ListAuditLog(actorID)
 	cc.respond(c, result, err)
 }
 func (cc *Controller) ListSelectableStaff(c *gin.Context) {
@@ -123,6 +156,16 @@ func (cc *Controller) ListCalls(c *gin.Context) {
 	cc.respond(c, result, err)
 }
 
+func (cc *Controller) ListRequests(c *gin.Context) {
+	actorID, ok := contextUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+	result, err := cc.Service.ListRequests(actorID, c.DefaultQuery("scope", "mine"))
+	cc.respond(c, result, err)
+}
+
 func (cc *Controller) CreateCall(c *gin.Context) {
 	actorID, ok := contextUserID(c)
 	if !ok {
@@ -142,17 +185,35 @@ func (cc *Controller) CreateCall(c *gin.Context) {
 	c.JSON(http.StatusCreated, call)
 }
 
-func (cc *Controller) ApproveSpecificCall(c *gin.Context) {
+func (cc *Controller) DecideRequest(c *gin.Context) {
 	actorID, callID, ok := actorAndCall(c)
 	if !ok {
 		return
 	}
-	var input SpecificApprovalInput
+	var input RequestDecisionInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	result, err := cc.Service.ApproveSpecificCall(actorID, callID, input)
+	result, err := cc.Service.DecideRequest(actorID, callID, input)
+	cc.respond(c, result, err)
+}
+
+func (cc *Controller) AcceptAlternative(c *gin.Context) {
+	actorID, requestID, ok := actorAndCall(c)
+	if !ok {
+		return
+	}
+	result, err := cc.Service.AcceptAlternative(actorID, requestID)
+	cc.respond(c, result, err)
+}
+
+func (cc *Controller) CancelRequest(c *gin.Context) {
+	actorID, requestID, ok := actorAndCall(c)
+	if !ok {
+		return
+	}
+	result, err := cc.Service.CancelRequest(actorID, requestID)
 	cc.respond(c, result, err)
 }
 
@@ -226,6 +287,54 @@ func (cc *Controller) CreateUnavailability(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, call)
+}
+
+func (cc *Controller) UpdateAvailability(c *gin.Context) {
+	actorID, ok := contextUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+	availabilityID, ok := pathID(c, "id")
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid availability ID"})
+		return
+	}
+	var input UpdateAvailabilityInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	result, err := cc.Service.UpdateAvailability(actorID, availabilityID, input)
+	cc.respond(c, result, err)
+}
+
+func (cc *Controller) DeleteAvailability(c *gin.Context) {
+	actorID, ok := contextUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+	availabilityID, ok := pathID(c, "id")
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid availability ID"})
+		return
+	}
+	if err := cc.Service.DeleteAvailability(actorID, availabilityID); err != nil {
+		respondError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (cc *Controller) GetProfile(c *gin.Context) {
+	actorID, ok := contextUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+	result, err := cc.Service.GetProfile(actorID)
+	cc.respond(c, result, err)
 }
 
 func (cc *Controller) RunMaintenance(c *gin.Context) {

@@ -92,7 +92,10 @@ func NewScheduler(
 	}
 
 	if supportScheduleRunner != nil {
-		_, err = c.AddFunc("*/5 * * * *", func() {
+		// The support-call scheduler maintains a rolling 14-calendar-day
+		// horizon. Startup seeds it, then this once-daily run adds only a
+		// genuinely missing future date and rechecks full-day availability.
+		_, err = c.AddFunc("0 0 * * *", func() {
 			if err := supportScheduleRunner.RunScheduledMaintenance(); err != nil && logger != nil {
 				logger.Printf("support schedule maintenance cron failed: %v", err)
 			}
