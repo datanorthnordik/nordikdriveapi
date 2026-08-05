@@ -84,7 +84,7 @@ func TestPostgresInitSQLDefinesSupportScheduleSchema(t *testing.T) {
 		"CREATE TABLE IF NOT EXISTS support_daily_assignments",
 		"CREATE TABLE IF NOT EXISTS support_staff_unavailabilities",
 		"CREATE TABLE IF NOT EXISTS support_call_requests",
-		"('Manager',      1)",
+		"('Manager',      0)",
 	} {
 		if !strings.Contains(sql, required) {
 			t.Fatalf("db-init/init.sql is missing %q", required)
