@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	_ "time/tzdata"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -80,6 +81,16 @@ func (s *Service) settings() (*SupportScheduleSettings, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	canonicalTimeZone := strings.TrimSpace(settings.TimeZone)
+	if _, err := time.LoadLocation(canonicalTimeZone); err != nil {
+		canonicalTimeZone = DefaultTimeZone
+	}
+	if settings.TimeZone != canonicalTimeZone {
+		settings.TimeZone = canonicalTimeZone
+		if err := s.DB.Model(&settings).Update("time_zone", settings.TimeZone).Error; err != nil {
+			return nil, err
+		}
 	}
 	return &settings, nil
 }
@@ -226,6 +237,9 @@ func scheduleDateFor(t time.Time, loc *time.Location) string { return t.In(loc).
 // next 14 calendar days. Repeated invocations only fill a genuinely missing
 // date, which makes startup and the daily job idempotent.
 func (s *Service) EnsureRollingSchedule() error {
+	if err := s.ensureInitialSupportTeam(); err != nil {
+		return err
+	}
 	settings, err := s.settings()
 	if err != nil {
 		return err
@@ -350,7 +364,11 @@ func (s *Service) isSupportAdmin(userID uint) (bool, error) {
 	var member SupportTeamMember
 	err = s.DB.Where("user_id = ? AND is_active = ?", userID, true).First(&member).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return false, nil
+		var configuredMembers int64
+		if countErr := s.DB.Model(&SupportTeamMember{}).Count(&configuredMembers).Error; countErr != nil {
+			return false, countErr
+		}
+		return configuredMembers == 0, nil
 	}
 	return err == nil, err
 }
@@ -376,6 +394,9 @@ func (s *Service) ListTeam(actorID uint) ([]SupportTeamMember, error) {
 }
 
 func (s *Service) ListSelectableStaff() ([]SupportStaffOption, error) {
+	if err := s.ensureInitialSupportTeam(); err != nil {
+		return nil, err
+	}
 	var members []SupportTeamMember
 	if err := s.DB.Preload("User").Where("is_active = ?", true).Order("user_id ASC").Find(&members).Error; err != nil {
 		return nil, err
@@ -387,6 +408,37 @@ func (s *Service) ListSelectableStaff() ([]SupportStaffOption, error) {
 		}
 	}
 	return result, nil
+}
+
+// ensureInitialSupportTeam makes the redesigned scheduler usable on an
+// existing deployment where no support-team membership has been configured
+// yet. Once any membership row exists, explicit manager configuration is
+// respected (including inactive members).
+func (s *Service) ensureInitialSupportTeam() error {
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		var configuredMembers int64
+		if err := tx.Model(&SupportTeamMember{}).Count(&configuredMembers).Error; err != nil {
+			return err
+		}
+		if configuredMembers > 0 {
+			return nil
+		}
+
+		var admins []SupportUser
+		if err := tx.Where("LOWER(role) = ?", strings.ToLower(RoleAdmin)).Find(&admins).Error; err != nil {
+			return err
+		}
+		for _, admin := range admins {
+			member := SupportTeamMember{UserID: admin.ID, IsActive: true}
+			if err := tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "user_id"}},
+				DoNothing: true,
+			}).Create(&member).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (s *Service) SetTeamMember(actorID, userID uint, active bool) (*SupportTeamMember, error) {

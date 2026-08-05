@@ -106,6 +106,46 @@ func TestPostgresInitSQLDefinesRedesignedSupportScheduleSchema(t *testing.T) {
 	}
 }
 
+func TestSettingsRepairsAnInvalidStoredTimeZone(t *testing.T) {
+	f := newScheduleFixture(t)
+	if _, err := f.service.settings(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.DB.Model(&SupportScheduleSettings{}).Where("id = ?", 1).Update("time_zone", "not/a-real-time-zone").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	settings, err := f.service.GetSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.TimeZone != DefaultTimeZone {
+		t.Fatalf("time zone = %q, want %q", settings.TimeZone, DefaultTimeZone)
+	}
+}
+
+func TestEmptySupportTeamBootstrapsExistingAdminsForSelection(t *testing.T) {
+	f := newScheduleFixture(t)
+	if err := f.service.DB.Exec("DELETE FROM support_team_members").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	staff, err := f.service.ListSelectableStaff()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(staff) != 2 || staff[0].FirstName != "Alex" || staff[1].FirstName != "Blair" {
+		t.Fatalf("selectable staff = %#v, want both existing Admin users", staff)
+	}
+	var members int64
+	if err := f.service.DB.Model(&SupportTeamMember{}).Where("is_active = ?", true).Count(&members).Error; err != nil {
+		t.Fatal(err)
+	}
+	if members != 2 {
+		t.Fatalf("active support-team members = %d, want 2", members)
+	}
+}
+
 func (f scheduleFixture) at(dayOffset, hour, minute int) time.Time {
 	date := f.now.AddDate(0, 0, dayOffset)
 	return time.Date(date.Year(), date.Month(), date.Day(), hour, minute, 0, 0, f.location)
