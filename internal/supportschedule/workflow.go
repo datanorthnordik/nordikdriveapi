@@ -89,6 +89,9 @@ func (s *Service) validateBookableDate(settings *SupportScheduleSettings, date s
 	if date < today || date > last {
 		return fmt.Errorf("%w: date is outside the 14-day booking horizon", ErrInvalidInput)
 	}
+	if !isSupportBusinessDay(date) {
+		return fmt.Errorf("%w: support is available Monday through Friday only", ErrUnavailable)
+	}
 	return nil
 }
 
@@ -526,6 +529,9 @@ func (s *Service) ReassignDay(actorID uint, date string, input ReassignInput) (*
 		return nil, err
 	}
 	date = scheduleDateFor(dateTime, loc)
+	if !isSupportBusinessDay(date) {
+		return nil, fmt.Errorf("%w: support is available Monday through Friday only", ErrUnavailable)
+	}
 	if unavailable, err := s.fullDayUnavailableTx(s.DB, input.UserID, date); err != nil {
 		return nil, err
 	} else if unavailable {
@@ -669,6 +675,9 @@ func (s *Service) validateAvailabilityInput(actorID uint, input CreateAvailabili
 			return nil, fmt.Errorf("%w: date is required for a full-day unavailability", ErrInvalidInput)
 		}
 		record.AvailabilityDate = scheduleDateFor(date, loc)
+		if !isSupportBusinessDay(record.AvailabilityDate) {
+			return nil, fmt.Errorf("%w: support availability can be updated Monday through Friday only", ErrUnavailable)
+		}
 		return record, nil
 	}
 	start, err := time.Parse(time.RFC3339, strings.TrimSpace(input.StartsAt))
@@ -683,6 +692,9 @@ func (s *Service) validateAvailabilityInput(actorID uint, input CreateAvailabili
 	date := scheduleDateFor(start, loc)
 	if scheduleDateFor(end.Add(-time.Nanosecond), loc) != date {
 		return nil, fmt.Errorf("%w: a partial unavailability must stay within one calendar day", ErrInvalidInput)
+	}
+	if !isSupportBusinessDay(date) {
+		return nil, fmt.Errorf("%w: support availability can be updated Monday through Friday only", ErrUnavailable)
 	}
 	if strings.TrimSpace(input.Date) != "" && strings.TrimSpace(input.Date) != date {
 		return nil, fmt.Errorf("%w: date must match starts_at", ErrInvalidInput)
@@ -713,6 +725,9 @@ func (s *Service) GetProfile(actorID uint) (*SupportProfile, error) {
 	if err := s.requireSupportAdmin(actorID); err != nil {
 		return nil, err
 	}
+	if err := s.EnsureRollingSchedule(); err != nil {
+		return nil, err
+	}
 	profile := &SupportProfile{}
 	if err := s.DB.Preload("PrimaryAssignee").Where("primary_assignee_id = ? AND assignment_date >= ?", actorID, s.today()).Order("assignment_date ASC").Find(&profile.Assignments).Error; err != nil {
 		return nil, err
@@ -730,6 +745,9 @@ func (s *Service) GetProfile(actorID uint) (*SupportProfile, error) {
 }
 
 func (s *Service) reassignUnavailableDay(date, reason string) error {
+	if !isSupportBusinessDay(date) {
+		return nil
+	}
 	err := s.DB.Transaction(func(tx *gorm.DB) error {
 		var assignment SupportAssignment
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("assignment_date = ?", date).First(&assignment).Error; err != nil {

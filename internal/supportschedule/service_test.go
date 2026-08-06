@@ -184,13 +184,78 @@ func TestInitialScheduleCreatesExactlyFourteenCalendarAssignmentsAndIsIdempotent
 		t.Fatalf("assignments = %d, want %d", got, want)
 	}
 	for index, assignment := range assignments {
-		if assignment.AssignmentDate != f.date(index) || assignment.PrimaryAssigneeID == nil {
+		if assignment.AssignmentDate != f.date(index) {
 			t.Fatalf("unexpected assignment at %d: %#v", index, assignment)
+		}
+		weekend := f.at(index, 12, 0).Weekday() == time.Saturday || f.at(index, 12, 0).Weekday() == time.Sunday
+		if weekend {
+			if assignment.PrimaryAssigneeID != nil || assignment.AssignmentSource != AssignmentSourceUncovered {
+				t.Fatalf("weekend assignment at %d = %#v, want uncovered with no assignee", index, assignment)
+			}
+			continue
+		}
+		if assignment.PrimaryAssigneeID == nil || assignment.AssignmentSource != AssignmentSourceAutomatic {
+			t.Fatalf("weekday assignment at %d = %#v, want automatic assignee", index, assignment)
 		}
 	}
 	var count int64
 	if err := f.service.DB.Model(&SupportAssignment{}).Count(&count).Error; err != nil || count != 14 {
 		t.Fatalf("assignment count = %d, err = %v", count, err)
+	}
+}
+
+func TestWeekendSupportIsUnavailable(t *testing.T) {
+	f := newScheduleFixture(t)
+	if err := f.service.EnsureRollingSchedule(); err != nil {
+		t.Fatal(err)
+	}
+	weekend := f.date(5) // The fixture starts on Monday.
+	if _, err := f.service.ListAvailability(weekend, 30, nil); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("weekend availability error = %v, want ErrUnavailable", err)
+	}
+	if _, err := f.service.CreateCall(f.survivor, CreateCallInput{
+		Subject: "Weekend call", ScheduledStart: f.at(5, 10, 0).Format(time.RFC3339), DurationMinutes: 30,
+	}); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("weekend call error = %v, want ErrUnavailable", err)
+	}
+	if _, err := f.service.ReassignDay(f.manager, weekend, ReassignInput{UserID: f.staffA, Reason: "coverage"}); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("weekend reassignment error = %v, want ErrUnavailable", err)
+	}
+	if _, err := f.service.CreateAvailability(f.staffA, CreateAvailabilityInput{Date: weekend, FullDayUnavailable: true, Reason: "away"}); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("weekend availability update error = %v, want ErrUnavailable", err)
+	}
+	weekendStart := f.at(5, 10, 0)
+	if _, err := f.service.CreateAvailability(f.staffA, CreateAvailabilityInput{
+		Date: weekend, StartsAt: weekendStart.Format(time.RFC3339), EndsAt: weekendStart.Add(30 * time.Minute).Format(time.RFC3339), Reason: "appointment",
+	}); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("weekend partial availability update error = %v, want ErrUnavailable", err)
+	}
+}
+
+func TestExistingWeekendAssignmentIsUncoveredDuringMaintenance(t *testing.T) {
+	f := newScheduleFixture(t)
+	if err := f.service.EnsureRollingSchedule(); err != nil {
+		t.Fatal(err)
+	}
+	weekend := f.date(5) // The fixture starts on Monday.
+	var assignment SupportAssignment
+	if err := f.service.DB.Where("assignment_date = ?", weekend).First(&assignment).Error; err != nil {
+		t.Fatal(err)
+	}
+	assignment.PrimaryAssigneeID = &f.staffA
+	assignment.AssignmentSource = AssignmentSourceManager
+	if err := f.service.DB.Save(&assignment).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.service.EnsureRollingSchedule(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.DB.Where("assignment_date = ?", weekend).First(&assignment).Error; err != nil {
+		t.Fatal(err)
+	}
+	if assignment.PrimaryAssigneeID != nil || assignment.AssignmentSource != AssignmentSourceUncovered {
+		t.Fatalf("normalized weekend assignment = %#v, want uncovered with no assignee", assignment)
 	}
 }
 

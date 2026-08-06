@@ -233,6 +233,16 @@ func windowForDate(settings *SupportScheduleSettings, date string) (time.Time, t
 
 func scheduleDateFor(t time.Time, loc *time.Location) string { return t.In(loc).Format("2006-01-02") }
 
+// isSupportBusinessDay deliberately works from the stored schedule date rather
+// than a time instant. Support is offered Monday through Friday only.
+func isSupportBusinessDay(date string) bool {
+	parsed, err := time.Parse("2006-01-02", strings.TrimSpace(date))
+	if err != nil {
+		return false
+	}
+	return parsed.Weekday() != time.Saturday && parsed.Weekday() != time.Sunday
+}
+
 // EnsureRollingSchedule creates exactly one assignment record for each of the
 // next 14 calendar days. Repeated invocations only fill a genuinely missing
 // date, which makes startup and the daily job idempotent.
@@ -262,18 +272,31 @@ func (s *Service) ensureAssignment(date string) error {
 	return s.DB.Transaction(func(tx *gorm.DB) error {
 		var existing SupportAssignment
 		if err := tx.Where("assignment_date = ?", date).First(&existing).Error; err == nil {
+			if !isSupportBusinessDay(date) && (existing.PrimaryAssigneeID != nil || existing.AssignmentSource != AssignmentSourceUncovered) {
+				existing.PrimaryAssigneeID = nil
+				existing.AssignmentSource = AssignmentSourceUncovered
+				existing.ReassignmentReason = "Weekend — support is unavailable"
+				if err := tx.Save(&existing).Error; err != nil {
+					return err
+				}
+				return s.recordAudit(tx, "assignment", &existing.ID, "weekend_assignment_uncovered", nil, map[string]interface{}{
+					"assignment_date": date,
+				})
+			}
 			return nil
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
 
 		assignment := SupportAssignment{AssignmentDate: date, AssignmentSource: AssignmentSourceUncovered}
-		assigneeID, err := s.pickFairStaffTx(tx, date, nil)
-		if err == nil {
-			assignment.PrimaryAssigneeID = &assigneeID
-			assignment.AssignmentSource = AssignmentSourceAutomatic
-		} else if !errors.Is(err, ErrNoSupportStaff) {
-			return err
+		if isSupportBusinessDay(date) {
+			assigneeID, err := s.pickFairStaffTx(tx, date, nil)
+			if err == nil {
+				assignment.PrimaryAssigneeID = &assigneeID
+				assignment.AssignmentSource = AssignmentSourceAutomatic
+			} else if !errors.Is(err, ErrNoSupportStaff) {
+				return err
+			}
 		}
 		result := tx.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "assignment_date"}},
@@ -625,6 +648,9 @@ func (s *Service) rebalanceUnavailableAssignments(reason string) error {
 		return err
 	}
 	for _, assignment := range assignments {
+		if !isSupportBusinessDay(assignment.AssignmentDate) {
+			continue
+		}
 		if assignment.PrimaryAssigneeID == nil {
 			if err := s.reassignUnavailableDay(assignment.AssignmentDate, reason); err != nil {
 				return err
