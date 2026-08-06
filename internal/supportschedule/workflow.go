@@ -3,6 +3,7 @@ package supportschedule
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -376,7 +377,11 @@ func (s *Service) CancelRequest(actorID, requestID uint) (*SupportCallRequest, e
 	if err != nil {
 		return nil, err
 	}
-	return s.request(resultID)
+	request, err := s.request(resultID)
+	if err == nil {
+		s.notifyRequest(request, "Support call request cancelled")
+	}
+	return request, err
 }
 
 func (s *Service) CompleteCall(actorID, callID uint, input CompleteCallInput) (*SupportCall, error) {
@@ -439,6 +444,9 @@ func (s *Service) CompleteCall(actorID, callID uint, input CompleteCallInput) (*
 	if err := s.DB.Preload("AssignedStaff").First(&call, resultID).Error; err != nil {
 		return nil, err
 	}
+	if request, requestErr := s.request(call.SupportRequestID); requestErr == nil {
+		s.notifyRequest(request, "Support call completed")
+	}
 	return &call, nil
 }
 
@@ -488,6 +496,9 @@ func (s *Service) ReassignCall(actorID, callID uint, input ReassignInput) (*Supp
 	var call SupportCall
 	if err := s.DB.Preload("AssignedStaff").First(&call, resultID).Error; err != nil {
 		return nil, err
+	}
+	if request, requestErr := s.request(call.SupportRequestID); requestErr == nil {
+		s.notifyRequest(request, "Support call reassigned by a manager")
 	}
 	return &call, nil
 }
@@ -544,9 +555,10 @@ func (s *Service) ReassignDay(actorID uint, date string, input ReassignInput) (*
 		return nil, err
 	}
 	var assignment SupportAssignment
-	if err := s.DB.Preload("PrimaryAssignee").First(&assignment, resultID).Error; err != nil {
+	if err := s.DB.Preload("PrimaryAssignee").Preload("PreviousAssignee").First(&assignment, resultID).Error; err != nil {
 		return nil, err
 	}
+	s.notifyAssignmentChange(date, input.Reason)
 	return &assignment, nil
 }
 
@@ -814,7 +826,8 @@ func (s *Service) markCallsForAvailability(availability *StaffAvailability, reas
 	if availability == nil || availability.FullDayUnavailable || availability.UnavailableStartTime == nil || availability.UnavailableEndTime == nil {
 		return nil
 	}
-	return s.DB.Transaction(func(tx *gorm.DB) error {
+	requestIDs := make([]uint, 0)
+	err := s.DB.Transaction(func(tx *gorm.DB) error {
 		var calls []SupportCall
 		if err := tx.Where("assigned_staff_id = ? AND scheduled_start_time < ? AND scheduled_end_time > ? AND status IN ?", availability.StaffID, *availability.UnavailableEndTime, *availability.UnavailableStartTime, reservingCallStatuses).Find(&calls).Error; err != nil {
 			return err
@@ -831,12 +844,22 @@ func (s *Service) markCallsForAvailability(availability *StaffAvailability, reas
 			if err := tx.Save(&request).Error; err != nil {
 				return err
 			}
+			requestIDs = append(requestIDs, request.ID)
 			if err := s.recordAudit(tx, "support_call", &call.ID, "call_needs_alternative_after_availability_change", &availability.StaffID, map[string]interface{}{"reason": reason}); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	for _, requestID := range requestIDs {
+		if request, requestErr := s.request(requestID); requestErr == nil {
+			s.notifyRequest(request, "Support call needs a new time")
+		}
+	}
+	return nil
 }
 
 func (s *Service) slotUnavailableTx(tx *gorm.DB, staffID uint, start, end time.Time, exceptCallID uint) bool {
@@ -937,33 +960,41 @@ func (s *Service) today() string {
 	return scheduleDateFor(s.now(), loc)
 }
 
-func (s *Service) notifyRequest(request *SupportCallRequest, subject string) {
+func (s *Service) notifyRequest(request *SupportCallRequest, event string) {
 	if s.Mailer == nil || request == nil {
 		return
 	}
-	recipients := make(map[string]struct{})
-	for _, user := range []*SupportUser{&request.RequestedBy, request.AssignedStaff, request.RequestedStaff} {
-		if user != nil && strings.TrimSpace(user.Email) != "" {
-			recipients[user.Email] = struct{}{}
+	recipients := make(map[string]supportCallEmailRecipient)
+	addRecipient := func(user *SupportUser, audience supportCallNotificationAudience) {
+		if user == nil {
+			return
+		}
+		email := strings.TrimSpace(user.Email)
+		if email == "" {
+			return
+		}
+		if _, alreadyAdded := recipients[email]; !alreadyAdded {
+			recipients[email] = supportCallEmailRecipient{Email: email, Name: supportUserName(user), Audience: audience}
 		}
 	}
+	addRecipient(&request.RequestedBy, supportCallRequesterAudience)
+	addRecipient(request.AssignedStaff, supportCallStaffAudience)
+	addRecipient(request.RequestedStaff, supportCallStaffAudience)
 	var managers []SupportUser
 	if err := s.DB.Where("LOWER(role) = ?", strings.ToLower(RoleManager)).Find(&managers).Error; err == nil {
 		for _, manager := range managers {
-			if strings.TrimSpace(manager.Email) != "" {
-				recipients[manager.Email] = struct{}{}
-			}
+			addRecipient(&manager, supportCallManagerAudience)
 		}
 	}
 	addresses := make([]string, 0, len(recipients))
 	for email := range recipients {
 		addresses = append(addresses, email)
 	}
-	if len(addresses) == 0 {
-		return
+	sort.Strings(addresses)
+	for _, email := range addresses {
+		recipient := recipients[email]
+		_ = s.Mailer.Send([]string{recipient.Email}, supportCallNotificationSubject(request, event), supportCallNotificationBody(request, recipient, event))
 	}
-	body := fmt.Sprintf("Support request #%d\nStatus: %s\nRequested date: %s\nSubject: %s", request.ID, request.Status, request.RequestedDate, request.Subject)
-	_ = s.Mailer.Send(addresses, subject, body)
 }
 
 func (s *Service) notifyAssignmentChange(date, reason string) {
@@ -974,28 +1005,36 @@ func (s *Service) notifyAssignmentChange(date, reason string) {
 	if err := s.DB.Preload("PrimaryAssignee").Preload("PreviousAssignee").Where("assignment_date = ?", date).First(&assignment).Error; err != nil {
 		return
 	}
-	recipients := make(map[string]struct{})
-	for _, user := range []*SupportUser{assignment.PrimaryAssignee, assignment.PreviousAssignee} {
-		if user != nil && strings.TrimSpace(user.Email) != "" {
-			recipients[user.Email] = struct{}{}
+	recipients := make(map[string]supportCallEmailRecipient)
+	addRecipient := func(user *SupportUser, audience supportCallNotificationAudience) {
+		if user == nil {
+			return
+		}
+		email := strings.TrimSpace(user.Email)
+		if email == "" {
+			return
+		}
+		if _, alreadyAdded := recipients[email]; !alreadyAdded {
+			recipients[email] = supportCallEmailRecipient{Email: email, Name: supportUserName(user), Audience: audience}
 		}
 	}
+	addRecipient(assignment.PrimaryAssignee, supportCallStaffAudience)
+	addRecipient(assignment.PreviousAssignee, supportCallStaffAudience)
 	var managers []SupportUser
 	if err := s.DB.Where("LOWER(role) = ?", strings.ToLower(RoleManager)).Find(&managers).Error; err == nil {
 		for _, manager := range managers {
-			if strings.TrimSpace(manager.Email) != "" {
-				recipients[manager.Email] = struct{}{}
-			}
+			addRecipient(&manager, supportCallManagerAudience)
 		}
-	}
-	if len(recipients) == 0 {
-		return
 	}
 	addresses := make([]string, 0, len(recipients))
 	for address := range recipients {
 		addresses = append(addresses, address)
 	}
-	_ = s.Mailer.Send(addresses, "Support schedule reassigned", fmt.Sprintf("The primary support assignment for %s changed. %s", date, reason))
+	sort.Strings(addresses)
+	for _, email := range addresses {
+		recipient := recipients[email]
+		_ = s.Mailer.Send([]string{recipient.Email}, "[Nordik Drive] Support schedule updated", supportScheduleAssignmentEmailBody(&assignment, recipient, reason))
+	}
 
 	// A full-day reassignment can move normal requests or require a direct
 	// request to choose another time. Notify each requester/assignee as well

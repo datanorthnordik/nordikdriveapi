@@ -22,6 +22,19 @@ type scheduleFixture struct {
 	survivor uint
 }
 
+type scheduleMail struct {
+	To      []string
+	Subject string
+	Body    string
+}
+
+type scheduleMailer struct{ sent []scheduleMail }
+
+func (m *scheduleMailer) Send(to []string, subject, body string) error {
+	m.sent = append(m.sent, scheduleMail{To: append([]string(nil), to...), Subject: subject, Body: body})
+	return nil
+}
+
 func newScheduleFixture(t *testing.T) scheduleFixture {
 	t.Helper()
 	location, err := time.LoadLocation(DefaultTimeZone)
@@ -284,6 +297,52 @@ func TestSpecificPersonApprovalCompletionAndFairnessUseActualDuration(t *testing
 	var audits int64
 	if err := f.service.DB.Model(&SupportScheduleAuditLog{}).Where("action = ?", "actual_duration_recorded").Count(&audits).Error; err != nil || audits != 1 {
 		t.Fatalf("duration audit count = %d, err = %v", audits, err)
+	}
+}
+
+func TestSupportCallCreationSendsDetailedRoleSpecificEmails(t *testing.T) {
+	f := newScheduleFixture(t)
+	if err := f.service.EnsureRollingSchedule(); err != nil {
+		t.Fatal(err)
+	}
+	mailer := &scheduleMailer{}
+	f.service.Mailer = mailer
+
+	request, err := f.service.CreateCall(f.survivor, CreateCallInput{
+		ScheduledStart:   f.at(1, 10, 0).Format(time.RFC3339),
+		DurationMinutes:  30,
+		Subject:          "Review a community record",
+		Message:          "Please help me confirm the submitted information.",
+		RequestedStaffID: &f.staffB,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mailer.sent) != 3 {
+		t.Fatalf("sent emails = %d, want requester, support admin, and manager", len(mailer.sent))
+	}
+
+	bodies := make(map[string]string, len(mailer.sent))
+	for _, email := range mailer.sent {
+		if len(email.To) != 1 {
+			t.Fatalf("email recipients = %#v, want one tailored recipient", email.To)
+		}
+		bodies[email.To[0]] = email.Body
+		if !strings.Contains(email.Subject, "Support call #") || !strings.Contains(email.Body, "Scheduled time") || !strings.Contains(email.Body, "What happens next") || !strings.Contains(email.Body, "Review a community record") {
+			t.Fatalf("email was not detailed enough: subject=%q body=%s", email.Subject, email.Body)
+		}
+	}
+	if !strings.Contains(bodies["sam@example.test"], "selected support person has been asked") {
+		t.Fatalf("requester email missing approval explanation: %s", bodies["sam@example.test"])
+	}
+	if !strings.Contains(bodies["blair@example.test"], "Approve it, decline it with a reason") {
+		t.Fatalf("support-admin email missing action: %s", bodies["blair@example.test"])
+	}
+	if !strings.Contains(bodies["manager@example.test"], "support-call schedule") {
+		t.Fatalf("manager email missing oversight instruction: %s", bodies["manager@example.test"])
+	}
+	if request.Status != RequestStatusAwaitingApproval {
+		t.Fatalf("request status = %q, want awaiting approval", request.Status)
 	}
 }
 
