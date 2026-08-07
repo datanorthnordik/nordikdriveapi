@@ -8,7 +8,9 @@ history; a client cannot create a daily assignment or book a conflicting slot.
 
 Fresh installations use the support-call tables in `db-init/init.sql`:
 
-- `support_assignments` — one primary assignee for every calendar date.
+- `support_assignments` — one primary assignee for each Monday–Friday support
+  date. Weekend rows remain uncovered so the 14-calendar-day horizon is still
+  visible, but Saturday and Sunday have no support coverage or bookable slots.
 - `support_staff_availabilities` — full-day and multiple partial-day records.
 - `support_call_requests` — requester intent, approval and alternatives.
 - `support_calls` — the reserved/scheduled call and actual completed time.
@@ -62,6 +64,7 @@ All routes are authenticated and start with `/api/support-schedule`.
 | Route | Purpose |
 | --- | --- |
 | `GET /availability` | Available slots for the date's primary assignee, or a selected support admin. |
+| `GET /calendar` | Booking-horizon calendar with the assigned support person, day state, available-slot count, call count, and role-appropriate day details. |
 | `GET/POST /requests` | User requests; `scope=staff` for the active admin queue and `scope=manage` for managers. |
 | `PUT /requests/:id/decision` | Assigned support admin approves, rejects, or proposes an alternative. |
 | `PUT /requests/:id/accept-alternative`, `PUT /requests/:id/cancel` | Requester actions. |

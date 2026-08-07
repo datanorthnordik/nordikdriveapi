@@ -44,7 +44,7 @@ func (s *Service) ListAvailability(date string, duration int, requestedStaffID *
 		return nil, err
 	}
 
-	response := &AvailabilityResponse{Date: date, Duration: duration, Slots: []AvailabilitySlot{}}
+	response := &AvailabilityResponse{Date: date, Duration: duration, Slots: []AvailabilitySlot{}, UnavailableSlots: []AvailabilitySlot{}}
 	var staffID uint
 	if requestedStaffID != nil {
 		if err := s.requireSupportAdmin(*requestedStaffID); err != nil {
@@ -75,7 +75,12 @@ func (s *Service) ListAvailability(date string, duration int, requestedStaffID *
 	}
 	for candidate := start; !candidate.Add(time.Duration(duration) * time.Minute).After(end); candidate = candidate.Add(time.Duration(duration) * time.Minute) {
 		candidateEnd := candidate.Add(time.Duration(duration) * time.Minute)
-		if !candidate.After(s.now().In(loc)) || s.slotUnavailableTx(s.DB, staffID, candidate, candidateEnd, 0) {
+		if !candidate.After(s.now().In(loc)) {
+			response.UnavailableSlots = append(response.UnavailableSlots, AvailabilitySlot{StartAt: candidate, EndAt: candidateEnd, UnavailableReason: "This time has already passed"})
+			continue
+		}
+		if s.slotUnavailableTx(s.DB, staffID, candidate, candidateEnd, 0) {
+			response.UnavailableSlots = append(response.UnavailableSlots, AvailabilitySlot{StartAt: candidate, EndAt: candidateEnd, UnavailableReason: "Unavailable or already booked"})
 			continue
 		}
 		response.Slots = append(response.Slots, AvailabilitySlot{StartAt: candidate, EndAt: candidateEnd})
@@ -83,11 +88,178 @@ func (s *Service) ListAvailability(date string, duration int, requestedStaffID *
 	return response, nil
 }
 
+// ListCalendar returns the current booking horizon in a shape that lets the
+// client accurately disable impossible days before a user tries to select one.
+// Slot availability is still checked again during CreateCall to prevent races.
+func (s *Service) ListCalendar(actorID uint, duration int, requestedStaffID *uint) (*CalendarResponse, error) {
+	if _, err := s.user(actorID); err != nil {
+		return nil, err
+	}
+	settings, err := s.settings()
+	if err != nil {
+		return nil, err
+	}
+	if duration == 0 {
+		duration = settings.DefaultDurationMinutes
+	}
+	if !containsDuration(durationList(settings), duration) {
+		return nil, fmt.Errorf("%w: duration is not enabled", ErrInvalidInput)
+	}
+	loc, err := s.location(settings)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.EnsureRollingSchedule(); err != nil {
+		return nil, err
+	}
+
+	manager, err := s.isManager(actorID)
+	if err != nil {
+		return nil, err
+	}
+	supportAdmin, err := s.isSupportAdmin(actorID)
+	if err != nil {
+		return nil, err
+	}
+
+	var requestedStaff *SupportUser
+	if requestedStaffID != nil {
+		if err := s.requireSupportAdmin(*requestedStaffID); err != nil {
+			return nil, fmt.Errorf("%w: requested support person is unavailable", ErrInvalidInput)
+		}
+		requestedStaff, err = s.user(*requestedStaffID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	from := scheduleDateFor(s.now(), loc)
+	to := scheduleDateFor(s.now().In(loc).AddDate(0, 0, DefaultHorizonDays-1), loc)
+	var assignments []SupportAssignment
+	if err := s.DB.Preload("PrimaryAssignee").Where("assignment_date >= ? AND assignment_date <= ?", from, to).Find(&assignments).Error; err != nil {
+		return nil, err
+	}
+	assignmentByDate := make(map[string]SupportAssignment, len(assignments))
+	for _, assignment := range assignments {
+		assignmentByDate[assignment.AssignmentDate] = assignment
+	}
+
+	var availability []StaffAvailability
+	if err := s.DB.Preload("Staff").Where("availability_date >= ? AND availability_date <= ?", from, to).Find(&availability).Error; err != nil {
+		return nil, err
+	}
+	availabilityByStaffDate := make(map[string][]StaffAvailability)
+	for _, record := range availability {
+		key := fmt.Sprintf("%d:%s", record.StaffID, record.AvailabilityDate)
+		availabilityByStaffDate[key] = append(availabilityByStaffDate[key], record)
+	}
+
+	start, _, err := windowForDate(settings, from)
+	if err != nil {
+		return nil, err
+	}
+	_, lastEnd, err := windowForDate(settings, to)
+	if err != nil {
+		return nil, err
+	}
+	var calls []SupportCall
+	if err := s.DB.Preload("AssignedStaff").Where("scheduled_start_time >= ? AND scheduled_start_time < ? AND status IN ?", start, lastEnd, reservingCallStatuses).Find(&calls).Error; err != nil {
+		return nil, err
+	}
+	callsByStaffDate := make(map[string][]SupportCall)
+	for _, call := range calls {
+		if call.AssignedStaffID == nil {
+			continue
+		}
+		date := scheduleDateFor(call.ScheduledStartTime, loc)
+		key := fmt.Sprintf("%d:%s", *call.AssignedStaffID, date)
+		callsByStaffDate[key] = append(callsByStaffDate[key], call)
+	}
+
+	response := &CalendarResponse{TimeZone: settings.TimeZone, DurationMinutes: duration, Days: make([]CalendarDay, 0, DefaultHorizonDays)}
+	for offset := 0; offset < DefaultHorizonDays; offset++ {
+		date := scheduleDateFor(s.now().In(loc).AddDate(0, 0, offset), loc)
+		day := CalendarDay{Date: date, Status: "uncovered", StatusMessage: "No support person is scheduled"}
+		if !isSupportBusinessDay(date) {
+			day.Status, day.StatusMessage = "weekend", "No support on weekends"
+			response.Days = append(response.Days, day)
+			continue
+		}
+
+		assignment := assignmentByDate[date]
+		staff := assignment.PrimaryAssignee
+		staffID := assignment.PrimaryAssigneeID
+		if requestedStaffID != nil {
+			staff, staffID = requestedStaff, requestedStaffID
+		}
+		if staffID == nil || staff == nil {
+			response.Days = append(response.Days, day)
+			continue
+		}
+		day.AssignedStaff = staff
+		day.IsAssignedToViewer = *staffID == actorID
+		key := fmt.Sprintf("%d:%s", *staffID, date)
+		periods := availabilityByStaffDate[key]
+		day.ScheduledCallCount = len(callsByStaffDate[key])
+		if manager || (supportAdmin && *staffID == actorID) {
+			day.UnavailablePeriods = periods
+			day.ScheduledCalls = callsByStaffDate[key]
+		}
+
+		fullDayUnavailable := false
+		partialUnavailable := false
+		for _, period := range periods {
+			if period.FullDayUnavailable {
+				fullDayUnavailable = true
+			} else {
+				partialUnavailable = true
+			}
+		}
+		if fullDayUnavailable {
+			day.Status, day.StatusMessage = "fully_unavailable", "The assigned support person is unavailable"
+			response.Days = append(response.Days, day)
+			continue
+		}
+
+		windowStart, windowEnd, err := windowForDate(settings, date)
+		if err != nil {
+			return nil, err
+		}
+		for candidate := windowStart; !candidate.Add(time.Duration(duration) * time.Minute).After(windowEnd); candidate = candidate.Add(time.Duration(duration) * time.Minute) {
+			candidateEnd := candidate.Add(time.Duration(duration) * time.Minute)
+			if candidate.After(s.now().In(loc)) && !s.slotUnavailableTx(s.DB, *staffID, candidate, candidateEnd, 0) {
+				day.AvailableSlotCount++
+			}
+		}
+		day.IsBookable = day.AvailableSlotCount > 0
+		switch {
+		case !day.IsBookable:
+			day.Status, day.StatusMessage = "fully_booked", "No times remain"
+		case partialUnavailable:
+			day.Status, day.StatusMessage = "partial_availability", fmt.Sprintf("%d available time%s; partial availability", day.AvailableSlotCount, plural(day.AvailableSlotCount))
+		default:
+			day.Status, day.StatusMessage = "available", fmt.Sprintf("%d available time%s", day.AvailableSlotCount, plural(day.AvailableSlotCount))
+		}
+		response.Days = append(response.Days, day)
+	}
+	return response, nil
+}
+
+func plural(count int) string {
+	if count == 1 {
+		return ""
+	}
+	return "s"
+}
+
 func (s *Service) validateBookableDate(settings *SupportScheduleSettings, date string, loc *time.Location) error {
 	today := scheduleDateFor(s.now(), loc)
 	last := scheduleDateFor(s.now().In(loc).AddDate(0, 0, DefaultHorizonDays-1), loc)
 	if date < today || date > last {
 		return fmt.Errorf("%w: date is outside the 14-day booking horizon", ErrInvalidInput)
+	}
+	if !isSupportBusinessDay(date) {
+		return fmt.Errorf("%w: support is available Monday through Friday only", ErrUnavailable)
 	}
 	return nil
 }
@@ -526,6 +698,9 @@ func (s *Service) ReassignDay(actorID uint, date string, input ReassignInput) (*
 		return nil, err
 	}
 	date = scheduleDateFor(dateTime, loc)
+	if !isSupportBusinessDay(date) {
+		return nil, fmt.Errorf("%w: support is available Monday through Friday only", ErrUnavailable)
+	}
 	if unavailable, err := s.fullDayUnavailableTx(s.DB, input.UserID, date); err != nil {
 		return nil, err
 	} else if unavailable {
@@ -669,6 +844,9 @@ func (s *Service) validateAvailabilityInput(actorID uint, input CreateAvailabili
 			return nil, fmt.Errorf("%w: date is required for a full-day unavailability", ErrInvalidInput)
 		}
 		record.AvailabilityDate = scheduleDateFor(date, loc)
+		if !isSupportBusinessDay(record.AvailabilityDate) {
+			return nil, fmt.Errorf("%w: support availability can be updated Monday through Friday only", ErrUnavailable)
+		}
 		return record, nil
 	}
 	start, err := time.Parse(time.RFC3339, strings.TrimSpace(input.StartsAt))
@@ -683,6 +861,9 @@ func (s *Service) validateAvailabilityInput(actorID uint, input CreateAvailabili
 	date := scheduleDateFor(start, loc)
 	if scheduleDateFor(end.Add(-time.Nanosecond), loc) != date {
 		return nil, fmt.Errorf("%w: a partial unavailability must stay within one calendar day", ErrInvalidInput)
+	}
+	if !isSupportBusinessDay(date) {
+		return nil, fmt.Errorf("%w: support availability can be updated Monday through Friday only", ErrUnavailable)
 	}
 	if strings.TrimSpace(input.Date) != "" && strings.TrimSpace(input.Date) != date {
 		return nil, fmt.Errorf("%w: date must match starts_at", ErrInvalidInput)
@@ -713,6 +894,9 @@ func (s *Service) GetProfile(actorID uint) (*SupportProfile, error) {
 	if err := s.requireSupportAdmin(actorID); err != nil {
 		return nil, err
 	}
+	if err := s.EnsureRollingSchedule(); err != nil {
+		return nil, err
+	}
 	profile := &SupportProfile{}
 	if err := s.DB.Preload("PrimaryAssignee").Where("primary_assignee_id = ? AND assignment_date >= ?", actorID, s.today()).Order("assignment_date ASC").Find(&profile.Assignments).Error; err != nil {
 		return nil, err
@@ -730,6 +914,9 @@ func (s *Service) GetProfile(actorID uint) (*SupportProfile, error) {
 }
 
 func (s *Service) reassignUnavailableDay(date, reason string) error {
+	if !isSupportBusinessDay(date) {
+		return nil
+	}
 	err := s.DB.Transaction(func(tx *gorm.DB) error {
 		var assignment SupportAssignment
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("assignment_date = ?", date).First(&assignment).Error; err != nil {
