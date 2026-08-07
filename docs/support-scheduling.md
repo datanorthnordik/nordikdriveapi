@@ -64,6 +64,7 @@ All routes are authenticated and start with `/api/support-schedule`.
 | Route | Purpose |
 | --- | --- |
 | `GET /availability` | Available slots for the date's primary assignee, or a selected support admin. |
+| `GET /calendar` | Booking-horizon calendar with the assigned support person, day state, available-slot count, call count, and role-appropriate day details. |
 | `GET/POST /requests` | User requests; `scope=staff` for the active admin queue and `scope=manage` for managers. |
 | `PUT /requests/:id/decision` | Assigned support admin approves, rejects, or proposes an alternative. |
 | `PUT /requests/:id/accept-alternative`, `PUT /requests/:id/cancel` | Requester actions. |

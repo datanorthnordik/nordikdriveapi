@@ -320,6 +320,45 @@ func TestPartialAvailabilityAndPendingRequestReserveSlots(t *testing.T) {
 	}
 }
 
+func TestCalendarSummarizesDayAvailabilityAndCalls(t *testing.T) {
+	f := newScheduleFixture(t)
+	if err := f.service.EnsureRollingSchedule(); err != nil {
+		t.Fatal(err)
+	}
+	date := f.date(1)
+	if _, err := f.service.ReassignDay(f.manager, date, ReassignInput{UserID: f.staffA, Reason: "fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.service.CreateAvailability(f.staffA, CreateAvailabilityInput{
+		StartsAt: f.at(1, 9, 0).Format(time.RFC3339), EndsAt: f.at(1, 10, 0).Format(time.RFC3339), Reason: "appointment",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.service.CreateCall(f.survivor, CreateCallInput{ScheduledStart: f.at(1, 10, 0).Format(time.RFC3339), DurationMinutes: 30, Subject: "Calendar test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	calendar, err := f.service.ListCalendar(f.manager, 30, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selected, weekend *CalendarDay
+	for index := range calendar.Days {
+		if calendar.Days[index].Date == date {
+			selected = &calendar.Days[index]
+		}
+		if calendar.Days[index].Date == f.date(5) {
+			weekend = &calendar.Days[index]
+		}
+	}
+	if selected == nil || selected.AssignedStaff == nil || selected.AssignedStaff.ID != f.staffA || selected.Status != "partial_availability" || !selected.IsBookable || selected.ScheduledCallCount != 1 || len(selected.UnavailablePeriods) != 1 || len(selected.ScheduledCalls) != 1 {
+		t.Fatalf("calendar day = %#v, want assigned partial-availability day with one call", selected)
+	}
+	if weekend == nil || weekend.Status != "weekend" || weekend.IsBookable {
+		t.Fatalf("weekend calendar day = %#v, want unbookable weekend", weekend)
+	}
+}
+
 func TestSpecificPersonApprovalCompletionAndFairnessUseActualDuration(t *testing.T) {
 	f := newScheduleFixture(t)
 	if err := f.service.EnsureRollingSchedule(); err != nil {

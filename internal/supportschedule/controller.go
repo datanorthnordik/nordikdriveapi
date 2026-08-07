@@ -19,6 +19,7 @@ func RegisterRoutes(r *gin.Engine, service *Service) {
 		group.GET("/settings", controller.GetSettings)
 		group.PUT("/settings", controller.UpdateSettings)
 		group.GET("/availability", controller.ListAvailability)
+		group.GET("/calendar", controller.ListCalendar)
 		group.GET("/schedule", controller.ListSchedule)
 		group.GET("/fairness", controller.ListFairnessStats)
 		group.GET("/audit-log", controller.ListAuditLog)
@@ -79,6 +80,26 @@ func (cc *Controller) ListAvailability(c *gin.Context) {
 		return
 	}
 	result, err := cc.Service.ListAvailability(c.Query("date"), duration, staffID)
+	cc.respond(c, result, err)
+}
+
+func (cc *Controller) ListCalendar(c *gin.Context) {
+	actorID, ok := contextUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+	duration, err := optionalInt(c.Query("duration_minutes"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "duration_minutes must be a positive integer"})
+		return
+	}
+	staffID, err := optionalUint(c.Query("staff_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "staff_id must be a positive integer"})
+		return
+	}
+	result, err := cc.Service.ListCalendar(actorID, duration, staffID)
 	cc.respond(c, result, err)
 }
 

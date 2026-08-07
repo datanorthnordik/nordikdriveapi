@@ -197,15 +197,40 @@ type UpdateSettingsInput struct {
 }
 
 type AvailabilitySlot struct {
-	StartAt time.Time `json:"start_at"`
-	EndAt   time.Time `json:"end_at"`
+	StartAt           time.Time `json:"start_at"`
+	EndAt             time.Time `json:"end_at"`
+	UnavailableReason string    `json:"unavailable_reason,omitempty"`
 }
 
 type AvailabilityResponse struct {
-	Date          string             `json:"date"`
-	Duration      int                `json:"duration_minutes"`
-	AssignedStaff *SupportUser       `json:"assigned_staff,omitempty"`
-	Slots         []AvailabilitySlot `json:"slots"`
+	Date             string             `json:"date"`
+	Duration         int                `json:"duration_minutes"`
+	AssignedStaff    *SupportUser       `json:"assigned_staff,omitempty"`
+	Slots            []AvailabilitySlot `json:"slots"`
+	UnavailableSlots []AvailabilitySlot `json:"unavailable_slots"`
+}
+
+// CalendarDay is a compact, server-authoritative summary used to render the
+// scheduling calendar. It deliberately exposes only counts to regular users;
+// availability periods and calls are included only when the viewer is allowed
+// to inspect them.
+type CalendarDay struct {
+	Date               string              `json:"date"`
+	AssignedStaff      *SupportUser        `json:"assigned_staff,omitempty"`
+	Status             string              `json:"status"`
+	StatusMessage      string              `json:"status_message"`
+	IsBookable         bool                `json:"is_bookable"`
+	AvailableSlotCount int                 `json:"available_slot_count"`
+	ScheduledCallCount int                 `json:"scheduled_call_count"`
+	IsAssignedToViewer bool                `json:"is_assigned_to_viewer"`
+	UnavailablePeriods []StaffAvailability `json:"unavailable_periods,omitempty"`
+	ScheduledCalls     []SupportCall       `json:"scheduled_calls,omitempty"`
+}
+
+type CalendarResponse struct {
+	TimeZone        string        `json:"time_zone"`
+	DurationMinutes int           `json:"duration_minutes"`
+	Days            []CalendarDay `json:"days"`
 }
 
 // CreateCallInput is retained as the API input name. RequestedStaffID selects
