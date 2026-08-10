@@ -249,19 +249,29 @@ func TestDataConfigController_GetConfig_ModifiedUsesSourceFileDataConfig(t *test
 	}
 
 	fields, ok := cfgBody["fields"].([]any)
-	if !ok {
-		t.Fatalf("config.fields missing or invalid: %#v", cfgBody["fields"])
+	if !ok || len(fields) != 1 {
+		t.Fatalf("root config fields missing or invalid: %#v", cfgBody["fields"])
 	}
-	if len(fields) != 1 {
-		t.Fatalf("config.fields length = %d want 1", len(fields))
+	rootField, ok := fields[0].(map[string]any)
+	if !ok || rootField["key"] != "id" || rootField["additional_field"] != true {
+		t.Fatalf("root additional field should be returned, got %#v", fields[0])
 	}
 
-	field, ok := fields[0].(map[string]any)
+	sourceFile, ok := cfgBody["source_file"].(map[string]any)
 	if !ok {
-		t.Fatalf("config.fields[0] invalid: %#v", fields[0])
+		t.Fatalf("source_file missing or invalid: %#v", cfgBody["source_file"])
 	}
-	if field["key"] != "student_name" {
-		t.Fatalf("config.fields[0].key = %v", field["key"])
+	sourceConfig, ok := sourceFile["data_config"].(map[string]any)
+	if !ok {
+		t.Fatalf("source_file.data_config missing or invalid: %#v", sourceFile["data_config"])
+	}
+	sourceFields, ok := sourceConfig["fields"].([]any)
+	if !ok || len(sourceFields) != 2 {
+		t.Fatalf("source-file fields missing or invalid: %#v", sourceConfig["fields"])
+	}
+	additionalField, ok := sourceFields[1].(map[string]any)
+	if !ok || additionalField["key"] != "nia_comments" || additionalField["additional_field"] != true {
+		t.Fatalf("source-file additional field should be returned, got %#v", sourceFields[1])
 	}
 }
 

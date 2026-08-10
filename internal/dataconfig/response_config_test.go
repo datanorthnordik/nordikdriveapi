@@ -15,7 +15,7 @@ func TestConfigForResponse_LeavesLegacyConfigUnchanged(t *testing.T) {
 	assertJSONEqual(t, got, raw)
 }
 
-func TestConfigForResponse_FiltersAdditionalFieldsFromCurrentConfig(t *testing.T) {
+func TestConfigForResponse_ReturnsAdditionalFieldsFromCurrentConfig(t *testing.T) {
 	raw := datatypes.JSON([]byte(`{
 		"fields": [
 			{"key":"name","label":"Name","additional_field":false},
@@ -26,16 +26,10 @@ func TestConfigForResponse_FiltersAdditionalFieldsFromCurrentConfig(t *testing.T
 
 	got := configForResponse(raw)
 
-	want := datatypes.JSON([]byte(`{
-		"fields": [
-			{"key":"name","label":"Name","additional_field":false},
-			{"key":"school","label":"School"}
-		]
-	}`))
-	assertJSONEqual(t, got, want)
+	assertJSONEqual(t, got, raw)
 }
 
-func TestConfigForResponse_PrefersSourceFileDataConfigAndFiltersAdditionalFields(t *testing.T) {
+func TestConfigForResponse_ReturnsRootAndSourceFileDataConfig(t *testing.T) {
 	raw := datatypes.JSON([]byte(`{
 		"fields": [
 			{"key":"derived","additional_field":true}
@@ -53,16 +47,10 @@ func TestConfigForResponse_PrefersSourceFileDataConfigAndFiltersAdditionalFields
 
 	got := configForResponse(raw)
 
-	want := datatypes.JSON([]byte(`{
-		"fields": [
-			{"key":"student_name","label":"Student Name","additional_field":false},
-			{"key":"school","label":"School","additional_field":"false"}
-		]
-	}`))
-	assertJSONEqual(t, got, want)
+	assertJSONEqual(t, got, raw)
 }
 
-func TestConfigForResponse_PrefersSourceFileFieldsWhenSourceConfigIsInline(t *testing.T) {
+func TestConfigForResponse_ReturnsInlineSourceFileFields(t *testing.T) {
 	raw := datatypes.JSON([]byte(`{
 		"source_file": {
 			"fields": [
@@ -77,15 +65,10 @@ func TestConfigForResponse_PrefersSourceFileFieldsWhenSourceConfigIsInline(t *te
 
 	got := configForResponse(raw)
 
-	want := datatypes.JSON([]byte(`{
-		"fields": [
-			{"key":"community","additional_field":false}
-		]
-	}`))
-	assertJSONEqual(t, got, want)
+	assertJSONEqual(t, got, raw)
 }
 
-func TestConfigForResponse_SupportsCamelCaseConfigKeys(t *testing.T) {
+func TestConfigForResponse_ReturnsCamelCaseAdditionalFields(t *testing.T) {
 	raw := datatypes.JSON([]byte(`{
 		"sourceFile": {
 			"dataConfig": {
@@ -99,12 +82,7 @@ func TestConfigForResponse_SupportsCamelCaseConfigKeys(t *testing.T) {
 
 	got := configForResponse(raw)
 
-	want := datatypes.JSON([]byte(`{
-		"fields": [
-			{"key":"community","additionalField":false}
-		]
-	}`))
-	assertJSONEqual(t, got, want)
+	assertJSONEqual(t, got, raw)
 }
 
 func assertJSONEqual(t *testing.T, got datatypes.JSON, want datatypes.JSON) {
