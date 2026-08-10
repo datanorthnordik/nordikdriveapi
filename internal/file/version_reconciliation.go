@@ -182,8 +182,9 @@ type rowMatchFeatures struct {
 }
 
 type exactMatchTier struct {
-	Name   string
-	Fields []string
+	Name                string
+	Fields              []string
+	RequiredEmptyFields []string
 }
 
 type rowMatchProposal struct {
@@ -1082,6 +1083,12 @@ func buildVersionReconciliationPlan(sourceRows []versionRowDescriptor, targetRow
 		{Name: "exact_name_community", Fields: []string{"lastname", "firstname", "community"}},
 		{Name: "exact_name_middle", Fields: []string{"lastname", "firstname", "middlename"}},
 		{Name: "exact_name", Fields: []string{"lastname", "firstname"}},
+		// Some files supply a single, unique name column rather than separate first
+		// and last name columns. Match it directly only when the counterpart name
+		// field is absent on both rows; exactMatchLinks still requires a unique
+		// source/target pair for the value.
+		{Name: "exact_firstname_only", Fields: []string{"firstname"}, RequiredEmptyFields: []string{"lastname"}},
+		{Name: "exact_lastname_only", Fields: []string{"lastname"}, RequiredEmptyFields: []string{"firstname"}},
 	}
 
 	for _, tier := range exactTiers {
@@ -1196,7 +1203,7 @@ func exactMatchLinks(sourceRows []versionRowDescriptor, targetRows []versionRowD
 		if sourceUsed[source.ID] {
 			continue
 		}
-		key := buildExactMatchKey(source.Features, tier.Fields)
+		key := buildExactMatchKeyForTier(source.Features, tier)
 		if key == "" {
 			continue
 		}
@@ -1206,7 +1213,7 @@ func exactMatchLinks(sourceRows []versionRowDescriptor, targetRows []versionRowD
 		if targetUsed[target.ID] {
 			continue
 		}
-		key := buildExactMatchKey(target.Features, tier.Fields)
+		key := buildExactMatchKeyForTier(target.Features, tier)
 		if key == "" {
 			continue
 		}
@@ -1231,6 +1238,15 @@ func exactMatchLinks(sourceRows []versionRowDescriptor, targetRows []versionRowD
 		return links[i].SourceID < links[j].SourceID
 	})
 	return links
+}
+
+func buildExactMatchKeyForTier(features rowMatchFeatures, tier exactMatchTier) string {
+	for _, field := range tier.RequiredEmptyFields {
+		if strings.TrimSpace(features.LogicalFields[field]) != "" {
+			return ""
+		}
+	}
+	return buildExactMatchKey(features, tier.Fields)
 }
 
 func buildExactMatchKey(features rowMatchFeatures, logicalFields []string) string {
