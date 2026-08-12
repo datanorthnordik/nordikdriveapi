@@ -6,10 +6,31 @@ import (
 	"time"
 )
 
-// MeetingProvider is intentionally narrow so Zoom can be connected later
-// without changing the booking, fairness, or scheduling code.
+type MeetingInput struct {
+	RequestID uint
+	HostEmail string
+	Topic     string
+	Agenda    string
+	StartTime time.Time
+	EndTime   time.Time
+	TimeZone  string
+}
+
+type MeetingDetails struct {
+	ExternalID string
+	HostEmail  string
+	JoinURL    string
+	Passcode   string
+}
+
+// MeetingProvider keeps the scheduling workflow independent from the Zoom
+// transport while supporting the complete meeting lifecycle.
 type MeetingProvider interface {
-	CreateMeeting(ctx context.Context, request SupportCallRequest) (externalID, joinURL string, err error)
+	Enabled() bool
+	CreateMeeting(ctx context.Context, input MeetingInput) (MeetingDetails, error)
+	UpdateMeeting(ctx context.Context, externalID string, input MeetingInput) error
+	DeleteMeeting(ctx context.Context, externalID string) error
+	StartURL(ctx context.Context, externalID string) (string, error)
 }
 
 // HRAvailabilityProvider is the extension point for a future SageHR sync.
@@ -19,11 +40,26 @@ type HRAvailabilityProvider interface {
 }
 
 var ErrIntegrationNotConfigured = errors.New("integration is not configured")
+var ErrMeetingNotFound = errors.New("meeting does not exist")
 
 type DisabledMeetingProvider struct{}
 
-func (DisabledMeetingProvider) CreateMeeting(context.Context, SupportCallRequest) (string, string, error) {
-	return "", "", ErrIntegrationNotConfigured
+func (DisabledMeetingProvider) Enabled() bool { return false }
+
+func (DisabledMeetingProvider) CreateMeeting(context.Context, MeetingInput) (MeetingDetails, error) {
+	return MeetingDetails{}, ErrIntegrationNotConfigured
+}
+
+func (DisabledMeetingProvider) UpdateMeeting(context.Context, string, MeetingInput) error {
+	return ErrIntegrationNotConfigured
+}
+
+func (DisabledMeetingProvider) DeleteMeeting(context.Context, string) error {
+	return ErrIntegrationNotConfigured
+}
+
+func (DisabledMeetingProvider) StartURL(context.Context, string) (string, error) {
+	return "", ErrIntegrationNotConfigured
 }
 
 type DisabledHRAvailabilityProvider struct{}

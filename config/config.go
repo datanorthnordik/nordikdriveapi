@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -19,6 +20,10 @@ type Config struct {
 	AppTimeZone                      string
 	HonourJobSecret                  string
 	SupportRequestNotificationEmails []string
+	ZoomEnabled                      bool
+	ZoomAccountID                    string
+	ZoomClientID                     string
+	ZoomClientSecret                 string
 }
 
 func LoadConfig() Config {
@@ -48,7 +53,16 @@ func LoadConfig() Config {
 		AppTimeZone:                      appTimeZone,
 		HonourJobSecret:                  os.Getenv("HONOUR_JOB_SECRET"),
 		SupportRequestNotificationEmails: supportEmails,
+		ZoomEnabled:                      boolEnv("ZOOM_ENABLED"),
+		ZoomAccountID:                    strings.TrimSpace(os.Getenv("ZOOM_ACCOUNT_ID")),
+		ZoomClientID:                     strings.TrimSpace(os.Getenv("ZOOM_CLIENT_ID")),
+		ZoomClientSecret:                 strings.TrimSpace(os.Getenv("ZOOM_CLIENT_SECRET")),
 	}
+}
+
+func boolEnv(name string) bool {
+	value, err := strconv.ParseBool(strings.TrimSpace(os.Getenv(name)))
+	return err == nil && value
 }
 
 func splitCommaSeparatedEnv(value string) []string {

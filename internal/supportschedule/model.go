@@ -34,6 +34,12 @@ const (
 	DefaultEndTime        = "16:30"
 	DefaultHorizonDays    = 14
 	DefaultDurationMinute = 30
+
+	ZoomSyncNotRequested = "not_requested"
+	ZoomSyncPending      = "pending"
+	ZoomSyncSynced       = "synced"
+	ZoomSyncFailed       = "failed"
+	ZoomSyncDeleted      = "deleted"
 )
 
 // Compatibility aliases keep existing API clients using the previous status
@@ -158,6 +164,13 @@ type SupportCall struct {
 	ActualDurationMinutes int          `gorm:"column:actual_duration_minutes;not null;default:0" json:"actual_duration_minutes"`
 	Status                string       `gorm:"type:varchar(40);not null;index" json:"status"`
 	InternalNotes         string       `gorm:"type:text;not null;default:''" json:"internal_notes"`
+	ZoomMeetingID         string       `gorm:"column:zoom_meeting_id;type:varchar(32);not null;default:''" json:"zoom_meeting_id,omitempty"`
+	ZoomJoinURL           string       `gorm:"column:zoom_join_url;type:text;not null;default:''" json:"zoom_join_url,omitempty"`
+	ZoomPasscode          string       `gorm:"column:zoom_passcode;type:varchar(16);not null;default:''" json:"zoom_passcode,omitempty"`
+	ZoomHostEmail         string       `gorm:"column:zoom_host_email;type:varchar(255);not null;default:''" json:"zoom_host_email,omitempty"`
+	ZoomSyncStatus        string       `gorm:"column:zoom_sync_status;type:varchar(32);not null;default:'not_requested';index" json:"zoom_sync_status"`
+	ZoomSyncError         string       `gorm:"column:zoom_sync_error;type:text;not null;default:''" json:"-"`
+	ZoomSyncedAt          *time.Time   `gorm:"column:zoom_synced_at" json:"zoom_synced_at,omitempty"`
 	CompletedByID         *uint        `gorm:"column:completed_by_id" json:"completed_by_id,omitempty"`
 	CompletedAt           *time.Time   `gorm:"column:completed_at" json:"completed_at,omitempty"`
 	CreatedAt             time.Time    `json:"created_at"`
@@ -303,4 +316,8 @@ type SupportProfile struct {
 	UpcomingCalls  []SupportCall        `json:"upcoming_calls"`
 	DirectRequests []SupportCallRequest `json:"direct_requests"`
 	Availability   []StaffAvailability  `json:"availability"`
+}
+
+type ZoomStartURLResponse struct {
+	StartURL string `json:"start_url"`
 }

@@ -439,11 +439,13 @@ func (s *Service) DecideRequest(actorID, requestID uint, input RequestDecisionIn
 				return ErrUnavailable
 			}
 			request.Status, call.Status, request.RejectionReason = RequestStatusApproved, RequestStatusApproved, ""
+			s.markZoomSyncPending(call)
 		case "reject":
 			if note == "" {
 				return fmt.Errorf("%w: a rejection reason is required", ErrInvalidInput)
 			}
 			request.Status, call.Status, request.RejectionReason = RequestStatusRejected, RequestStatusRejected, note
+			s.markZoomSyncPending(call)
 		case "propose_alternative":
 			alternativeStart, alternativeEnd, err := s.parseAlternativeSlot(input, request.RequestedDate)
 			if err != nil {
@@ -454,6 +456,7 @@ func (s *Service) DecideRequest(actorID, requestID uint, input RequestDecisionIn
 			}
 			request.Status, call.Status = RequestStatusAlternativeProposed, RequestStatusAlternativeProposed
 			request.AlternativeStartTime, request.AlternativeEndTime, request.RejectionReason = &alternativeStart, &alternativeEnd, note
+			s.markZoomSyncPending(call)
 		}
 		if err := tx.Save(request).Error; err != nil {
 			return err
@@ -467,6 +470,7 @@ func (s *Service) DecideRequest(actorID, requestID uint, input RequestDecisionIn
 	if err != nil {
 		return nil, err
 	}
+	_ = s.syncZoomMeetingForRequest(resultID)
 	request, err := s.request(resultID)
 	if err == nil {
 		s.notifyRequest(request, "Your support call request was updated")
@@ -499,6 +503,7 @@ func (s *Service) AcceptAlternative(actorID, requestID uint) (*SupportCallReques
 			return ErrUnavailable
 		}
 		call.ScheduledStartTime, call.ScheduledEndTime, call.Status = *request.AlternativeStartTime, *request.AlternativeEndTime, RequestStatusApproved
+		s.markZoomSyncPending(call)
 		request.PreferredStartTime, request.PreferredEndTime, request.Status = request.AlternativeStartTime, request.AlternativeEndTime, RequestStatusApproved
 		if err := tx.Save(call).Error; err != nil {
 			return mapSlotConflict(err)
@@ -512,6 +517,7 @@ func (s *Service) AcceptAlternative(actorID, requestID uint) (*SupportCallReques
 	if err != nil {
 		return nil, err
 	}
+	_ = s.syncZoomMeetingForRequest(resultID)
 	request, err := s.request(resultID)
 	if err == nil {
 		s.notifyRequest(request, "The alternative support-call time was accepted")
@@ -537,6 +543,7 @@ func (s *Service) CancelRequest(actorID, requestID uint) (*SupportCallRequest, e
 			return ErrInvalidStatusChange
 		}
 		request.Status, call.Status = RequestStatusCancelled, RequestStatusCancelled
+		s.markZoomSyncPending(call)
 		if err := tx.Save(request).Error; err != nil {
 			return err
 		}
@@ -549,6 +556,7 @@ func (s *Service) CancelRequest(actorID, requestID uint) (*SupportCallRequest, e
 	if err != nil {
 		return nil, err
 	}
+	_ = s.syncZoomMeetingForRequest(resultID)
 	request, err := s.request(resultID)
 	if err == nil {
 		s.notifyRequest(request, "Support call request cancelled")
@@ -650,6 +658,7 @@ func (s *Service) ReassignCall(actorID, callID uint, input ReassignInput) (*Supp
 		}
 		previous := call.AssignedStaffID
 		call.AssignedStaffID, request.AssignedStaffID, call.Status, request.Status = &input.UserID, &input.UserID, RequestStatusApproved, RequestStatusApproved
+		s.markZoomSyncPending(&call)
 		request.RejectionReason = strings.TrimSpace(input.Reason)
 		if err := tx.Save(&call).Error; err != nil {
 			return mapSlotConflict(err)
@@ -665,6 +674,7 @@ func (s *Service) ReassignCall(actorID, callID uint, input ReassignInput) (*Supp
 	if err != nil {
 		return nil, err
 	}
+	_ = s.syncZoomMeeting(resultID)
 	var call SupportCall
 	if err := s.DB.Preload("AssignedStaff").First(&call, resultID).Error; err != nil {
 		return nil, err
@@ -979,6 +989,7 @@ func (s *Service) reassignUnavailableDay(date, reason string) error {
 			}
 			if request.RequestType == RequestTypeAutomaticDaily && assignment.PrimaryAssigneeID != nil && !s.slotUnavailableTx(tx, *assignment.PrimaryAssigneeID, call.ScheduledStartTime, call.ScheduledEndTime, call.ID) {
 				call.AssignedStaffID, request.AssignedStaffID = assignment.PrimaryAssigneeID, assignment.PrimaryAssigneeID
+				s.markZoomSyncPending(&call)
 				if err := tx.Save(&call).Error; err != nil {
 					return mapSlotConflict(err)
 				}
@@ -991,6 +1002,7 @@ func (s *Service) reassignUnavailableDay(date, reason string) error {
 				continue
 			}
 			call.Status, request.Status, request.RejectionReason = RequestStatusAlternativeProposed, RequestStatusAlternativeProposed, "Assigned support admin became unavailable: "+reason
+			s.markZoomSyncPending(&call)
 			if err := tx.Save(&call).Error; err != nil {
 				return err
 			}
@@ -1004,6 +1016,7 @@ func (s *Service) reassignUnavailableDay(date, reason string) error {
 		return nil
 	})
 	if err == nil {
+		_ = s.syncZoomMeetingsForDate(date)
 		s.notifyAssignmentChange(date, reason)
 	}
 	return err
@@ -1025,6 +1038,7 @@ func (s *Service) markCallsForAvailability(availability *StaffAvailability, reas
 				return err
 			}
 			call.Status, request.Status, request.RejectionReason = RequestStatusAlternativeProposed, RequestStatusAlternativeProposed, reason
+			s.markZoomSyncPending(&call)
 			if err := tx.Save(&call).Error; err != nil {
 				return err
 			}
@@ -1042,6 +1056,7 @@ func (s *Service) markCallsForAvailability(availability *StaffAvailability, reas
 		return err
 	}
 	for _, requestID := range requestIDs {
+		_ = s.syncZoomMeetingForRequest(requestID)
 		if request, requestErr := s.request(requestID); requestErr == nil {
 			s.notifyRequest(request, "Support call needs a new time")
 		}
