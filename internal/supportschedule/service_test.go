@@ -10,6 +10,7 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 type scheduleFixture struct {
@@ -41,7 +42,9 @@ func newScheduleFixture(t *testing.T) scheduleFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,6 +106,10 @@ func TestPostgresInitSQLDefinesRedesignedSupportScheduleSchema(t *testing.T) {
 		"support_calls_no_overlapping_slots",
 		"zoom_meeting_id",
 		"zoom_sync_status",
+		"ADD COLUMN IF NOT EXISTS zoom_meeting_id",
+		"ADD COLUMN IF NOT EXISTS zoom_join_url",
+		"ADD COLUMN IF NOT EXISTS zoom_passcode",
+		"ADD COLUMN IF NOT EXISTS zoom_sync_status",
 		"('Manager',      0)",
 	} {
 		if !strings.Contains(sql, required) {
@@ -123,9 +130,14 @@ func TestPostgresInitSQLDefinesRedesignedSupportScheduleSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"ADD COLUMN IF NOT EXISTS zoom_meeting_id", "ADD COLUMN IF NOT EXISTS zoom_join_url", "ADD COLUMN IF NOT EXISTS zoom_passcode", "ADD COLUMN IF NOT EXISTS zoom_sync_status"} {
+	for _, required := range []string{
+		"ADD COLUMN IF NOT EXISTS zoom_meeting_id",
+		"ADD COLUMN IF NOT EXISTS zoom_join_url",
+		"ADD COLUMN IF NOT EXISTS zoom_passcode",
+		"ADD COLUMN IF NOT EXISTS zoom_sync_status",
+	} {
 		if !strings.Contains(string(zoomMigration), required) {
-			t.Fatalf("Zoom migration is missing %q", required)
+			t.Fatalf("manual Zoom migration is missing %q", required)
 		}
 	}
 }
