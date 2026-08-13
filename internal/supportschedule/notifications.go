@@ -77,6 +77,12 @@ func supportCallNextStep(request *SupportCallRequest, audience supportCallNotifi
 		case RequestStatusPending, RequestStatusAwaitingApproval:
 			return "Open Requests and review the call. Approve it, decline it with a reason, or propose an alternative time."
 		case RequestStatusApproved:
+			if request.Call != nil && request.Call.ZoomJoinURL != "" {
+				return "The call is confirmed. At the scheduled time, open Support Calls in NORDIK Drive and select Start Zoom meeting. Afterward, record the actual duration."
+			}
+			if request.Call != nil && (request.Call.ZoomSyncStatus == ZoomSyncPending || request.Call.ZoomSyncStatus == ZoomSyncFailed) {
+				return "The call is confirmed. The Zoom meeting is being prepared; check Support Calls before the scheduled time."
+			}
 			return "The call is confirmed. Prepare for the scheduled time and record the actual duration after it is completed."
 		case RequestStatusAlternativeProposed:
 			return "Wait for the requester to accept the proposed time, or review the request again if another change is needed."
@@ -88,6 +94,9 @@ func supportCallNextStep(request *SupportCallRequest, audience supportCallNotifi
 			return "Review the request in Requests if any follow-up is required."
 		}
 	case supportCallManagerAudience:
+		if request.Status == RequestStatusApproved && request.Call != nil && request.Call.ZoomJoinURL != "" {
+			return "The call is confirmed. You may use the participant link below if you need to attend; the assigned support person will host it."
+		}
 		return "Review the support-call schedule in Requests if reassignment or follow-up is required."
 	default:
 		switch request.Status {
@@ -96,7 +105,13 @@ func supportCallNextStep(request *SupportCallRequest, audience supportCallNotifi
 		case RequestStatusPending:
 			return "Your request has been routed to the daily support person. You will receive another email when it is confirmed or changed."
 		case RequestStatusApproved:
-			return "Your support call is confirmed. Please join or attend at the scheduled time."
+			if request.Call != nil && request.Call.ZoomJoinURL != "" {
+				return "Your support call is confirmed. Use the Zoom participant link below at the scheduled time. The assigned support person will admit you from the waiting room."
+			}
+			if request.Call != nil && (request.Call.ZoomSyncStatus == ZoomSyncPending || request.Call.ZoomSyncStatus == ZoomSyncFailed) {
+				return "Your support call is confirmed. The Zoom participant link is being prepared and will appear in Support Calls."
+			}
+			return "Your support call is confirmed. Please attend at the scheduled time."
 		case RequestStatusAlternativeProposed:
 			return "Review the proposed alternative in Requests and accept it if the new time works for you."
 		case RequestStatusRejected:
@@ -109,6 +124,39 @@ func supportCallNextStep(request *SupportCallRequest, audience supportCallNotifi
 			return "Review the request in Requests for the latest status."
 		}
 	}
+}
+
+func supportCallZoomDetails(request *SupportCallRequest, recipient supportCallEmailRecipient) string {
+	if request == nil || request.Status != RequestStatusApproved || request.Call == nil {
+		return ""
+	}
+	call := request.Call
+	if strings.TrimSpace(call.ZoomJoinURL) == "" {
+		if call.ZoomSyncStatus != ZoomSyncPending && call.ZoomSyncStatus != ZoomSyncFailed {
+			return ""
+		}
+		return `<div style="margin-top:16px;padding:14px;border:1px solid #f59e0b;border-radius:8px;background:#fffbeb;">` +
+			`<strong>Zoom meeting</strong><br/>The meeting link is still being prepared. Open Support Calls in NORDIK Drive before the scheduled time for the latest details.</div>`
+	}
+	meetingID := ""
+	if strings.TrimSpace(call.ZoomMeetingID) != "" {
+		meetingID = fmt.Sprintf(`<br/><span style="color:#475569;">Meeting ID: %s</span>`, html.EscapeString(call.ZoomMeetingID))
+	}
+	passcode := ""
+	if strings.TrimSpace(call.ZoomPasscode) != "" {
+		passcode = fmt.Sprintf(`<br/><span style="color:#475569;">Passcode: %s</span>`, html.EscapeString(call.ZoomPasscode))
+	}
+	isAssignedHost := recipient.Audience == supportCallStaffAudience && request.AssignedStaff != nil && strings.EqualFold(strings.TrimSpace(recipient.Email), strings.TrimSpace(request.AssignedStaff.Email))
+	if isAssignedHost {
+		return `<div style="margin-top:16px;padding:14px;border:1px solid #2563eb;border-radius:8px;background:#eff6ff;">` +
+			`<strong>Host this Zoom meeting</strong><br/>Open Support Calls in NORDIK Drive and select <strong>Start Zoom meeting</strong>. ` +
+			`Do not forward the host start link. Customers should use the participant invitation.` + meetingID + passcode + `</div>`
+	}
+	joinURL := html.EscapeString(strings.TrimSpace(call.ZoomJoinURL))
+	return `<div style="margin-top:16px;padding:14px;border:1px solid #2563eb;border-radius:8px;background:#eff6ff;">` +
+		`<strong>Join the Zoom meeting</strong><br/>This is a participant link. The assigned support person is the host.<br/>` +
+		fmt.Sprintf(`<a href="%s" style="display:inline-block;margin-top:10px;padding:10px 16px;background:#0757b9;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:700;">Join Zoom meeting</a>`, joinURL) +
+		meetingID + passcode + `</div>`
 }
 
 func supportCallNotificationBody(request *SupportCallRequest, recipient supportCallEmailRecipient, event string) string {
@@ -134,6 +182,7 @@ func supportCallNotificationBody(request *SupportCallRequest, recipient supportC
 	if request.AlternativeStartTime != nil && request.AlternativeEndTime != nil {
 		alternative = fmt.Sprintf(`<tr><td style="%s">Alternative time</td><td style="%s">%s</td></tr>`, supportCallEmailCellLabelStyle, supportCallEmailCellStyle, html.EscapeString(supportCallTimeRange(request.AlternativeStartTime, request.AlternativeEndTime)))
 	}
+	zoomDetails := supportCallZoomDetails(request, recipient)
 
 	return fmt.Sprintf(
 		`<div style="font-family:Arial,sans-serif;color:#1f2937;line-height:1.6;max-width:720px;">`+
@@ -149,6 +198,7 @@ func supportCallNotificationBody(request *SupportCallRequest, recipient supportC
 			`<tr><td style="%s">Requested support person</td><td style="%s">%s</td></tr>`+
 			`%s%s`+
 			`</table>`+
+			`%s`+
 			`<div style="margin-top:16px;padding:14px;border:1px solid #d1d5db;border-radius:8px;background:#f8fafc;">`+
 			`<strong>Request details</strong><br/>%s`+
 			`</div>`+
@@ -168,6 +218,7 @@ func supportCallNotificationBody(request *SupportCallRequest, recipient supportC
 		supportCallEmailCellLabelStyle, supportCallEmailCellStyle, html.EscapeString(requestedStaff),
 		alternative,
 		decisionNote,
+		zoomDetails,
 		description,
 		html.EscapeString(supportCallNextStep(request, recipient.Audience)),
 	)

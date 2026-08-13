@@ -18,6 +18,10 @@ func TestLoadConfig_ReadsEnvVars(t *testing.T) {
 		"GMAIL_APP_PASSWORD": "app-pass",
 		"APP_TIMEZONE":       "America/Vancouver",
 		"HONOUR_JOB_SECRET":  "job-secret",
+		"ZOOM_ENABLED":       "true",
+		"ZOOM_ACCOUNT_ID":    "zoom-account",
+		"ZOOM_CLIENT_ID":     "zoom-client",
+		"ZOOM_CLIENT_SECRET": "zoom-secret",
 	}
 
 	for k, v := range env {
@@ -62,6 +66,9 @@ func TestLoadConfig_ReadsEnvVars(t *testing.T) {
 	if cfg.HonourJobSecret != env["HONOUR_JOB_SECRET"] {
 		t.Fatalf("HonourJobSecret=%q want %q", cfg.HonourJobSecret, env["HONOUR_JOB_SECRET"])
 	}
+	if !cfg.ZoomEnabled || cfg.ZoomAccountID != env["ZOOM_ACCOUNT_ID"] || cfg.ZoomClientID != env["ZOOM_CLIENT_ID"] || cfg.ZoomClientSecret != env["ZOOM_CLIENT_SECRET"] {
+		t.Fatalf("unexpected Zoom config: enabled=%v account=%q client=%q secret=%q", cfg.ZoomEnabled, cfg.ZoomAccountID, cfg.ZoomClientID, cfg.ZoomClientSecret)
+	}
 }
 
 func TestLoadConfig_MissingVars_ReturnEmptyStrings(t *testing.T) {
@@ -77,6 +84,10 @@ func TestLoadConfig_MissingVars_ReturnEmptyStrings(t *testing.T) {
 		"GMAIL_APP_PASSWORD",
 		"APP_TIMEZONE",
 		"HONOUR_JOB_SECRET",
+		"ZOOM_ENABLED",
+		"ZOOM_ACCOUNT_ID",
+		"ZOOM_CLIENT_ID",
+		"ZOOM_CLIENT_SECRET",
 	}
 
 	for _, k := range keys {
@@ -86,7 +97,8 @@ func TestLoadConfig_MissingVars_ReturnEmptyStrings(t *testing.T) {
 	cfg := LoadConfig()
 
 	if cfg.DBHost != "" || cfg.DBPort != "" || cfg.DBUser != "" || cfg.DBPassword != "" || cfg.DBName != "" ||
-		cfg.JWTSecret != "" || cfg.GeminiKey != "" || cfg.GmailUser != "" || cfg.GmailPass != "" || cfg.HonourJobSecret != "" {
+		cfg.JWTSecret != "" || cfg.GeminiKey != "" || cfg.GmailUser != "" || cfg.GmailPass != "" || cfg.HonourJobSecret != "" ||
+		cfg.ZoomEnabled || cfg.ZoomAccountID != "" || cfg.ZoomClientID != "" || cfg.ZoomClientSecret != "" {
 		t.Fatalf("expected all empty strings, got: %+v", cfg)
 	}
 	if cfg.AppTimeZone != "America/Toronto" {

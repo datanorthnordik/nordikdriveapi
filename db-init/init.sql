@@ -129,6 +129,13 @@ CREATE TABLE IF NOT EXISTS support_calls (
     actual_duration_minutes INTEGER NOT NULL DEFAULT 0,
     status VARCHAR(40) NOT NULL,
     internal_notes TEXT NOT NULL DEFAULT '',
+    zoom_meeting_id VARCHAR(32) NOT NULL DEFAULT '',
+    zoom_join_url TEXT NOT NULL DEFAULT '',
+    zoom_passcode VARCHAR(16) NOT NULL DEFAULT '',
+    zoom_host_email VARCHAR(255) NOT NULL DEFAULT '',
+    zoom_sync_status VARCHAR(32) NOT NULL DEFAULT 'not_requested',
+    zoom_sync_error TEXT NOT NULL DEFAULT '',
+    zoom_synced_at TIMESTAMPTZ,
     completed_by_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     completed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -136,13 +143,40 @@ CREATE TABLE IF NOT EXISTS support_calls (
     CHECK (scheduled_end_time > scheduled_start_time),
     CHECK (actual_end_time IS NULL OR actual_start_time IS NULL OR actual_end_time > actual_start_time),
     CHECK (actual_duration_minutes >= 0),
-    CHECK (status IN ('pending', 'awaiting_assignee_approval', 'approved', 'alternative_time_proposed', 'rejected', 'cancelled', 'completed'))
+    CHECK (status IN ('pending', 'awaiting_assignee_approval', 'approved', 'alternative_time_proposed', 'rejected', 'cancelled', 'completed')),
+    CONSTRAINT support_calls_zoom_sync_status_check
+        CHECK (zoom_sync_status IN ('not_requested', 'pending', 'synced', 'failed', 'deleted'))
 );
+
+-- Backwards-compatible Zoom columns for databases that already contain the
+-- support_calls table. The dedicated add-support-call-zoom.sql migration may
+-- also be run independently before deploying the application.
+ALTER TABLE support_calls
+    ADD COLUMN IF NOT EXISTS zoom_meeting_id VARCHAR(32) NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS zoom_join_url TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS zoom_passcode VARCHAR(16) NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS zoom_host_email VARCHAR(255) NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS zoom_sync_status VARCHAR(32) NOT NULL DEFAULT 'not_requested',
+    ADD COLUMN IF NOT EXISTS zoom_sync_error TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS zoom_synced_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_support_calls_assigned_staff_time
     ON support_calls(assigned_staff_id, scheduled_start_time);
 CREATE INDEX IF NOT EXISTS idx_support_calls_status
     ON support_calls(status);
+CREATE INDEX IF NOT EXISTS idx_support_calls_zoom_sync
+    ON support_calls(zoom_sync_status, scheduled_start_time);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'support_calls_zoom_sync_status_check'
+    ) THEN
+        ALTER TABLE support_calls
+        ADD CONSTRAINT support_calls_zoom_sync_status_check
+        CHECK (zoom_sync_status IN ('not_requested', 'pending', 'synced', 'failed', 'deleted'));
+    END IF;
+END $$;
 
 -- This constraint is the database-level backstop for concurrent booking
 -- attempts. It reserves a slot while a request is pending approval as well.

@@ -93,7 +93,17 @@ func main() {
 	}
 	supportrequest.RegisterRoutes(r, supportRequestService)
 
-	supportScheduleService := &supportschedule.Service{DB: db, Mailer: mailerService}
+	var meetingProvider supportschedule.MeetingProvider = supportschedule.DisabledMeetingProvider{}
+	if cfg.ZoomEnabled {
+		zoomProvider, err := supportschedule.NewZoomMeetingProvider(supportschedule.ZoomConfig{
+			AccountID: cfg.ZoomAccountID, ClientID: cfg.ZoomClientID, ClientSecret: cfg.ZoomClientSecret,
+		})
+		if err != nil {
+			log.Fatalf("invalid Zoom integration configuration: %v", err)
+		}
+		meetingProvider = zoomProvider
+	}
+	supportScheduleService := &supportschedule.Service{DB: db, Mailer: mailerService, MeetingProvider: meetingProvider}
 	if err := supportScheduleService.RunScheduledMaintenance(); err != nil {
 		log.Printf("initial support schedule maintenance failed: %v", err)
 	}

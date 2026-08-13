@@ -622,14 +622,20 @@ func (s *Service) RunScheduledMaintenance() error {
 	if err := s.EnsureRollingSchedule(); err != nil {
 		return err
 	}
-	return s.rebalanceUnavailableAssignments("daily availability check")
+	if err := s.rebalanceUnavailableAssignments("daily availability check"); err != nil {
+		return err
+	}
+	return s.SyncPendingZoomMeetings()
 }
 
 func (s *Service) RebalanceSchedule(actorID uint, reason string) error {
 	if err := s.requireManager(actorID); err != nil {
 		return err
 	}
-	return s.rebalanceUnavailableAssignments(reason)
+	if err := s.rebalanceUnavailableAssignments(reason); err != nil {
+		return err
+	}
+	return s.SyncPendingZoomMeetings()
 }
 
 func (s *Service) rebalanceUnavailableAssignments(reason string) error {

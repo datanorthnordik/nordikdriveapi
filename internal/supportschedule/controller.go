@@ -32,6 +32,7 @@ func RegisterRoutes(r *gin.Engine, service *Service) {
 		group.PUT("/requests/:id/accept-alternative", controller.AcceptAlternative)
 		group.PUT("/requests/:id/cancel", controller.CancelRequest)
 		group.GET("/calls", controller.ListCalls)
+		group.POST("/calls/:id/zoom/start", controller.StartZoomMeeting)
 		group.PUT("/calls/:id/complete", controller.CompleteCall)
 		group.PUT("/calls/:id/reassign", controller.ReassignCall)
 		group.PUT("/schedule/:date/reassign", controller.ReassignDay)
@@ -252,6 +253,15 @@ func (cc *Controller) CompleteCall(c *gin.Context) {
 	cc.respond(c, result, err)
 }
 
+func (cc *Controller) StartZoomMeeting(c *gin.Context) {
+	actorID, callID, ok := actorAndCall(c)
+	if !ok {
+		return
+	}
+	result, err := cc.Service.StartZoomMeeting(actorID, callID)
+	cc.respond(c, result, err)
+}
+
 func (cc *Controller) ReassignCall(c *gin.Context) {
 	actorID, callID, ok := actorAndCall(c)
 	if !ok {
@@ -389,6 +399,8 @@ func respondError(c *gin.Context, err error) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	case errors.Is(err, ErrUnavailable), errors.Is(err, ErrNoSupportStaff):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+	case errors.Is(err, ErrIntegrationNotConfigured), errors.Is(err, ErrMeetingUnavailable):
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
 	default:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 	}

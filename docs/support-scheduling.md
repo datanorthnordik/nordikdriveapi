@@ -79,6 +79,84 @@ The PostgreSQL exclusion constraint on `support_calls` prevents overlapping
 active reservations even when two bookings race. The service also uses
 transactions and locks around booking, approval, reassignment and completion.
 
+## Zoom meetings
+
+Zoom is an optional backend-only integration. Call duration and scheduling time
+zone continue to come from `support_schedule_settings`; they are not duplicated
+in Cloud Run environment variables.
+
+Each active support admin must be an active user in the manager's Zoom account,
+using the exact same email address as their NORDIK Drive user. Their Zoom
+Workplace license can remain **Unassigned**, but **Zoom Meetings Basic** must be
+selected. The assigned support admin owns and hosts the meeting. The requester,
+external customers, and managers use the participant link and the manager does
+not need to start or attend the meeting.
+
+### One-time database migration
+
+Run `db-init/add-support-call-zoom.sql` against an existing database before
+enabling Zoom. Fresh databases get the same columns from `db-init/init.sql`.
+The migration is additive and preserves existing support-call data.
+
+### Create the Zoom application and obtain values
+
+1. Sign in to <https://marketplace.zoom.us/> as the Zoom account owner/admin.
+2. Select **Develop**, **Build App**, then **Server-to-Server OAuth App**.
+3. Add and activate these account-level granular scopes:
+   - `meeting:write:meeting:admin`
+   - `meeting:read:meeting:admin`
+   - `meeting:update:meeting:admin`
+   - `meeting:delete:meeting:admin`
+4. Open the app's **App Credentials** page. Copy the **Account ID**, **Client
+   ID**, and **Client Secret** into Google Secret Manager. Never place them in
+   source control, frontend variables, SQL, logs, or email.
+
+### Cloud Run environment
+
+The complete set of new values is:
+
+| Cloud Run variable | Required value | Where it comes from |
+| --- | --- | --- |
+| `ZOOM_ENABLED` | `true` after the migration and secrets are ready; otherwise `false`/unset | Chosen deployment flag |
+| `ZOOM_ACCOUNT_ID` | Zoom Account ID | Server-to-Server OAuth app, **App Credentials** |
+| `ZOOM_CLIENT_ID` | Zoom Client ID | Server-to-Server OAuth app, **App Credentials** |
+| `ZOOM_CLIENT_SECRET` | Zoom Client Secret | Server-to-Server OAuth app, **App Credentials** |
+
+Keep the three credentials as Secret Manager-backed environment variables. A
+typical deployment update is:
+
+```powershell
+gcloud run services update SERVICE_NAME `
+  --region REGION `
+  --set-env-vars ZOOM_ENABLED=true `
+  --set-secrets ZOOM_ACCOUNT_ID=nordik-zoom-account-id:latest,ZOOM_CLIENT_ID=nordik-zoom-client-id:latest,ZOOM_CLIENT_SECRET=nordik-zoom-client-secret:latest
+```
+
+The Cloud Run service account needs Secret Manager Secret Accessor permission
+for those three secrets. The API fails fast at startup when `ZOOM_ENABLED=true`
+and any credential is missing; with Zoom disabled, ordinary support scheduling
+continues without Zoom controls.
+
+### Lifecycle and security
+
+- A meeting is created only after a request becomes approved.
+- The meeting is updated after an accepted time change.
+- Reassignment deletes the former host's meeting and creates a separate meeting
+  under the replacement support admin's Zoom email.
+- Rejection, cancellation, or a required alternative time deletes the existing
+  Zoom meeting.
+- Startup/daily maintenance retries failed or interrupted synchronization and
+  creates meetings for pre-existing approved calls after Zoom is first enabled.
+- Participant links are returned only through authenticated support-call APIs
+  and included in role-specific notification emails.
+- Host `start_url` values are never stored or emailed. The assigned support
+  admin alone can request a fresh link through the authenticated Start Zoom
+  meeting action; requesters and managers cannot access it.
+- Meetings use a cryptographically generated per-call passcode, waiting room,
+  no Personal Meeting ID, no
+  join-before-host, no required Zoom sign-in for external customers, muted
+  entry, and no automatic recording.
+
 ## Verification
 
 ```powershell

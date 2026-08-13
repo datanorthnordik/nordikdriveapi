@@ -10,6 +10,7 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 type scheduleFixture struct {
@@ -41,7 +42,9 @@ func newScheduleFixture(t *testing.T) scheduleFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +80,7 @@ func createSupportScheduleTestSchema(db *gorm.DB) error {
 		`CREATE TABLE support_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, assignment_date TEXT NOT NULL UNIQUE, primary_assignee_id INTEGER, assignment_source TEXT NOT NULL, previous_assignee_id INTEGER, reassigned_by_id INTEGER, reassignment_reason TEXT NOT NULL DEFAULT '', created_at DATETIME, updated_at DATETIME)`,
 		`CREATE TABLE support_staff_availabilities (id INTEGER PRIMARY KEY AUTOINCREMENT, staff_id INTEGER NOT NULL, availability_date TEXT NOT NULL, full_day_unavailable BOOLEAN NOT NULL, unavailable_start_time DATETIME, unavailable_end_time DATETIME, reason TEXT NOT NULL, created_at DATETIME, updated_at DATETIME)`,
 		`CREATE TABLE support_call_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, requested_by_user_id INTEGER NOT NULL, request_type TEXT NOT NULL, requested_date TEXT NOT NULL, preferred_start_time DATETIME, preferred_end_time DATETIME, requested_staff_id INTEGER, assigned_staff_id INTEGER, status TEXT NOT NULL, subject TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', rejection_reason TEXT NOT NULL DEFAULT '', alternative_start_time DATETIME, alternative_end_time DATETIME, created_at DATETIME, updated_at DATETIME)`,
-		`CREATE TABLE support_calls (id INTEGER PRIMARY KEY AUTOINCREMENT, support_request_id INTEGER NOT NULL UNIQUE, assigned_staff_id INTEGER, scheduled_start_time DATETIME NOT NULL, scheduled_end_time DATETIME NOT NULL, actual_start_time DATETIME, actual_end_time DATETIME, actual_duration_minutes INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL, internal_notes TEXT NOT NULL DEFAULT '', completed_by_id INTEGER, completed_at DATETIME, created_at DATETIME, updated_at DATETIME)`,
+		`CREATE TABLE support_calls (id INTEGER PRIMARY KEY AUTOINCREMENT, support_request_id INTEGER NOT NULL UNIQUE, assigned_staff_id INTEGER, scheduled_start_time DATETIME NOT NULL, scheduled_end_time DATETIME NOT NULL, actual_start_time DATETIME, actual_end_time DATETIME, actual_duration_minutes INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL, internal_notes TEXT NOT NULL DEFAULT '', zoom_meeting_id TEXT NOT NULL DEFAULT '', zoom_join_url TEXT NOT NULL DEFAULT '', zoom_passcode TEXT NOT NULL DEFAULT '', zoom_host_email TEXT NOT NULL DEFAULT '', zoom_sync_status TEXT NOT NULL DEFAULT 'not_requested', zoom_sync_error TEXT NOT NULL DEFAULT '', zoom_synced_at DATETIME, completed_by_id INTEGER, completed_at DATETIME, created_at DATETIME, updated_at DATETIME)`,
 		`CREATE TABLE support_schedule_audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, entity_type TEXT NOT NULL, entity_id INTEGER, action TEXT NOT NULL, actor_id INTEGER, details JSON NOT NULL, created_at DATETIME)`,
 	}
 	for _, statement := range statements {
@@ -101,6 +104,12 @@ func TestPostgresInitSQLDefinesRedesignedSupportScheduleSchema(t *testing.T) {
 		"CREATE TABLE IF NOT EXISTS support_calls",
 		"CREATE TABLE IF NOT EXISTS support_schedule_audit_logs",
 		"support_calls_no_overlapping_slots",
+		"zoom_meeting_id",
+		"zoom_sync_status",
+		"ADD COLUMN IF NOT EXISTS zoom_meeting_id",
+		"ADD COLUMN IF NOT EXISTS zoom_join_url",
+		"ADD COLUMN IF NOT EXISTS zoom_passcode",
+		"ADD COLUMN IF NOT EXISTS zoom_sync_status",
 		"('Manager',      0)",
 	} {
 		if !strings.Contains(sql, required) {
@@ -116,6 +125,20 @@ func TestPostgresInitSQLDefinesRedesignedSupportScheduleSchema(t *testing.T) {
 	}
 	if !strings.Contains(string(cleanup), "DROP TABLE IF EXISTS support_call_requests") {
 		t.Fatal("legacy cleanup script must remove the old support-call request table")
+	}
+	zoomMigration, err := os.ReadFile(filepath.Join("..", "..", "db-init", "add-support-call-zoom.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"ADD COLUMN IF NOT EXISTS zoom_meeting_id",
+		"ADD COLUMN IF NOT EXISTS zoom_join_url",
+		"ADD COLUMN IF NOT EXISTS zoom_passcode",
+		"ADD COLUMN IF NOT EXISTS zoom_sync_status",
+	} {
+		if !strings.Contains(string(zoomMigration), required) {
+			t.Fatalf("manual Zoom migration is missing %q", required)
+		}
 	}
 }
 
