@@ -1221,6 +1221,16 @@ func (s *Service) notifyRequest(request *SupportCallRequest, event string, forme
 	sort.Strings(addresses)
 	for _, email := range addresses {
 		recipient := recipients[email]
+		// A confirmed call notification is the participant's meeting invite.
+		// When Zoom is enabled, never send that invite before its join URL is
+		// persisted. A successful maintenance retry sends the requester and the
+		// assigned host a fresh "Zoom link ready" notification. A former host is
+		// still told immediately that the call is no longer assigned to them.
+		if request.Status == RequestStatusApproved && s.meetingIntegrationEnabled() &&
+			(request.Call == nil || strings.TrimSpace(request.Call.ZoomJoinURL) == "") &&
+			recipient.Audience != supportCallFormerStaffAudience {
+			continue
+		}
 		if err := s.Mailer.Send([]string{recipient.Email}, supportCallNotificationSubject(request, event), supportCallNotificationBody(request, recipient, event)); err != nil {
 			log.Printf("support-call email delivery failed for %s: %v", recipient.Email, err)
 		}

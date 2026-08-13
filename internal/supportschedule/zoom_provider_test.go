@@ -254,7 +254,10 @@ func TestApprovedCallCreatesZoomMeetingAndReassignmentRecreatesIt(t *testing.T) 
 
 func TestZoomFailureDoesNotRollbackApprovedCall(t *testing.T) {
 	f := newScheduleFixture(t)
-	f.service.MeetingProvider = &fakeMeetingProvider{createErr: context.DeadlineExceeded}
+	provider := &fakeMeetingProvider{createErr: context.DeadlineExceeded}
+	f.service.MeetingProvider = provider
+	mailer := &scheduleMailer{}
+	f.service.Mailer = mailer
 	created, err := f.service.CreateCall(f.survivor, CreateCallInput{
 		ScheduledStart: f.at(1, 11, 0).Format(time.RFC3339), DurationMinutes: 30, Subject: "Help", Message: "Details",
 	})
@@ -263,5 +266,28 @@ func TestZoomFailureDoesNotRollbackApprovedCall(t *testing.T) {
 	}
 	if created.Status != RequestStatusApproved || created.Call == nil || created.Call.ZoomSyncStatus != ZoomSyncFailed {
 		t.Fatalf("Zoom outage must not roll back the scheduled call: %#v", created)
+	}
+	if len(mailer.sent) != 0 {
+		t.Fatalf("confirmed-call email must wait for its Zoom link; sent=%#v", mailer.sent)
+	}
+
+	provider.createErr = nil
+	if err := f.service.SyncPendingZoomMeetings(); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := f.service.request(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.Call == nil || ready.Call.ZoomSyncStatus != ZoomSyncSynced || ready.Call.ZoomJoinURL == "" {
+		t.Fatalf("Zoom retry did not persist a participant link: %#v", ready.Call)
+	}
+	if len(mailer.sent) != 2 {
+		t.Fatalf("Zoom-ready emails = %d, want requester and assigned host", len(mailer.sent))
+	}
+	for _, email := range mailer.sent {
+		if !strings.Contains(email.Body, ready.Call.ZoomJoinURL) || strings.Contains(email.Body, "still being prepared") {
+			t.Fatalf("Zoom-ready email to %v does not contain the final participant link", email.To)
+		}
 	}
 }

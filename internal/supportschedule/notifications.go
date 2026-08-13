@@ -128,11 +128,7 @@ func supportCallZoomDetails(request *SupportCallRequest, recipient supportCallEm
 	}
 	call := request.Call
 	if strings.TrimSpace(call.ZoomJoinURL) == "" {
-		if call.ZoomSyncStatus != ZoomSyncPending && call.ZoomSyncStatus != ZoomSyncFailed {
-			return ""
-		}
-		return `<div style="margin-top:16px;padding:14px;border:1px solid #f59e0b;border-radius:8px;background:#fffbeb;">` +
-			`<strong>Zoom meeting</strong><br/>The meeting link is still being prepared. Open Support Calls in NORDIK Drive before the scheduled time for the latest details.</div>`
+		return ""
 	}
 	meetingID := ""
 	if strings.TrimSpace(call.ZoomMeetingID) != "" {
