@@ -3,6 +3,7 @@ package supportschedule
 import (
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -310,7 +311,11 @@ func (s *Service) CreateCall(actorID uint, input CreateCallInput) (*SupportCallR
 	var requestID uint
 	err = s.DB.Transaction(func(tx *gorm.DB) error {
 		var assignedStaffID uint
-		requestType, status := RequestTypeAutomaticDaily, RequestStatusPending
+		requestType, status := RequestTypeAutomaticDaily, RequestStatusApproved
+		var assignment SupportAssignment
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("assignment_date = ?", date).First(&assignment).Error; err != nil {
+			return err
+		}
 		requestedStaffID := input.RequestedStaffID
 		if requestedStaffID != nil {
 			ok, err := s.isSupportAdmin(*requestedStaffID)
@@ -322,11 +327,10 @@ func (s *Service) CreateCall(actorID uint, input CreateCallInput) (*SupportCallR
 			}
 			assignedStaffID = *requestedStaffID
 			requestType, status = RequestTypeSpecificStaff, RequestStatusAwaitingApproval
-		} else {
-			var assignment SupportAssignment
-			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("assignment_date = ?", date).First(&assignment).Error; err != nil {
-				return err
+			if assignment.PrimaryAssigneeID != nil && *assignment.PrimaryAssigneeID == *requestedStaffID {
+				status = RequestStatusApproved
 			}
+		} else {
 			if assignment.PrimaryAssigneeID == nil {
 				return ErrNoSupportStaff
 			}
@@ -344,6 +348,9 @@ func (s *Service) CreateCall(actorID uint, input CreateCallInput) (*SupportCallR
 			return err
 		}
 		call := &SupportCall{SupportRequestID: request.ID, AssignedStaffID: &assignedStaffID, ScheduledStartTime: start, ScheduledEndTime: end, Status: status}
+		if status == RequestStatusApproved {
+			s.markZoomSyncPending(call)
+		}
 		if err := tx.Create(call).Error; err != nil {
 			return mapSlotConflict(err)
 		}
@@ -355,9 +362,14 @@ func (s *Service) CreateCall(actorID uint, input CreateCallInput) (*SupportCallR
 	if err != nil {
 		return nil, err
 	}
+	_ = s.syncZoomMeetingForRequest(requestID)
 	request, err := s.request(requestID)
 	if err == nil {
-		s.notifyRequest(request, "A support call request needs attention")
+		if request.Status == RequestStatusApproved {
+			s.notifyRequest(request, "Support call scheduled")
+		} else {
+			s.notifyRequest(request, "Support call approval requested")
+		}
 	}
 	return request, err
 }
@@ -378,7 +390,7 @@ func (s *Service) ListRequests(actorID uint, scope string) ([]SupportCallRequest
 		if err := s.requireSupportAdmin(actorID); err != nil {
 			return nil, err
 		}
-		query = query.Where("assigned_staff_id = ? OR requested_staff_id = ?", actorID, actorID)
+		query = query.Where("assigned_staff_id = ?", actorID)
 	case "manage", "all":
 		if err := s.requireManager(actorID); err != nil {
 			return nil, err
@@ -473,7 +485,16 @@ func (s *Service) DecideRequest(actorID, requestID uint, input RequestDecisionIn
 	_ = s.syncZoomMeetingForRequest(resultID)
 	request, err := s.request(resultID)
 	if err == nil {
-		s.notifyRequest(request, "Your support call request was updated")
+		event := "Support call updated"
+		switch request.Status {
+		case RequestStatusApproved:
+			event = "Support call confirmed"
+		case RequestStatusRejected:
+			event = "Support call request declined"
+		case RequestStatusAlternativeProposed:
+			event = "A new support call time was proposed"
+		}
+		s.notifyRequest(request, event)
 	}
 	return request, err
 }
@@ -520,7 +541,7 @@ func (s *Service) AcceptAlternative(actorID, requestID uint) (*SupportCallReques
 	_ = s.syncZoomMeetingForRequest(resultID)
 	request, err := s.request(resultID)
 	if err == nil {
-		s.notifyRequest(request, "The alternative support-call time was accepted")
+		s.notifyRequest(request, "Support call scheduled")
 	}
 	return request, err
 }
@@ -641,6 +662,7 @@ func (s *Service) ReassignCall(actorID, callID uint, input ReassignInput) (*Supp
 		return nil, fmt.Errorf("%w: replacement must be an active support admin", ErrInvalidInput)
 	}
 	var resultID uint
+	var previousAssigneeID *uint
 	err := s.DB.Transaction(func(tx *gorm.DB) error {
 		var call SupportCall
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&call, callID).Error; err != nil {
@@ -657,6 +679,10 @@ func (s *Service) ReassignCall(actorID, callID uint, input ReassignInput) (*Supp
 			return mapNotFound(err)
 		}
 		previous := call.AssignedStaffID
+		if previous != nil {
+			value := *previous
+			previousAssigneeID = &value
+		}
 		call.AssignedStaffID, request.AssignedStaffID, call.Status, request.Status = &input.UserID, &input.UserID, RequestStatusApproved, RequestStatusApproved
 		s.markZoomSyncPending(&call)
 		request.RejectionReason = strings.TrimSpace(input.Reason)
@@ -680,7 +706,11 @@ func (s *Service) ReassignCall(actorID, callID uint, input ReassignInput) (*Supp
 		return nil, err
 	}
 	if request, requestErr := s.request(call.SupportRequestID); requestErr == nil {
-		s.notifyRequest(request, "Support call reassigned by a manager")
+		var previousAssignee *SupportUser
+		if previousAssigneeID != nil && *previousAssigneeID != input.UserID {
+			previousAssignee, _ = s.user(*previousAssigneeID)
+		}
+		s.notifyRequest(request, "Support call details changed", previousAssignee)
 	}
 	return &call, nil
 }
@@ -1162,7 +1192,7 @@ func (s *Service) today() string {
 	return scheduleDateFor(s.now(), loc)
 }
 
-func (s *Service) notifyRequest(request *SupportCallRequest, event string) {
+func (s *Service) notifyRequest(request *SupportCallRequest, event string, formerAssignees ...*SupportUser) {
 	if s.Mailer == nil || request == nil {
 		return
 	}
@@ -1181,12 +1211,8 @@ func (s *Service) notifyRequest(request *SupportCallRequest, event string) {
 	}
 	addRecipient(&request.RequestedBy, supportCallRequesterAudience)
 	addRecipient(request.AssignedStaff, supportCallStaffAudience)
-	addRecipient(request.RequestedStaff, supportCallStaffAudience)
-	var managers []SupportUser
-	if err := s.DB.Where("LOWER(role) = ?", strings.ToLower(RoleManager)).Find(&managers).Error; err == nil {
-		for _, manager := range managers {
-			addRecipient(&manager, supportCallManagerAudience)
-		}
+	for _, formerAssignee := range formerAssignees {
+		addRecipient(formerAssignee, supportCallFormerStaffAudience)
 	}
 	addresses := make([]string, 0, len(recipients))
 	for email := range recipients {
@@ -1195,7 +1221,9 @@ func (s *Service) notifyRequest(request *SupportCallRequest, event string) {
 	sort.Strings(addresses)
 	for _, email := range addresses {
 		recipient := recipients[email]
-		_ = s.Mailer.Send([]string{recipient.Email}, supportCallNotificationSubject(request, event), supportCallNotificationBody(request, recipient, event))
+		if err := s.Mailer.Send([]string{recipient.Email}, supportCallNotificationSubject(request, event), supportCallNotificationBody(request, recipient, event)); err != nil {
+			log.Printf("support-call email delivery failed for %s: %v", recipient.Email, err)
+		}
 	}
 }
 

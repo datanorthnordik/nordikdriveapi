@@ -134,15 +134,17 @@ func TestApprovedCallCreatesZoomMeetingAndReassignmentRecreatesIt(t *testing.T) 
 	f := newScheduleFixture(t)
 	provider := &fakeMeetingProvider{}
 	f.service.MeetingProvider = provider
+	mailer := &scheduleMailer{}
+	f.service.Mailer = mailer
 	created, err := f.service.CreateCall(f.survivor, CreateCallInput{
 		ScheduledStart: f.at(1, 10, 0).Format(time.RFC3339), DurationMinutes: 30, Subject: "Help", Message: "Details",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	approved, err := f.service.DecideRequest(*created.AssignedStaffID, created.ID, RequestDecisionInput{Decision: "approve"})
-	if err != nil {
-		t.Fatal(err)
+	approved := created
+	if approved.Status != RequestStatusApproved {
+		t.Fatalf("daily-assignee call status = %q, want approved", approved.Status)
 	}
 	if approved.Call == nil || approved.Call.ZoomSyncStatus != ZoomSyncSynced || approved.Call.ZoomMeetingID == "" || approved.Call.ZoomJoinURL == "" {
 		t.Fatalf("approved call has incomplete Zoom details: %#v", approved.Call)
@@ -150,17 +152,57 @@ func TestApprovedCallCreatesZoomMeetingAndReassignmentRecreatesIt(t *testing.T) 
 	if len(provider.createInputs) != 1 || provider.createInputs[0].HostEmail != approved.AssignedStaff.Email {
 		t.Fatalf("Zoom meeting was not created under assigned support person's email: %#v", provider.createInputs)
 	}
+	if len(mailer.sent) != 2 {
+		t.Fatalf("scheduled-call emails = %d, want requester and assigned support person", len(mailer.sent))
+	}
+	for _, email := range mailer.sent {
+		if !strings.Contains(email.Body, approved.Call.ZoomJoinURL) {
+			t.Fatalf("scheduled-call email to %v is missing the Zoom participant link", email.To)
+		}
+	}
 
 	replacement := f.staffA
 	if replacement == *approved.AssignedStaffID {
 		replacement = f.staffB
 	}
+	previousEmail := approved.AssignedStaff.Email
+	mailer.sent = nil
 	reassigned, err := f.service.ReassignCall(f.manager, approved.Call.ID, ReassignInput{UserID: replacement, Reason: "Coverage change"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(provider.deletedIDs) != 1 || len(provider.createInputs) != 2 || reassigned.ZoomHostEmail != provider.createInputs[1].HostEmail || reassigned.ZoomMeetingID == approved.Call.ZoomMeetingID {
 		t.Fatalf("reassignment did not recreate Zoom meeting: deleted=%#v created=%#v call=%#v", provider.deletedIDs, provider.createInputs, reassigned)
+	}
+	if len(mailer.sent) != 3 {
+		t.Fatalf("reassignment emails = %d, want requester, replacement, and former support person", len(mailer.sent))
+	}
+	for _, email := range mailer.sent {
+		if len(email.To) != 1 {
+			t.Fatalf("unexpected reassignment recipients: %#v", email.To)
+		}
+		if email.To[0] == previousEmail {
+			if strings.Contains(email.Body, reassigned.ZoomJoinURL) || !strings.Contains(email.Body, "no longer assigned") {
+				t.Fatalf("former support person received incorrect reassignment email: %s", email.Body)
+			}
+			continue
+		}
+		if !strings.Contains(email.Body, reassigned.ZoomJoinURL) {
+			t.Fatalf("updated Zoom link missing from reassignment email to %s", email.To[0])
+		}
+	}
+	formerRequests, err := f.service.ListRequests(*approved.AssignedStaffID, "staff")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range formerRequests {
+		if request.ID == created.ID {
+			t.Fatal("reassigned call still appears in the former support person's assigned-request table")
+		}
+	}
+	replacementRequests, err := f.service.ListRequests(replacement, "staff")
+	if err != nil || len(replacementRequests) != 1 || replacementRequests[0].ID != created.ID {
+		t.Fatalf("replacement assigned-request table = %#v, err=%v", replacementRequests, err)
 	}
 	startResult, err := f.service.StartZoomMeeting(replacement, reassigned.ID)
 	if err != nil || !strings.Contains(startResult.StartURL, "/s/") {
@@ -188,11 +230,7 @@ func TestZoomFailureDoesNotRollbackApprovedCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	approved, err := f.service.DecideRequest(*created.AssignedStaffID, created.ID, RequestDecisionInput{Decision: "approve"})
-	if err != nil {
-		t.Fatalf("Zoom outage must not roll back approval: %v", err)
-	}
-	if approved.Status != RequestStatusApproved || approved.Call == nil || approved.Call.ZoomSyncStatus != ZoomSyncFailed {
-		t.Fatalf("unexpected approved call after Zoom failure: %#v", approved)
+	if created.Status != RequestStatusApproved || created.Call == nil || created.Call.ZoomSyncStatus != ZoomSyncFailed {
+		t.Fatalf("Zoom outage must not roll back the scheduled call: %#v", created)
 	}
 }
