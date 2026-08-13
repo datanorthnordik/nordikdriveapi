@@ -10,9 +10,10 @@ import (
 type supportCallNotificationAudience string
 
 const (
-	supportCallRequesterAudience supportCallNotificationAudience = "requester"
-	supportCallStaffAudience     supportCallNotificationAudience = "support_staff"
-	supportCallManagerAudience   supportCallNotificationAudience = "manager"
+	supportCallRequesterAudience   supportCallNotificationAudience = "requester"
+	supportCallStaffAudience       supportCallNotificationAudience = "support_staff"
+	supportCallFormerStaffAudience supportCallNotificationAudience = "former_support_staff"
+	supportCallManagerAudience     supportCallNotificationAudience = "manager"
 )
 
 type supportCallEmailRecipient struct {
@@ -48,13 +49,6 @@ func supportCallStatusLabel(status string) string {
 	return strings.ReplaceAll(strings.TrimSpace(status), "_", " ")
 }
 
-func supportCallRequestTypeLabel(requestType string) string {
-	if requestType == RequestTypeSpecificStaff {
-		return "Specific support person"
-	}
-	return "Daily support person"
-}
-
 func supportCallTimeRange(start, end *time.Time) string {
 	if start == nil || end == nil {
 		return "To be confirmed"
@@ -72,6 +66,8 @@ func supportCallTimeRange(start, end *time.Time) string {
 
 func supportCallNextStep(request *SupportCallRequest, audience supportCallNotificationAudience) string {
 	switch audience {
+	case supportCallFormerStaffAudience:
+		return "You are no longer assigned to this call. The replacement support person and the requester have received the updated meeting details."
 	case supportCallStaffAudience:
 		switch request.Status {
 		case RequestStatusPending, RequestStatusAwaitingApproval:
@@ -103,7 +99,7 @@ func supportCallNextStep(request *SupportCallRequest, audience supportCallNotifi
 		case RequestStatusAwaitingApproval:
 			return "Your selected support person has been asked to approve the request. You will receive another email when they decide."
 		case RequestStatusPending:
-			return "Your request has been routed to the daily support person. You will receive another email when it is confirmed or changed."
+			return "We are confirming the support person for this call. You will receive another email when it is confirmed or changed."
 		case RequestStatusApproved:
 			if request.Call != nil && request.Call.ZoomJoinURL != "" {
 				return "Your support call is confirmed. Use the Zoom participant link below at the scheduled time. The assigned support person will admit you from the waiting room."
@@ -127,7 +123,7 @@ func supportCallNextStep(request *SupportCallRequest, audience supportCallNotifi
 }
 
 func supportCallZoomDetails(request *SupportCallRequest, recipient supportCallEmailRecipient) string {
-	if request == nil || request.Status != RequestStatusApproved || request.Call == nil {
+	if request == nil || request.Status != RequestStatusApproved || request.Call == nil || recipient.Audience == supportCallFormerStaffAudience {
 		return ""
 	}
 	call := request.Call
@@ -148,9 +144,12 @@ func supportCallZoomDetails(request *SupportCallRequest, recipient supportCallEm
 	}
 	isAssignedHost := recipient.Audience == supportCallStaffAudience && request.AssignedStaff != nil && strings.EqualFold(strings.TrimSpace(recipient.Email), strings.TrimSpace(request.AssignedStaff.Email))
 	if isAssignedHost {
+		joinURL := html.EscapeString(strings.TrimSpace(call.ZoomJoinURL))
 		return `<div style="margin-top:16px;padding:14px;border:1px solid #2563eb;border-radius:8px;background:#eff6ff;">` +
 			`<strong>Host this Zoom meeting</strong><br/>Open Support Calls in NORDIK Drive and select <strong>Start Zoom meeting</strong>. ` +
-			`Do not forward the host start link. Customers should use the participant invitation.` + meetingID + passcode + `</div>`
+			`The participant link is included below for reference and sharing; it does not replace the host start action.<br/>` +
+			fmt.Sprintf(`<a href="%s" style="display:inline-block;margin-top:10px;padding:10px 16px;background:#0757b9;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:700;">Open participant link</a>`, joinURL) +
+			meetingID + passcode + `</div>`
 	}
 	joinURL := html.EscapeString(strings.TrimSpace(call.ZoomJoinURL))
 	return `<div style="margin-top:16px;padding:14px;border:1px solid #2563eb;border-radius:8px;background:#eff6ff;">` +
@@ -164,23 +163,40 @@ func supportCallNotificationBody(request *SupportCallRequest, recipient supportC
 	if request.Call != nil {
 		scheduledStart, scheduledEnd = &request.Call.ScheduledStartTime, &request.Call.ScheduledEndTime
 	}
-	requestedStaff := "Daily support assignment"
-	if request.RequestedStaff != nil {
-		requestedStaff = supportUserName(request.RequestedStaff)
-	}
-	assignedStaff := supportUserName(request.AssignedStaff)
 	description := html.EscapeString(strings.TrimSpace(request.Description))
 	description = strings.ReplaceAll(description, "\n", "<br/>")
 	if description == "" {
 		description = "No additional details were provided."
 	}
-	decisionNote := ""
-	if strings.TrimSpace(request.RejectionReason) != "" {
-		decisionNote = fmt.Sprintf(`<tr><td style="%s">Update or reason</td><td style="%s">%s</td></tr>`, supportCallEmailCellLabelStyle, supportCallEmailCellStyle, html.EscapeString(strings.TrimSpace(request.RejectionReason)))
+
+	intro := "Here is the latest update about this NORDIK Drive support call."
+	switch recipient.Audience {
+	case supportCallRequesterAudience:
+		if request.Status == RequestStatusAwaitingApproval {
+			intro = "We received your request and asked the selected support person to review the proposed time."
+		} else if request.Status == RequestStatusApproved {
+			intro = "Your support call is confirmed. The schedule and meeting details are below."
+		}
+	case supportCallStaffAudience:
+		if request.Status == RequestStatusAwaitingApproval {
+			intro = "A user requested a support call with you outside your assigned support day. Please review the proposed time."
+		} else if request.Status == RequestStatusApproved {
+			intro = "You are assigned to this confirmed support call and will host the Zoom meeting."
+		}
+	case supportCallFormerStaffAudience:
+		intro = "This support call has been moved to another support person, so it is no longer assigned to you."
 	}
-	alternative := ""
+
+	rows := supportCallEmailRow("Status", supportCallStatusLabel(request.Status)) +
+		supportCallEmailRow("Topic", strings.TrimSpace(request.Subject)) +
+		supportCallEmailRow("Person requesting support", supportUserName(&request.RequestedBy)) +
+		supportCallEmailRow("Scheduled time", supportCallTimeRange(scheduledStart, scheduledEnd)) +
+		supportCallEmailRow("Support person", supportUserName(request.AssignedStaff))
+	if strings.TrimSpace(request.RejectionReason) != "" {
+		rows += supportCallEmailRow("Update", strings.TrimSpace(request.RejectionReason))
+	}
 	if request.AlternativeStartTime != nil && request.AlternativeEndTime != nil {
-		alternative = fmt.Sprintf(`<tr><td style="%s">Alternative time</td><td style="%s">%s</td></tr>`, supportCallEmailCellLabelStyle, supportCallEmailCellStyle, html.EscapeString(supportCallTimeRange(request.AlternativeStartTime, request.AlternativeEndTime)))
+		rows += supportCallEmailRow("Proposed alternative", supportCallTimeRange(request.AlternativeStartTime, request.AlternativeEndTime))
 	}
 	zoomDetails := supportCallZoomDetails(request, recipient)
 
@@ -188,44 +204,40 @@ func supportCallNotificationBody(request *SupportCallRequest, recipient supportC
 		`<div style="font-family:Arial,sans-serif;color:#1f2937;line-height:1.6;max-width:720px;">`+
 			`<h2 style="margin:0 0 8px;color:#003A7A;">%s</h2>`+
 			`<p style="margin-top:0;">Hello %s,</p>`+
-			`<p>This email concerns support call request <strong>#%d</strong>. Its current status is <strong>%s</strong>.</p>`+
+			`<p>%s</p>`+
 			`<table style="border-collapse:collapse;width:100%%;">`+
-			`<tr><td style="%s">Subject</td><td style="%s">%s</td></tr>`+
-			`<tr><td style="%s">Requested by</td><td style="%s">%s</td></tr>`+
-			`<tr><td style="%s">Request type</td><td style="%s">%s</td></tr>`+
-			`<tr><td style="%s">Scheduled time</td><td style="%s">%s</td></tr>`+
-			`<tr><td style="%s">Assigned support person</td><td style="%s">%s</td></tr>`+
-			`<tr><td style="%s">Requested support person</td><td style="%s">%s</td></tr>`+
-			`%s%s`+
+			`%s`+
 			`</table>`+
 			`%s`+
 			`<div style="margin-top:16px;padding:14px;border:1px solid #d1d5db;border-radius:8px;background:#f8fafc;">`+
-			`<strong>Request details</strong><br/>%s`+
+			`<strong>What support is needed</strong><br/>%s`+
 			`</div>`+
 			`<div style="margin-top:16px;padding:14px;border-left:4px solid #003A7A;background:#eff6ff;">`+
 			`<strong>What happens next</strong><br/>%s`+
-			`</div>`+
+			`</div><p style="margin-top:20px;color:#64748b;font-size:13px;">This message was sent by NORDIK Drive because you are involved in this support call.</p>`+
 			`</div>`,
 		html.EscapeString(strings.TrimSpace(event)),
 		html.EscapeString(recipient.Name),
-		request.ID,
-		html.EscapeString(supportCallStatusLabel(request.Status)),
-		supportCallEmailCellLabelStyle, supportCallEmailCellStyle, html.EscapeString(strings.TrimSpace(request.Subject)),
-		supportCallEmailCellLabelStyle, supportCallEmailCellStyle, html.EscapeString(supportUserName(&request.RequestedBy)),
-		supportCallEmailCellLabelStyle, supportCallEmailCellStyle, html.EscapeString(supportCallRequestTypeLabel(request.RequestType)),
-		supportCallEmailCellLabelStyle, supportCallEmailCellStyle, html.EscapeString(supportCallTimeRange(scheduledStart, scheduledEnd)),
-		supportCallEmailCellLabelStyle, supportCallEmailCellStyle, html.EscapeString(assignedStaff),
-		supportCallEmailCellLabelStyle, supportCallEmailCellStyle, html.EscapeString(requestedStaff),
-		alternative,
-		decisionNote,
+		html.EscapeString(intro),
+		rows,
 		zoomDetails,
 		description,
 		html.EscapeString(supportCallNextStep(request, recipient.Audience)),
 	)
 }
 
-func supportCallNotificationSubject(request *SupportCallRequest, event string) string {
-	return fmt.Sprintf("[Nordik Drive] Support call #%d — %s", request.ID, strings.TrimSpace(event))
+func supportCallNotificationSubject(_ *SupportCallRequest, event string) string {
+	return "[NORDIK Drive] " + strings.TrimSpace(event)
+}
+
+func supportCallEmailRow(label, value string) string {
+	return fmt.Sprintf(
+		`<tr><td style="%s">%s</td><td style="%s">%s</td></tr>`,
+		supportCallEmailCellLabelStyle,
+		html.EscapeString(strings.TrimSpace(label)),
+		supportCallEmailCellStyle,
+		html.EscapeString(strings.TrimSpace(value)),
+	)
 }
 
 const (

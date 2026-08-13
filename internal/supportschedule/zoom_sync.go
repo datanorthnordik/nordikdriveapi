@@ -44,8 +44,8 @@ func (s *Service) meetingInput(tx *gorm.DB, request *SupportCallRequest, call *S
 	return MeetingInput{
 		RequestID: request.ID,
 		HostEmail: hostEmail,
-		Topic:     fmt.Sprintf("NORDIK support call #%d: %s", request.ID, strings.TrimSpace(request.Subject)),
-		Agenda:    fmt.Sprintf("Scheduled NORDIK Drive support call for request #%d. Request details remain in NORDIK Drive.", request.ID),
+		Topic:     fmt.Sprintf("NORDIK support call: %s", strings.TrimSpace(request.Subject)),
+		Agenda:    "Scheduled NORDIK Drive support call. Support details remain securely available in NORDIK Drive.",
 		StartTime: call.ScheduledStartTime,
 		EndTime:   call.ScheduledEndTime,
 		TimeZone:  timeZone,
@@ -221,7 +221,7 @@ func (s *Service) notifyZoomMeetingReady(requestID uint) {
 	if err != nil || request.Call == nil || request.Status != RequestStatusApproved || request.Call.ZoomSyncStatus != ZoomSyncSynced {
 		return
 	}
-	s.notifyRequest(request, "Your Zoom meeting is ready")
+	s.notifyRequest(request, "Zoom link ready")
 }
 
 func (s *Service) StartZoomMeeting(actorID, callID uint) (*ZoomStartURLResponse, error) {

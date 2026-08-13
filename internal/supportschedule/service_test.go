@@ -191,6 +191,28 @@ func (f scheduleFixture) date(dayOffset int) string {
 	return scheduleDateFor(f.now.AddDate(0, 0, dayOffset), f.location)
 }
 
+func (f scheduleFixture) assignedStaff(t *testing.T, dayOffset int) uint {
+	t.Helper()
+	if err := f.service.EnsureRollingSchedule(); err != nil {
+		t.Fatal(err)
+	}
+	var assignment SupportAssignment
+	if err := f.service.DB.Where("assignment_date = ?", f.date(dayOffset)).First(&assignment).Error; err != nil {
+		t.Fatal(err)
+	}
+	if assignment.PrimaryAssigneeID == nil {
+		t.Fatalf("date %s does not have an assigned support person", f.date(dayOffset))
+	}
+	return *assignment.PrimaryAssigneeID
+}
+
+func (f scheduleFixture) otherStaff(assigned uint) uint {
+	if assigned == f.staffA {
+		return f.staffB
+	}
+	return f.staffA
+}
+
 func TestInitialScheduleCreatesExactlyFourteenCalendarAssignmentsAndIsIdempotent(t *testing.T) {
 	f := newScheduleFixture(t)
 	if err := f.service.EnsureRollingSchedule(); err != nil {
@@ -335,11 +357,11 @@ func TestPartialAvailabilityAndPendingRequestReserveSlots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request.RequestType != RequestTypeAutomaticDaily || request.Status != RequestStatusPending || request.AssignedStaffID == nil || *request.AssignedStaffID != f.staffA {
+	if request.RequestType != RequestTypeAutomaticDaily || request.Status != RequestStatusApproved || request.AssignedStaffID == nil || *request.AssignedStaffID != f.staffA {
 		t.Fatalf("normal request was not correctly routed: %#v", request)
 	}
 	if _, err := f.service.CreateCall(f.survivor, input); !errors.Is(err, ErrUnavailable) {
-		t.Fatalf("overlapping pending request error = %v, want ErrUnavailable", err)
+		t.Fatalf("overlapping scheduled request error = %v, want ErrUnavailable", err)
 	}
 }
 
@@ -387,9 +409,10 @@ func TestSpecificPersonApprovalCompletionAndFairnessUseActualDuration(t *testing
 	if err := f.service.EnsureRollingSchedule(); err != nil {
 		t.Fatal(err)
 	}
+	requestedStaff := f.otherStaff(f.assignedStaff(t, 1))
 	request, err := f.service.CreateCall(f.survivor, CreateCallInput{
 		ScheduledStart: f.at(1, 10, 0).Format(time.RFC3339), DurationMinutes: 30,
-		Subject: "Help with my request", Message: "Please review", RequestedStaffID: &f.staffB,
+		Subject: "Help with my request", Message: "Please review", RequestedStaffID: &requestedStaff,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -397,7 +420,7 @@ func TestSpecificPersonApprovalCompletionAndFairnessUseActualDuration(t *testing
 	if request.Status != RequestStatusAwaitingApproval || request.RequestType != RequestTypeSpecificStaff {
 		t.Fatalf("specific-person request status = %q", request.Status)
 	}
-	request, err = f.service.DecideRequest(f.staffB, request.ID, RequestDecisionInput{Decision: "approve"})
+	request, err = f.service.DecideRequest(requestedStaff, request.ID, RequestDecisionInput{Decision: "approve"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +428,7 @@ func TestSpecificPersonApprovalCompletionAndFairnessUseActualDuration(t *testing
 		t.Fatalf("approved request = %#v", request)
 	}
 	actualStart := f.at(1, 10, 5)
-	call, err := f.service.CompleteCall(f.staffB, request.Call.ID, CompleteCallInput{
+	call, err := f.service.CompleteCall(requestedStaff, request.Call.ID, CompleteCallInput{
 		ActualStart: actualStart.Format(time.RFC3339), ActualEnd: actualStart.Add(45 * time.Minute).Format(time.RFC3339), InternalNotes: "resolved",
 	})
 	if err != nil {
@@ -418,8 +441,8 @@ func TestSpecificPersonApprovalCompletionAndFairnessUseActualDuration(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if picked != f.staffA {
-		t.Fatalf("fair assignment chose %d, want staff A after staff B worked 45 minutes", picked)
+	if picked == requestedStaff {
+		t.Fatalf("fair assignment chose %d, want the other staff member after the requested person worked 45 minutes", picked)
 	}
 	var audits int64
 	if err := f.service.DB.Model(&SupportScheduleAuditLog{}).Where("action = ?", "actual_duration_recorded").Count(&audits).Error; err != nil || audits != 1 {
@@ -434,19 +457,21 @@ func TestSupportCallCreationSendsDetailedRoleSpecificEmails(t *testing.T) {
 	}
 	mailer := &scheduleMailer{}
 	f.service.Mailer = mailer
+	f.service.MeetingProvider = &fakeMeetingProvider{}
+	requestedStaff := f.otherStaff(f.assignedStaff(t, 1))
 
 	request, err := f.service.CreateCall(f.survivor, CreateCallInput{
 		ScheduledStart:   f.at(1, 10, 0).Format(time.RFC3339),
 		DurationMinutes:  30,
 		Subject:          "Review a community record",
 		Message:          "Please help me confirm the submitted information.",
-		RequestedStaffID: &f.staffB,
+		RequestedStaffID: &requestedStaff,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(mailer.sent) != 3 {
-		t.Fatalf("sent emails = %d, want requester, support admin, and manager", len(mailer.sent))
+	if len(mailer.sent) != 2 {
+		t.Fatalf("sent emails = %d, want requester and selected support person", len(mailer.sent))
 	}
 
 	bodies := make(map[string]string, len(mailer.sent))
@@ -455,21 +480,57 @@ func TestSupportCallCreationSendsDetailedRoleSpecificEmails(t *testing.T) {
 			t.Fatalf("email recipients = %#v, want one tailored recipient", email.To)
 		}
 		bodies[email.To[0]] = email.Body
-		if !strings.Contains(email.Subject, "Support call #") || !strings.Contains(email.Body, "Scheduled time") || !strings.Contains(email.Body, "What happens next") || !strings.Contains(email.Body, "Review a community record") {
+		if strings.Contains(email.Subject, "#") || strings.Contains(email.Body, "request <strong>#") || !strings.Contains(email.Body, "Scheduled time") || !strings.Contains(email.Body, "What happens next") || !strings.Contains(email.Body, "Review a community record") {
 			t.Fatalf("email was not detailed enough: subject=%q body=%s", email.Subject, email.Body)
 		}
 	}
 	if !strings.Contains(bodies["sam@example.test"], "selected support person has been asked") {
 		t.Fatalf("requester email missing approval explanation: %s", bodies["sam@example.test"])
 	}
-	if !strings.Contains(bodies["blair@example.test"], "Approve it, decline it with a reason") {
-		t.Fatalf("support-admin email missing action: %s", bodies["blair@example.test"])
+	requestedUser, err := f.service.user(requestedStaff)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(bodies["manager@example.test"], "support-call schedule") {
-		t.Fatalf("manager email missing oversight instruction: %s", bodies["manager@example.test"])
+	if !strings.Contains(bodies[requestedUser.Email], "Approve it, decline it with a reason") {
+		t.Fatalf("support-admin email missing action: %s", bodies[requestedUser.Email])
 	}
 	if request.Status != RequestStatusAwaitingApproval {
 		t.Fatalf("request status = %q, want awaiting approval", request.Status)
+	}
+
+	mailer.sent = nil
+	approved, err := f.service.DecideRequest(requestedStaff, request.ID, RequestDecisionInput{Decision: "approve"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.Status != RequestStatusApproved || approved.Call == nil || approved.Call.ZoomJoinURL == "" {
+		t.Fatalf("approved request is missing its Zoom link: %#v", approved)
+	}
+	if len(mailer.sent) != 2 {
+		t.Fatalf("approval emails = %d, want requester and assigned support person", len(mailer.sent))
+	}
+	for _, email := range mailer.sent {
+		if !strings.Contains(email.Body, approved.Call.ZoomJoinURL) {
+			t.Fatalf("approval email to %v is missing the Zoom link", email.To)
+		}
+	}
+}
+
+func TestSpecificPersonAssignedForTheDayIsScheduledWithoutApproval(t *testing.T) {
+	f := newScheduleFixture(t)
+	assignedStaff := f.assignedStaff(t, 1)
+	request, err := f.service.CreateCall(f.survivor, CreateCallInput{
+		ScheduledStart: f.at(1, 13, 0).Format(time.RFC3339), DurationMinutes: 30,
+		Subject: "Help from today's support person", RequestedStaffID: &assignedStaff,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Status != RequestStatusApproved || request.RequestType != RequestTypeSpecificStaff {
+		t.Fatalf("same-day assigned-person request = %#v, want immediately approved", request)
+	}
+	if _, err := f.service.DecideRequest(assignedStaff, request.ID, RequestDecisionInput{Decision: "approve"}); !errors.Is(err, ErrInvalidStatusChange) {
+		t.Fatalf("already scheduled request approval error = %v, want ErrInvalidStatusChange", err)
 	}
 }
 

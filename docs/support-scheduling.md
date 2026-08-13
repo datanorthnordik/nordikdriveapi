@@ -38,6 +38,13 @@ Availability endpoints live only below `/api/support-schedule/profile` so the
 frontend can keep availability controls in the admin Profile rather than a
 header, Requests, or Support Calls page.
 
+Bookings routed to the date's primary support person are confirmed
+immediately. This includes a named-person request when that person is already
+the primary assignee for the selected date. A named-person request requires
+approval only when the selected person is not that date's primary assignee.
+The assigned admin queue is presented as a request table with a separate
+details/review dialog; the booking calendar is not part of that approval view.
+
 ## Scheduler and fairness
 
 At startup, `RunScheduledMaintenance` creates one assignment for today and
@@ -140,6 +147,8 @@ continues without Zoom controls.
 ### Lifecycle and security
 
 - A meeting is created only after a request becomes approved.
+- Daily-assignee bookings and same-day named-assignee bookings create the
+  meeting immediately; off-day named-person bookings create it after approval.
 - The meeting is updated after an accepted time change.
 - Reassignment deletes the former host's meeting and creates a separate meeting
   under the replacement support admin's Zoom email.
@@ -147,8 +156,13 @@ continues without Zoom controls.
   Zoom meeting.
 - Startup/daily maintenance retries failed or interrupted synchronization and
   creates meetings for pre-existing approved calls after Zoom is first enabled.
-- Participant links are returned only through authenticated support-call APIs
-  and included in role-specific notification emails.
+- Participant links are returned only through authenticated support-call APIs.
+  On scheduling or approval, the requester and assigned support person each
+  receive a tailored confirmation containing the participant link. A host
+  reassignment sends the replacement link to the requester and new host while
+  telling the former host that the call is no longer assigned to them.
+- User-facing email subjects and bodies describe the call by its topic and do
+  not expose internal request IDs.
 - Host `start_url` values are never stored or emailed. The assigned support
   admin alone can request a fresh link through the authenticated Start Zoom
   meeting action; requesters and managers cannot access it.
