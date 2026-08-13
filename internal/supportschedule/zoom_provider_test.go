@@ -3,6 +3,7 @@ package supportschedule
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -102,6 +103,36 @@ func TestNewZoomMeetingProviderRequiresAllCredentials(t *testing.T) {
 	}
 }
 
+func TestZoomMeetingProviderPreservesMissingHostError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/oauth/token" {
+			_, _ = w.Write([]byte(`{"access_token":"token","expires_in":3600}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":1001,"message":"User does not exist: missing@example.test."}`))
+	}))
+	defer server.Close()
+
+	provider, err := NewZoomMeetingProvider(ZoomConfig{AccountID: "account", ClientID: "client", ClientSecret: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.tokenURL, provider.apiBaseURL, provider.httpClient = server.URL+"/oauth/token", server.URL+"/v2", server.Client()
+	start := time.Date(2026, time.August, 14, 14, 0, 0, 0, time.UTC)
+	_, err = provider.CreateMeeting(context.Background(), MeetingInput{
+		HostEmail: "missing@example.test", Topic: "Support", StartTime: start,
+		EndTime: start.Add(40 * time.Minute), TimeZone: DefaultTimeZone,
+	})
+	if err == nil || !strings.Contains(err.Error(), "User does not exist: missing@example.test") {
+		t.Fatalf("expected useful missing-host error, got %v", err)
+	}
+	if errors.Is(err, ErrMeetingNotFound) {
+		t.Fatalf("missing host must not be reported as a missing meeting: %v", err)
+	}
+}
+
 type fakeMeetingProvider struct {
 	createInputs []MeetingInput
 	updatedIDs   []string
@@ -156,7 +187,7 @@ func TestApprovedCallCreatesZoomMeetingAndReassignmentRecreatesIt(t *testing.T) 
 		t.Fatalf("scheduled-call emails = %d, want requester and assigned support person", len(mailer.sent))
 	}
 	for _, email := range mailer.sent {
-		if !strings.Contains(email.Body, approved.Call.ZoomJoinURL) {
+		if !strings.Contains(email.Body, approved.Call.ZoomJoinURL) || !strings.Contains(email.Body, "Participant link:") {
 			t.Fatalf("scheduled-call email to %v is missing the Zoom participant link", email.To)
 		}
 	}
@@ -223,7 +254,10 @@ func TestApprovedCallCreatesZoomMeetingAndReassignmentRecreatesIt(t *testing.T) 
 
 func TestZoomFailureDoesNotRollbackApprovedCall(t *testing.T) {
 	f := newScheduleFixture(t)
-	f.service.MeetingProvider = &fakeMeetingProvider{createErr: context.DeadlineExceeded}
+	provider := &fakeMeetingProvider{createErr: context.DeadlineExceeded}
+	f.service.MeetingProvider = provider
+	mailer := &scheduleMailer{}
+	f.service.Mailer = mailer
 	created, err := f.service.CreateCall(f.survivor, CreateCallInput{
 		ScheduledStart: f.at(1, 11, 0).Format(time.RFC3339), DurationMinutes: 30, Subject: "Help", Message: "Details",
 	})
@@ -232,5 +266,28 @@ func TestZoomFailureDoesNotRollbackApprovedCall(t *testing.T) {
 	}
 	if created.Status != RequestStatusApproved || created.Call == nil || created.Call.ZoomSyncStatus != ZoomSyncFailed {
 		t.Fatalf("Zoom outage must not roll back the scheduled call: %#v", created)
+	}
+	if len(mailer.sent) != 0 {
+		t.Fatalf("confirmed-call email must wait for its Zoom link; sent=%#v", mailer.sent)
+	}
+
+	provider.createErr = nil
+	if err := f.service.SyncPendingZoomMeetings(); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := f.service.request(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.Call == nil || ready.Call.ZoomSyncStatus != ZoomSyncSynced || ready.Call.ZoomJoinURL == "" {
+		t.Fatalf("Zoom retry did not persist a participant link: %#v", ready.Call)
+	}
+	if len(mailer.sent) != 2 {
+		t.Fatalf("Zoom-ready emails = %d, want requester and assigned host", len(mailer.sent))
+	}
+	for _, email := range mailer.sent {
+		if !strings.Contains(email.Body, ready.Call.ZoomJoinURL) || !strings.Contains(email.Body, "Participant link:") || strings.Contains(email.Body, "still being prepared") {
+			t.Fatalf("Zoom-ready email to %v does not contain the final participant link", email.To)
+		}
 	}
 }
