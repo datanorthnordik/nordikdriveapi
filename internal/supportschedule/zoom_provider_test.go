@@ -187,7 +187,7 @@ func TestApprovedCallCreatesZoomMeetingAndReassignmentRecreatesIt(t *testing.T) 
 		t.Fatalf("scheduled-call emails = %d, want requester and assigned support person", len(mailer.sent))
 	}
 	for _, email := range mailer.sent {
-		if !strings.Contains(email.Body, approved.Call.ZoomJoinURL) {
+		if !strings.Contains(email.Body, approved.Call.ZoomJoinURL) || !strings.Contains(email.Body, "Participant link:") {
 			t.Fatalf("scheduled-call email to %v is missing the Zoom participant link", email.To)
 		}
 	}
@@ -286,7 +286,7 @@ func TestZoomFailureDoesNotRollbackApprovedCall(t *testing.T) {
 		t.Fatalf("Zoom-ready emails = %d, want requester and assigned host", len(mailer.sent))
 	}
 	for _, email := range mailer.sent {
-		if !strings.Contains(email.Body, ready.Call.ZoomJoinURL) || strings.Contains(email.Body, "still being prepared") {
+		if !strings.Contains(email.Body, ready.Call.ZoomJoinURL) || !strings.Contains(email.Body, "Participant link:") || strings.Contains(email.Body, "still being prepared") {
 			t.Fatalf("Zoom-ready email to %v does not contain the final participant link", email.To)
 		}
 	}

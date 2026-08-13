@@ -145,12 +145,14 @@ func supportCallZoomDetails(request *SupportCallRequest, recipient supportCallEm
 			`<strong>Host this Zoom meeting</strong><br/>Open Support Calls in NORDIK Drive and select <strong>Start Zoom meeting</strong>. ` +
 			`The participant link is included below for reference and sharing; it does not replace the host start action.<br/>` +
 			fmt.Sprintf(`<a href="%s" style="display:inline-block;margin-top:10px;padding:10px 16px;background:#0757b9;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:700;">Open participant link</a>`, joinURL) +
+			fmt.Sprintf(`<br/><span style="display:inline-block;margin-top:10px;color:#475569;">Participant link: <a href="%s">%s</a></span>`, joinURL, joinURL) +
 			meetingID + passcode + `</div>`
 	}
 	joinURL := html.EscapeString(strings.TrimSpace(call.ZoomJoinURL))
 	return `<div style="margin-top:16px;padding:14px;border:1px solid #2563eb;border-radius:8px;background:#eff6ff;">` +
 		`<strong>Join the Zoom meeting</strong><br/>This is a participant link. The assigned support person is the host.<br/>` +
 		fmt.Sprintf(`<a href="%s" style="display:inline-block;margin-top:10px;padding:10px 16px;background:#0757b9;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:700;">Join Zoom meeting</a>`, joinURL) +
+		fmt.Sprintf(`<br/><span style="display:inline-block;margin-top:10px;color:#475569;">Participant link: <a href="%s">%s</a></span>`, joinURL, joinURL) +
 		meetingID + passcode + `</div>`
 }
 
