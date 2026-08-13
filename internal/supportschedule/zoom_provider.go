@@ -237,8 +237,17 @@ func (p *ZoomMeetingProvider) doJSON(ctx context.Context, method, path string, i
 			continue
 		}
 		if response.StatusCode == http.StatusNotFound {
+			// Zoom also returns 404 when the user in
+			// POST /users/{email}/meetings is not an active account user.
+			// Preserve that response so operators see which host is invalid;
+			// ErrMeetingNotFound is only meaningful for an existing meeting ID.
+			if strings.HasPrefix(path, "/meetings/") {
+				response.Body.Close()
+				return ErrMeetingNotFound
+			}
+			apiErr := zoomHTTPError(response)
 			response.Body.Close()
-			return ErrMeetingNotFound
+			return apiErr
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
 			apiErr := zoomHTTPError(response)
@@ -262,11 +271,38 @@ func (p *ZoomMeetingProvider) doJSON(ctx context.Context, method, path string, i
 func zoomHTTPError(response *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 	var problem struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
+		Code    json.RawMessage `json:"code"`
+		Message string          `json:"message"`
+		Errors  []struct {
+			Field   string `json:"field"`
+			Message string `json:"message"`
+		} `json:"errors"`
 	}
-	if json.Unmarshal(body, &problem) == nil && strings.TrimSpace(problem.Message) != "" {
-		return fmt.Errorf("Zoom API returned HTTP %d (code %d): %s", response.StatusCode, problem.Code, strings.TrimSpace(problem.Message))
+	if json.Unmarshal(body, &problem) == nil {
+		message := strings.TrimSpace(problem.Message)
+		for _, detail := range problem.Errors {
+			field, detailMessage := strings.TrimSpace(detail.Field), strings.TrimSpace(detail.Message)
+			if detailMessage == "" {
+				continue
+			}
+			if field != "" {
+				detailMessage = field + ": " + detailMessage
+			}
+			if message != "" {
+				message += "; "
+			}
+			message += detailMessage
+		}
+		if message != "" {
+			code := strings.Trim(strings.TrimSpace(string(problem.Code)), `"`)
+			if code != "" && code != "null" {
+				return fmt.Errorf("Zoom API returned HTTP %d (code %s): %s", response.StatusCode, code, message)
+			}
+			return fmt.Errorf("Zoom API returned HTTP %d: %s", response.StatusCode, message)
+		}
+	}
+	if message := strings.Join(strings.Fields(string(body)), " "); message != "" {
+		return fmt.Errorf("Zoom API returned HTTP %d: %s", response.StatusCode, message)
 	}
 	return fmt.Errorf("Zoom API returned HTTP %d", response.StatusCode)
 }

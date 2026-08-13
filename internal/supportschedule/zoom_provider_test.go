@@ -3,6 +3,7 @@ package supportschedule
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -99,6 +100,36 @@ func TestZoomMeetingProviderLifecycle(t *testing.T) {
 func TestNewZoomMeetingProviderRequiresAllCredentials(t *testing.T) {
 	if _, err := NewZoomMeetingProvider(ZoomConfig{AccountID: "account", ClientID: "client"}); err == nil {
 		t.Fatal("expected missing Zoom client secret to fail")
+	}
+}
+
+func TestZoomMeetingProviderPreservesMissingHostError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/oauth/token" {
+			_, _ = w.Write([]byte(`{"access_token":"token","expires_in":3600}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":1001,"message":"User does not exist: missing@example.test."}`))
+	}))
+	defer server.Close()
+
+	provider, err := NewZoomMeetingProvider(ZoomConfig{AccountID: "account", ClientID: "client", ClientSecret: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.tokenURL, provider.apiBaseURL, provider.httpClient = server.URL+"/oauth/token", server.URL+"/v2", server.Client()
+	start := time.Date(2026, time.August, 14, 14, 0, 0, 0, time.UTC)
+	_, err = provider.CreateMeeting(context.Background(), MeetingInput{
+		HostEmail: "missing@example.test", Topic: "Support", StartTime: start,
+		EndTime: start.Add(40 * time.Minute), TimeZone: DefaultTimeZone,
+	})
+	if err == nil || !strings.Contains(err.Error(), "User does not exist: missing@example.test") {
+		t.Fatalf("expected useful missing-host error, got %v", err)
+	}
+	if errors.Is(err, ErrMeetingNotFound) {
+		t.Fatalf("missing host must not be reported as a missing meeting: %v", err)
 	}
 }
 
