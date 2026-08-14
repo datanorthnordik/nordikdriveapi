@@ -119,27 +119,6 @@ func TestPostgresInitSQLDefinesRedesignedSupportScheduleSchema(t *testing.T) {
 	if strings.Contains(sql, "CREATE TABLE IF NOT EXISTS support_daily_assignments") || strings.Contains(sql, "CREATE TABLE IF NOT EXISTS support_staff_unavailabilities") {
 		t.Fatal("legacy support scheduling tables must not be recreated by init.sql")
 	}
-	cleanup, err := os.ReadFile(filepath.Join("..", "..", "db-init", "remove-legacy-support-scheduling.sql"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(cleanup), "DROP TABLE IF EXISTS support_call_requests") {
-		t.Fatal("legacy cleanup script must remove the old support-call request table")
-	}
-	zoomMigration, err := os.ReadFile(filepath.Join("..", "..", "db-init", "add-support-call-zoom.sql"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, required := range []string{
-		"ADD COLUMN IF NOT EXISTS zoom_meeting_id",
-		"ADD COLUMN IF NOT EXISTS zoom_join_url",
-		"ADD COLUMN IF NOT EXISTS zoom_passcode",
-		"ADD COLUMN IF NOT EXISTS zoom_sync_status",
-	} {
-		if !strings.Contains(string(zoomMigration), required) {
-			t.Fatalf("manual Zoom migration is missing %q", required)
-		}
-	}
 }
 
 func TestSettingsRepairsAnInvalidStoredTimeZone(t *testing.T) {

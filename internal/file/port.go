@@ -37,12 +37,14 @@ type FileServicePort interface {
 	GetDocsByRequest(requestID uint) ([]FileEditRequestPhoto, error)
 	GetPhotosByRow(rowID uint) ([]FileEditRequestPhoto, error)
 	GetDocsByRow(rowID uint) ([]FileEditRequestPhoto, error)
+	GetAchieverStoriesByRow(rowID uint) ([]AchieverStory, error)
 
 	GetPhotoBytes(photoID uint) ([]byte, string, error)
 	GetDocBytes(docID uint) ([]byte, string, string, error)
 
 	// return ReadCloser so controller can stream without accessing handle.Reader field
 	OpenMediaHandle(ctx context.Context, id uint, kind string) (io.ReadCloser, string, string, string, error)
+	OpenAchieverStoryHandle(ctx context.Context, id uint) (io.ReadCloser, string, string, string, error)
 }
 
 type LogServicePort interface {

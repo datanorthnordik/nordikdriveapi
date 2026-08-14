@@ -1,6 +1,7 @@
 package file
 
 import (
+	"reflect"
 	"testing"
 
 	"gorm.io/datatypes"
@@ -67,6 +68,17 @@ func TestBulkRelinkRowReferences_UpdatesAllReferencedTables(t *testing.T) {
 			Status:   "pending",
 		}).Error; err != nil {
 			t.Fatalf("seed form submission %d: %v", i, err)
+		}
+		if err := db.Create(&AchieverStory{
+			FileID:    file.ID,
+			RowID:     uint(requests[i].RowID),
+			StoryType: "document",
+			Status:    "approved",
+			FileName:  "story.pdf",
+			StoryURL:  "gs://bucket/stories/story.pdf",
+			SourceRow: i + 1,
+		}).Error; err != nil {
+			t.Fatalf("seed achiever story %d: %v", i, err)
 		}
 	}
 
@@ -145,6 +157,14 @@ func TestBulkRelinkRowReferences_UpdatesAllReferencedTables(t *testing.T) {
 	assertSubmission(10, 101, file.Filename)
 	assertSubmission(20, 202, file.Filename)
 	assertSubmission(30, 30, "before.csv")
+
+	var relinkedStories []AchieverStory
+	if err := db.Order("source_row ASC").Find(&relinkedStories).Error; err != nil {
+		t.Fatalf("load achiever stories: %v", err)
+	}
+	if got, want := []uint{relinkedStories[0].RowID, relinkedStories[1].RowID, relinkedStories[2].RowID}, []uint{101, 202, 30}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("achiever story row ids = %#v, want %#v", got, want)
+	}
 }
 
 func TestRunNormalizationSync_SkipsProcessingReconciliationVersions(t *testing.T) {

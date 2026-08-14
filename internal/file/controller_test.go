@@ -1534,6 +1534,46 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 		assertStatus(t, w, http.StatusOK)
 	})
 
+	t.Run("GetAchieverStoriesByRow - validates and returns published stories", func(t *testing.T) {
+		svc := &fakeFileService{AchieverStoriesOut: []AchieverStory{{ID: 7, StoryType: "text", StoryText: "A story"}}}
+		fc := &FileController{FileService: svc, LogService: &fakeLogService{}}
+		r := setupRouterForController(fc)
+
+		invalid := newJSONReq(http.MethodGet, "/api/file/achiever-stories/abc", nil, authHeaders)
+		assertStatus(t, doReq(r, invalid), http.StatusBadRequest)
+
+		req := newJSONReq(http.MethodGet, "/api/file/achiever-stories/1", nil, authHeaders)
+		w := doReq(r, req)
+		assertStatus(t, w, http.StatusOK)
+		requireContains(t, w.Body.String(), "achiever_stories")
+		if svc.Called["GetAchieverStoriesByRow"] != 1 {
+			t.Fatalf("expected GetAchieverStoriesByRow once, got %+v", svc.Called)
+		}
+	})
+
+	t.Run("DownloadAchieverStory - streams inline PDF", func(t *testing.T) {
+		content := []byte("%PDF-1.4 story")
+		svc := &fakeFileService{
+			AchieverStoryRCOut:   io.NopCloser(bytes.NewReader(content)),
+			AchieverStoryFNOut:   "story.pdf",
+			AchieverStoryCTOut:   "application/pdf",
+			AchieverStoryDispOut: "inline",
+		}
+		fc := &FileController{FileService: svc, LogService: &fakeLogService{}}
+		r := setupRouterForController(fc)
+
+		invalid := newJSONReq(http.MethodGet, "/api/file/achiever-stories/download/0", nil, authHeaders)
+		assertStatus(t, doReq(r, invalid), http.StatusBadRequest)
+
+		req := newJSONReq(http.MethodGet, "/api/file/achiever-stories/download/7", nil, authHeaders)
+		w := doReq(r, req)
+		assertStatus(t, w, http.StatusOK)
+		if string(w.Body.Bytes()) != string(content) {
+			t.Fatalf("expected %q got %q", content, w.Body.Bytes())
+		}
+		requireContains(t, w.Header().Get("Content-Disposition"), `inline; filename="story.pdf"`)
+	})
+
 	// ---------------- GetPhoto / GetDoc ----------------
 
 	t.Run("GetPhoto - 400 invalid photo id", func(t *testing.T) {

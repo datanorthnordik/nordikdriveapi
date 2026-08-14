@@ -82,6 +82,7 @@ func migrateTestSchema(t *testing.T, db *gorm.DB) {
 		&FileEditRequest{},
 		&FileEditRequestDetails{},
 		&FileEditRequestPhoto{},
+		&AchieverStory{},
 		&UserForTest{}, // creates "users"
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
@@ -3251,6 +3252,19 @@ func TestFileService_PhotoDocQueries_And_ReviewPhotos(t *testing.T) {
 	docByRow, err := svc.GetDocsByRow(uint(10))
 	if err != nil || len(docByRow) != 1 {
 		t.Fatalf("expected 1 approved doc by row, got %d err=%v", len(docByRow), err)
+	}
+
+	stories := []AchieverStory{
+		{FileID: 1, RowID: 10, StoryType: "document", Status: "approved", FileName: "approved.pdf"},
+		{FileID: 1, RowID: 10, StoryType: "text", Status: "pending", StoryText: "not yet published"},
+		{FileID: 1, RowID: 11, StoryType: "video", Status: "approved", VideoURL: "https://example.com/story"},
+	}
+	if err := db.Create(&stories).Error; err != nil {
+		t.Fatalf("seed achiever stories: %v", err)
+	}
+	approvedStories, err := svc.GetAchieverStoriesByRow(10)
+	if err != nil || len(approvedStories) != 1 || approvedStories[0].FileName != "approved.pdf" {
+		t.Fatalf("expected one approved achiever story, got %#v err=%v", approvedStories, err)
 	}
 
 	// ReviewPhotos: empty reviews should error
