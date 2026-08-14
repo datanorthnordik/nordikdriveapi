@@ -18,9 +18,8 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 -- Support-call scheduling. These tables are intentionally maintained here
--- rather than by GORM AutoMigrate.  The legacy tables are deliberately not
--- recreated here; existing deployments must run
--- db-init/remove-legacy-support-scheduling.sql once before applying this DDL.
+-- rather than by GORM AutoMigrate. The legacy tables are deliberately not
+-- recreated here.
 CREATE TABLE IF NOT EXISTS support_schedule_settings (
     id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
     time_zone VARCHAR(100) NOT NULL DEFAULT 'America/Toronto',
@@ -149,8 +148,7 @@ CREATE TABLE IF NOT EXISTS support_calls (
 );
 
 -- Backwards-compatible Zoom columns for databases that already contain the
--- support_calls table. The dedicated add-support-call-zoom.sql migration may
--- also be run independently before deploying the application.
+-- support_calls table.
 ALTER TABLE support_calls
     ADD COLUMN IF NOT EXISTS zoom_meeting_id VARCHAR(32) NOT NULL DEFAULT '',
     ADD COLUMN IF NOT EXISTS zoom_join_url TEXT NOT NULL DEFAULT '',
