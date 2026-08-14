@@ -90,8 +90,10 @@ func setupRouterForController(fc *FileController) *gin.Engine {
 		g.GET("/edit/docs/:requestId", fc.GetDocsByRequest)
 		g.GET("/photos/:rowId", fc.GetPhotosByRow)
 		g.GET("/docs/:rowId", fc.GetDocsByRow)
+		g.GET("/achiever-stories/:rowId", fc.GetAchieverStoriesByRow)
 		g.GET("/photo/:photoId", fc.GetPhoto)
 		g.GET("/doc/:docId", fc.GetDoc)
+		g.GET("/achiever-stories/download/:storyId", fc.DownloadAchieverStory)
 		g.PUT("/approve/request", fc.ReviewEditRequest)
 		g.POST("/photos/review", fc.ReviewPhotos)
 		g.POST("/doc/download/:id", fc.DownloadMediaByID)
@@ -222,6 +224,14 @@ type fakeFileService struct {
 	MediaCTOut   string
 	MediaDispOut string
 	MediaErr     error
+
+	AchieverStoriesOut   []AchieverStory
+	AchieverStoriesErr   error
+	AchieverStoryRCOut   io.ReadCloser
+	AchieverStoryFNOut   string
+	AchieverStoryCTOut   string
+	AchieverStoryDispOut string
+	AchieverStoryErr     error
 }
 
 func (f *fakeFileService) bump(name string) {
@@ -333,6 +343,10 @@ func (f *fakeFileService) GetDocsByRow(rowID uint) ([]FileEditRequestPhoto, erro
 	f.bump("GetDocsByRow")
 	return []FileEditRequestPhoto{}, nil
 }
+func (f *fakeFileService) GetAchieverStoriesByRow(rowID uint) ([]AchieverStory, error) {
+	f.bump("GetAchieverStoriesByRow")
+	return f.AchieverStoriesOut, f.AchieverStoriesErr
+}
 
 func (f *fakeFileService) GetPhotoBytes(photoID uint) ([]byte, string, error) {
 	f.bump("GetPhotoBytes")
@@ -346,4 +360,8 @@ func (f *fakeFileService) GetDocBytes(docID uint) ([]byte, string, string, error
 func (f *fakeFileService) OpenMediaHandle(ctx context.Context, id uint, kind string) (io.ReadCloser, string, string, string, error) {
 	f.bump("OpenMediaHandle")
 	return f.MediaRCOut, f.MediaFNOut, f.MediaCTOut, f.MediaDispOut, f.MediaErr
+}
+func (f *fakeFileService) OpenAchieverStoryHandle(ctx context.Context, id uint) (io.ReadCloser, string, string, string, error) {
+	f.bump("OpenAchieverStoryHandle")
+	return f.AchieverStoryRCOut, f.AchieverStoryFNOut, f.AchieverStoryCTOut, f.AchieverStoryDispOut, f.AchieverStoryErr
 }

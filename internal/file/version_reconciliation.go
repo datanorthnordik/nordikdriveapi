@@ -889,6 +889,12 @@ func collectReferencedRowIDs(tx *gorm.DB, fileID uint) (map[uint]bool, error) {
 			return nil, err
 		}
 	}
+	ids = ids[:0]
+	if tx.Migrator().HasTable((AchieverStory{}).TableName()) {
+		if err := pluckIntoSet(tx.Table((AchieverStory{}).TableName()).Where("file_id = ? AND row_id > 0", fileID), &ids); err != nil {
+			return nil, err
+		}
+	}
 
 	return referenced, nil
 }
@@ -1773,6 +1779,11 @@ func bulkRelinkRowReferences(tx *gorm.DB, fileID uint, fileName string, rowIDMap
 				return err
 			}
 		}
+		if tx.Migrator().HasTable((AchieverStory{}).TableName()) {
+			if err := bulkRelinkTableRows(tx, (AchieverStory{}).TableName(), fileID, "", batch, rowIDMap); err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil
@@ -1862,6 +1873,13 @@ func relinkRowReferences(tx *gorm.DB, fileID uint, sourceRowID uint, targetRowID
 				"row_id":    targetRowID,
 				"file_name": fileName,
 			}).Error; err != nil {
+			return err
+		}
+	}
+	if tx.Migrator().HasTable((AchieverStory{}).TableName()) {
+		if err := tx.Model(&AchieverStory{}).
+			Where("file_id = ? AND row_id = ?", fileID, sourceRowID).
+			Update("row_id", targetRowID).Error; err != nil {
 			return err
 		}
 	}

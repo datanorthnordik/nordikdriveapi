@@ -865,3 +865,60 @@ CREATE INDEX IF NOT EXISTS idx_file_edit_request_details_request_status_id
 
 CREATE INDEX IF NOT EXISTS idx_form_submissions_file_row
     ON form_submissions(file_id, row_id);
+
+
+-- Run after init.sql: row-scoped achiever/survivor stories. A row may have any number of stories,
+-- including document, text, and video entries.
+CREATE TABLE IF NOT EXISTS file_row_achiever_stories (
+    id SERIAL PRIMARY KEY,
+    file_id INT NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    file_version INT NOT NULL DEFAULT 1,
+    row_id INT NOT NULL,
+    story_type VARCHAR(20) NOT NULL CHECK (story_type IN ('document', 'text', 'video')),
+    status VARCHAR(20) NOT NULL DEFAULT 'approved'
+        CHECK (status IN ('draft', 'pending', 'approved', 'rejected')),
+
+    story_text TEXT NOT NULL DEFAULT '',
+    video_url TEXT NOT NULL DEFAULT '',
+    story_url TEXT NOT NULL DEFAULT '',
+    original_story_url TEXT NOT NULL DEFAULT '',
+    file_name VARCHAR(512) NOT NULL DEFAULT '',
+    content_type VARCHAR(255) NOT NULL DEFAULT '',
+    size_bytes BIGINT NOT NULL DEFAULT 0,
+
+    achiever_story_identified TEXT NOT NULL DEFAULT '',
+    google_details TEXT NOT NULL DEFAULT '',
+    newspapers_details TEXT NOT NULL DEFAULT '',
+    ancestry_details TEXT NOT NULL DEFAULT '',
+    derivation_sources TEXT[] NOT NULL DEFAULT '{}'::text[],
+
+    source_workbook VARCHAR(512) NOT NULL DEFAULT '',
+    source_sheet VARCHAR(255) NOT NULL DEFAULT '',
+    source_row INT NOT NULL DEFAULT 0,
+    created_by INT NULL REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT uq_file_row_achiever_story_source
+        UNIQUE (file_id, source_workbook, source_sheet, row_id, source_row)
+);
+
+CREATE INDEX IF NOT EXISTS idx_achiever_story_file_row
+    ON file_row_achiever_stories(file_id, row_id);
+
+CREATE INDEX IF NOT EXISTS idx_achiever_story_file_type
+    ON file_row_achiever_stories(file_id, story_type);
+
+CREATE OR REPLACE FUNCTION set_achiever_story_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_achiever_story_set_updated_at ON file_row_achiever_stories;
+CREATE TRIGGER trg_achiever_story_set_updated_at
+BEFORE UPDATE ON file_row_achiever_stories
+FOR EACH ROW
+EXECUTE FUNCTION set_achiever_story_updated_at();

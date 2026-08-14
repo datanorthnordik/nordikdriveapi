@@ -1025,6 +1025,24 @@ func (fc *FileController) GetDocsByRow(c *gin.Context) {
 	})
 }
 
+// GetAchieverStoriesByRow returns approved survivor/achiever stories for one
+// master-list row. Stories may be documents, text, or videos.
+func (fc *FileController) GetAchieverStoriesByRow(c *gin.Context) {
+	rowID, err := strconv.ParseUint(c.Param("rowId"), 10, 64)
+	if err != nil || rowID == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid row ID"})
+		return
+	}
+
+	stories, err := fc.FileService.GetAchieverStoriesByRow(uint(rowID))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"achiever_stories": stories})
+}
+
 func (fc *FileController) GetPhoto(c *gin.Context) {
 	photoIDParam := c.Param("photoId")
 	photoID, err := strconv.Atoi(photoIDParam)
@@ -1126,4 +1144,34 @@ func (fc *FileController) DownloadMediaByID(c *gin.Context) {
 
 	_, _ = io.Copy(c.Writer, handle)
 
+}
+
+// DownloadAchieverStory streams a stored PDF/document. Text and video stories
+// are returned by GetAchieverStoriesByRow and are rendered directly by the UI.
+func (fc *FileController) DownloadAchieverStory(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("storyId"), 10, 64)
+	if err != nil || id == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid story id"})
+		return
+	}
+
+	handle, filename, contentType, disposition, err := fc.FileService.OpenAchieverStoryHandle(c.Request.Context(), uint(id))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	defer handle.Close()
+
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	if disposition == "" {
+		disposition = "attachment"
+	}
+
+	c.Header("Content-Type", contentType)
+	c.Header("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, sanitizeFilename(filename)))
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Cache-Control", "no-store")
+	_, _ = io.Copy(c.Writer, handle)
 }

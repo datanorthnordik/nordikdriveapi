@@ -1725,6 +1725,17 @@ func (fs *FileService) GetDocsByRow(requestID uint) ([]FileEditRequestPhoto, err
 	return documents, nil
 }
 
+func (fs *FileService) GetAchieverStoriesByRow(rowID uint) ([]AchieverStory, error) {
+	var stories []AchieverStory
+	if err := fs.DB.
+		Where("row_id = ? AND status = ?", rowID, "approved").
+		Order("created_at ASC, id ASC").
+		Find(&stories).Error; err != nil {
+		return nil, err
+	}
+	return stories, nil
+}
+
 func (fs *FileService) GetPhotoBytes(photoID uint) ([]byte, string, error) {
 	var photo FileEditRequestPhoto
 
@@ -1937,6 +1948,52 @@ func (fs *FileService) OpenMediaHandle(ctx context.Context, id uint, kind string
 		Reader: reader,
 	}, filename, contentType, disposition, nil
 
+}
+
+// OpenAchieverStoryHandle opens the stored document for an approved achiever
+// story without loading it fully into server memory.
+func (fs *FileService) OpenAchieverStoryHandle(ctx context.Context, id uint) (io.ReadCloser, string, string, string, error) {
+	var story AchieverStory
+	if err := fs.DB.Where("id = ? AND status = ?", id, "approved").First(&story).Error; err != nil {
+		return nil, "", "", "", err
+	}
+	if story.StoryType != "document" {
+		return nil, "", "", "", fmt.Errorf("requested story is not a document")
+	}
+
+	bucketName, objectPath, err := parseGSURL(story.StoryURL)
+	if err != nil {
+		return nil, "", "", "", err
+	}
+
+	client, err := newGCSClientHook(ctx)
+	if err != nil {
+		return nil, "", "", "", err
+	}
+	reader, err := client.Bucket(bucketName).Object(objectPath).NewReader(ctx)
+	if err != nil {
+		_ = client.Close()
+		return nil, "", "", "", err
+	}
+
+	contentType := strings.TrimSpace(story.ContentType)
+	if contentType == "" {
+		contentType = reader.ContentType()
+	}
+	filename := strings.TrimSpace(story.FileName)
+	if filename == "" {
+		filename = path.Base(objectPath)
+	}
+	if filename == "" {
+		filename = fmt.Sprintf("achiever_story_%d", story.ID)
+	}
+
+	disposition := "attachment"
+	if strings.HasPrefix(contentType, "image/") || contentType == "application/pdf" {
+		disposition = "inline"
+	}
+
+	return &gcsReadHandle{Client: client, Reader: reader}, filename, contentType, disposition, nil
 }
 
 // ✅ Missing helper you asked for: readFromGCS
