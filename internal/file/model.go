@@ -106,6 +106,7 @@ type FileEditRequest struct {
 	ArchiveConsent            bool           `gorm:"column:archive_consent;default:false" json:"archive_consent"`
 	CreatedAt                 time.Time      `gorm:"autoCreateTime" json:"created_at"`
 	IsEdited                  bool           `gorm:"default:false" json:"is_edited"`
+	RequestType               string         `gorm:"type:varchar(30);not null;default:'edit';column:request_type" json:"request_type"`
 	FileID                    uint           `gorm:"column:file_id;not null;" json:"file_id"`
 	ReviewedBy                *int           `gorm:"column:reviewed_by" json:"reviewed_by"`
 	ReviewComment             string         `gorm:"type:text;column:reviewer_comment" json:"reviewer_comment"`
@@ -135,6 +136,7 @@ type FileEditRequestWithUser struct {
 	Firstname      string                   `json:"firstname"`
 	Lastname       string                   `json:"lastname"`
 	Status         string                   `json:"status"`
+	RequestType    string                   `json:"request_type"`
 	ReviewComment  string                   `json:"reviewer_comment"`
 	CreatedAt      time.Time                `json:"created_at"`
 	Details        []FileEditRequestDetails `json:"details"`
@@ -143,6 +145,9 @@ type FileEditRequestWithUser struct {
 	IsEdited       bool                     `gorm:"default:true" json:"is_edited"`
 	Consent        bool                     `json:"consent"`
 	ArchiveConsent bool                     `json:"archive_consent"`
+	FileID         uint                     `json:"file_id"`
+	FileName       string                   `json:"file_name"`
+	Stories        []AchieverStory          `json:"stories"`
 }
 
 type EditRequestInput struct {
@@ -173,6 +178,26 @@ type DocumentInput struct {
 	MimeType         string `json:"mime_type"`
 	Size             int64  `json:"size"`
 	DataBase64       string `json:"data_base64"`
+}
+
+// AchieverStoryRequestInput is a single proposed story for an existing master
+// list row. A user can submit more stories later; each is reviewed separately.
+type AchieverStoryRequestInput struct {
+	FileID    uint   `json:"file_id"`
+	RowID     uint   `json:"row_id"`
+	FirstName string `json:"firstname"`
+	LastName  string `json:"lastname"`
+
+	StoryType string         `json:"story_type"`
+	StoryText string         `json:"story_text"`
+	VideoURL  string         `json:"video_url"`
+	Document  *DocumentInput `json:"document"`
+}
+
+type AchieverStoryReviewInput struct {
+	StoryID       uint   `json:"story_id"`
+	Status        string `json:"status"`
+	ReviewComment string `json:"reviewer_comment"`
 }
 
 type EditChangeInput struct {

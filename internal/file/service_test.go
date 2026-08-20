@@ -2798,6 +2798,96 @@ func TestFileService_CreateEditRequest_PhotoExtension_FromFilenameOrMime(t *test
 	}
 }
 
+func TestFileService_AchieverStoryRequestLifecycle(t *testing.T) {
+	db := newTestDB(t)
+	svc := &FileService{DB: db}
+
+	user := UserForTest{Email: "story@example.com", Role: "User", FirstName: "Story", LastName: "Submitter"}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	master := File{Filename: "Shingwauk And Wawanosh Students Master List", Version: 3}
+	if err := db.Create(&master).Error; err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	row := FileData{FileID: master.ID, Version: master.Version, RowData: datatypes.JSON([]byte(`{"Name":"Story person"}`))}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatalf("seed file row: %v", err)
+	}
+
+	prevUpload := uploadToGCSHook
+	prevGo := formSubmissionGoHook
+	t.Cleanup(func() {
+		uploadToGCSHook = prevUpload
+		formSubmissionGoHook = prevGo
+	})
+	formSubmissionGoHook = func(func()) {}
+
+	request, err := svc.CreateAchieverStoryRequest(AchieverStoryRequestInput{
+		FileID:    master.ID,
+		RowID:     row.ID,
+		StoryType: "text",
+		StoryText: "A survivor's written achiever story.",
+	}, user.ID)
+	if err != nil {
+		t.Fatalf("create text story request: %v", err)
+	}
+	if request.RequestType != fileEditRequestTypeAchieverStory || request.Status != fileEditRequestStatusPending {
+		t.Fatalf("unexpected request: %#v", request)
+	}
+
+	var story AchieverStory
+	if err := db.Where("request_id = ?", request.RequestID).First(&story).Error; err != nil {
+		t.Fatalf("load pending story: %v", err)
+	}
+	if story.Status != fileEditRequestStatusPending || story.StoryText == "" {
+		t.Fatalf("unexpected pending story: %#v", story)
+	}
+
+	if err := svc.ReviewAchieverStoryRequest(request.RequestID, "", nil, 99); err == nil {
+		t.Fatal("expected a decision for the pending story")
+	}
+	if err := svc.ReviewAchieverStoryRequest(request.RequestID, "Approved for publication", []AchieverStoryReviewInput{{
+		StoryID: story.ID,
+		Status:  ReviewStatusApproved,
+	}}, 99); err != nil {
+		t.Fatalf("approve story request: %v", err)
+	}
+
+	published, err := svc.GetAchieverStoriesByRow(row.ID)
+	if err != nil || len(published) != 1 || published[0].ID != story.ID {
+		t.Fatalf("published stories = %#v, err=%v", published, err)
+	}
+
+	var uploadedPath string
+	uploadToGCSHook = func(_, bucket, objectPath string) (string, int64, error) {
+		uploadedPath = objectPath
+		return "gs://" + bucket + "/" + objectPath, 12, nil
+	}
+	_, err = svc.CreateAchieverStoryRequest(AchieverStoryRequestInput{
+		FileID:    master.ID,
+		RowID:     row.ID,
+		StoryType: "document",
+		Document:  &DocumentInput{Filename: "story.docx", MimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", DataBase64: "data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,ZA=="},
+	}, user.ID)
+	if err != nil {
+		t.Fatalf("create document story request: %v", err)
+	}
+	if !strings.HasPrefix(uploadedPath, "achiever-stories/requests/") || !strings.HasSuffix(uploadedPath, "story.docx") {
+		t.Fatalf("unexpected story upload path %q", uploadedPath)
+	}
+
+	_, err = svc.CreateAchieverStoryRequest(AchieverStoryRequestInput{
+		FileID:    master.ID,
+		RowID:     row.ID,
+		StoryType: "document",
+		Document:  &DocumentInput{Filename: "not-allowed.png", MimeType: "image/png", DataBase64: "data:image/png;base64,ZA=="},
+	}, user.ID)
+	if err == nil || !strings.Contains(err.Error(), "PDF, DOC, or DOCX") {
+		t.Fatalf("expected invalid document error, got %v", err)
+	}
+}
+
 // -----------------------------------------------------------------------------
 // GetEditRequests
 // -----------------------------------------------------------------------------

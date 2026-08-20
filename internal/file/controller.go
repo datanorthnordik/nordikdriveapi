@@ -833,6 +833,42 @@ func (fc *FileController) CreateEditRequest(c *gin.Context) {
 	})
 }
 
+// CreateAchieverStoryRequest accepts a proposed text, video link, PDF, or Word
+// story. The story remains pending until an administrator completes its review.
+func (fc *FileController) CreateAchieverStoryRequest(c *gin.Context) {
+	var input AchieverStoryRequestInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user ID not found"})
+		return
+	}
+	userID, ok := userIDVal.(float64)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+
+	request, err := fc.FileService.CreateAchieverStoryRequest(input, uint(userID))
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, ErrFileVersionTransitionInProgress) {
+			status = http.StatusConflict
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Achiever story submitted for review",
+		"request": request,
+	})
+}
+
 func (fc *FileController) GetEditRequests(c *gin.Context) {
 	_, exists := c.Get("userID")
 	if !exists {
@@ -885,10 +921,11 @@ func (fc *FileController) ReviewEditRequest(c *gin.Context) {
 	}
 
 	var input struct {
-		RequestID     uint                     `json:"request_id"`
-		Status        string                   `json:"status"`
-		ReviewComment string                   `json:"reviewer_comment"`
-		Updates       []FileEditRequestDetails `json:"updates"`
+		RequestID     uint                       `json:"request_id"`
+		Status        string                     `json:"status"`
+		ReviewComment string                     `json:"reviewer_comment"`
+		Updates       []FileEditRequestDetails   `json:"updates"`
+		StoryReviews  []AchieverStoryReviewInput `json:"story_reviews"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -896,14 +933,25 @@ func (fc *FileController) ReviewEditRequest(c *gin.Context) {
 		return
 	}
 
-	if err := fc.FileService.ReviewEditRequest(
-		input.RequestID,
-		input.Status,
-		input.ReviewComment,
-		input.Updates,
-		uint(userID),
-	); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	var reviewErr error
+	if len(input.StoryReviews) > 0 {
+		reviewErr = fc.FileService.ReviewAchieverStoryRequest(
+			input.RequestID,
+			input.ReviewComment,
+			input.StoryReviews,
+			uint(userID),
+		)
+	} else {
+		reviewErr = fc.FileService.ReviewEditRequest(
+			input.RequestID,
+			input.Status,
+			input.ReviewComment,
+			input.Updates,
+			uint(userID),
+		)
+	}
+	if reviewErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": reviewErr.Error()})
 		return
 	}
 
@@ -1169,6 +1217,56 @@ func (fc *FileController) DownloadAchieverStory(c *gin.Context) {
 		disposition = "attachment"
 	}
 
+	c.Header("Content-Type", contentType)
+	c.Header("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, sanitizeFilename(filename)))
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Cache-Control", "no-store")
+	_, _ = io.Copy(c.Writer, handle)
+}
+
+// DownloadRequestedAchieverStory permits the story submitter and admins to
+// preview a submitted document while it is still pending. The public story
+// download route above remains approved-only.
+func (fc *FileController) DownloadRequestedAchieverStory(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("storyId"), 10, 64)
+	if err != nil || id == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid story id"})
+		return
+	}
+
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user ID not found"})
+		return
+	}
+	userID, ok := userIDVal.(float64)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+
+	role, err := fc.FileService.GetUserRole(uint(userID))
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "unable to verify user role"})
+		return
+	}
+	isAdmin := strings.EqualFold(strings.TrimSpace(role), "admin")
+
+	handle, filename, contentType, disposition, err := fc.FileService.OpenRequestedAchieverStoryHandle(
+		c.Request.Context(), uint(id), uint(userID), isAdmin,
+	)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "story is not available"})
+		return
+	}
+	defer handle.Close()
+
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	if disposition == "" {
+		disposition = "attachment"
+	}
 	c.Header("Content-Type", contentType)
 	c.Header("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, sanitizeFilename(filename)))
 	c.Header("X-Content-Type-Options", "nosniff")

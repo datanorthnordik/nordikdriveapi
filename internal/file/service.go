@@ -10,6 +10,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"nordik-drive-api/internal/auth"
 	"nordik-drive-api/internal/honour"
 	"nordik-drive-api/internal/mailer"
@@ -63,6 +64,11 @@ var (
 	newGCSClientHook = func(ctx context.Context) (*storage.Client, error) {
 		return storage.NewClient(ctx)
 	}
+)
+
+const (
+	fileEditRequestTypeEdit          = "edit"
+	fileEditRequestTypeAchieverStory = "achiever_story"
 )
 
 func (fs *FileService) SaveFilesMultipart(uploadedFiles []*multipart.FileHeader, filenames FileUploadInput, userID uint) ([]File, error) {
@@ -1073,6 +1079,7 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 		ArchiveConsent:    input.ArchiveConsent,
 		RowID:             input.RowID,
 		IsEdited:          input.IsEdited,
+		RequestType:       fileEditRequestTypeEdit,
 		FileID:            input.FileID,
 		Community:         input.Community,
 		UploaderCommunity: input.UploaderCommunity,
@@ -1260,6 +1267,155 @@ func (fs *FileService) CreateEditRequest(input EditRequestInput, userID uint) (*
 	return &request, nil
 }
 
+// CreateAchieverStoryRequest stores a proposed story as pending. It is linked
+// to the existing request workflow so administrators can approve or reject it
+// before the public row viewer exposes it.
+func (fs *FileService) CreateAchieverStoryRequest(input AchieverStoryRequestInput, userID uint) (*FileEditRequest, error) {
+	if err := EnsureFileVersionTransitionIdleByID(fs.DB, input.FileID); err != nil {
+		return nil, err
+	}
+
+	storyType, contentType, err := validateAchieverStoryRequest(input)
+	if err != nil {
+		return nil, err
+	}
+
+	var request FileEditRequest
+	if err := fs.DB.Transaction(func(tx *gorm.DB) error {
+		var currentFile File
+		if err := tx.Where("id = ?", input.FileID).First(&currentFile).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("file not found")
+			}
+			return err
+		}
+
+		var rowCount int64
+		if err := tx.Model(&FileData{}).
+			Where("id = ? AND file_id = ?", input.RowID, input.FileID).
+			Count(&rowCount).Error; err != nil {
+			return err
+		}
+		if rowCount == 0 {
+			return fmt.Errorf("file row not found")
+		}
+
+		request = FileEditRequest{
+			UserID:      userID,
+			Status:      fileEditRequestStatusPending,
+			RequestType: fileEditRequestTypeAchieverStory,
+			FirstName:   strings.TrimSpace(input.FirstName),
+			LastName:    strings.TrimSpace(input.LastName),
+			RowID:       int(input.RowID),
+			IsEdited:    true,
+			FileID:      input.FileID,
+		}
+		if err := tx.Create(&request).Error; err != nil {
+			return err
+		}
+
+		requestID := request.RequestID
+		createdBy := userID
+		story := AchieverStory{
+			FileID:      input.FileID,
+			FileVersion: currentFile.Version,
+			RowID:       input.RowID,
+			RequestID:   &requestID,
+			CreatedBy:   &createdBy,
+			StoryType:   storyType,
+			Status:      fileEditRequestStatusPending,
+			StoryText:   strings.TrimSpace(input.StoryText),
+			VideoURL:    strings.TrimSpace(input.VideoURL),
+			ContentType: contentType,
+		}
+
+		if storyType == "document" {
+			doc := input.Document
+			fileName := storyStorageFilename(doc.Filename)
+			objectPath := fmt.Sprintf(
+				"achiever-stories/requests/%d/%s_%s",
+				request.RequestID,
+				time.Now().UTC().Format("20060102150405"),
+				fileName,
+			)
+			storyURL, sizeBytes, err := uploadToGCSHook(doc.DataBase64, "nordik-drive-photos", objectPath)
+			if err != nil {
+				return fmt.Errorf("upload story document: %w", err)
+			}
+			story.StoryURL = storyURL
+			story.FileName = fileName
+			story.SizeBytes = sizeBytes
+		}
+
+		if err := tx.Create(&story).Error; err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	return &request, nil
+}
+
+func validateAchieverStoryRequest(input AchieverStoryRequestInput) (storyType string, contentType string, err error) {
+	if input.FileID == 0 {
+		return "", "", fmt.Errorf("file_id is required")
+	}
+	if input.RowID == 0 {
+		return "", "", fmt.Errorf("row_id is required")
+	}
+
+	storyType = strings.ToLower(strings.TrimSpace(input.StoryType))
+	switch storyType {
+	case "text":
+		if strings.TrimSpace(input.StoryText) == "" {
+			return "", "", fmt.Errorf("story_text is required")
+		}
+		return storyType, "text/plain", nil
+	case "video":
+		videoURL := strings.TrimSpace(input.VideoURL)
+		parsed, parseErr := url.ParseRequestURI(videoURL)
+		if parseErr != nil || parsed.Scheme == "" || parsed.Host == "" ||
+			(parsed.Scheme != "https" && parsed.Scheme != "http") {
+			return "", "", fmt.Errorf("video_url must be a valid http or https URL")
+		}
+		return storyType, "", nil
+	case "document":
+		if input.Document == nil {
+			return "", "", fmt.Errorf("document is required")
+		}
+		if strings.TrimSpace(input.Document.DataBase64) == "" {
+			return "", "", fmt.Errorf("document data is required")
+		}
+
+		name := strings.ToLower(strings.TrimSpace(input.Document.Filename))
+		mime := strings.ToLower(strings.TrimSpace(input.Document.MimeType))
+		switch {
+		case strings.HasSuffix(name, ".pdf") || mime == "application/pdf":
+			return storyType, "application/pdf", nil
+		case strings.HasSuffix(name, ".docx") || mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+			return storyType, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", nil
+		case strings.HasSuffix(name, ".doc") || mime == "application/msword":
+			return storyType, "application/msword", nil
+		default:
+			return "", "", fmt.Errorf("story document must be a PDF, DOC, or DOCX file")
+		}
+	default:
+		return "", "", fmt.Errorf("story_type must be text, video, or document")
+	}
+}
+
+func storyStorageFilename(value string) string {
+	name := filepath.Base(strings.TrimSpace(value))
+	name = strings.ReplaceAll(name, "\\", "_")
+	name = strings.ReplaceAll(name, "/", "_")
+	if name == "" || name == "." {
+		return "achiever_story"
+	}
+	return name
+}
+
 var validFileEditRequestStatuses = map[string]struct{}{
 	"pending":   {},
 	"completed": {},
@@ -1308,8 +1464,10 @@ func (fs *FileService) GetEditRequests(statusCSV *string, userID *uint) ([]FileE
 		ELastName      string `gorm:"column:elastname"`
 		IsEdited       bool   `gorm:"default:true"`
 		Consent        bool
-		ArchiveConsent bool `gorm:"column:archive_consent"`
-		FileID         uint `gorm:"column:file_id"`
+		ArchiveConsent bool   `gorm:"column:archive_consent"`
+		FileID         uint   `gorm:"column:file_id"`
+		FileName       string `gorm:"column:file_name"`
+		RequestType    string `gorm:"column:request_type"`
 	}
 
 	q := fs.DB.Table("file_edit_request").
@@ -1327,9 +1485,12 @@ func (fs *FileService) GetEditRequests(statusCSV *string, userID *uint) ([]FileE
 			file_edit_request.is_edited,
 			file_edit_request.consent,
 			file_edit_request.archive_consent,
-			file_edit_request.file_id
+			file_edit_request.file_id,
+			COALESCE(file.filename, '') AS file_name,
+			COALESCE(file_edit_request.request_type, 'edit') AS request_type
 		`).
 		Joins("JOIN users ON users.id = file_edit_request.user_id").
+		Joins("LEFT JOIN file ON file.id = file_edit_request.file_id").
 		Order("file_edit_request.created_at DESC")
 
 	var statuses []string
@@ -1354,6 +1515,26 @@ func (fs *FileService) GetEditRequests(statusCSV *string, userID *uint) ([]FileE
 		return nil, err
 	}
 
+	requestIDs := make([]uint, 0, len(baseRequests))
+	for _, req := range baseRequests {
+		requestIDs = append(requestIDs, req.RequestID)
+	}
+
+	storiesByRequest := make(map[uint][]AchieverStory)
+	if len(requestIDs) > 0 {
+		var stories []AchieverStory
+		if err := fs.DB.Where("request_id IN ?", requestIDs).
+			Order("created_at ASC, id ASC").
+			Find(&stories).Error; err != nil {
+			return nil, err
+		}
+		for _, story := range stories {
+			if story.RequestID != nil {
+				storiesByRequest[*story.RequestID] = append(storiesByRequest[*story.RequestID], story)
+			}
+		}
+	}
+
 	final := make([]FileEditRequestWithUser, 0, len(baseRequests))
 
 	for _, req := range baseRequests {
@@ -1370,6 +1551,7 @@ func (fs *FileService) GetEditRequests(statusCSV *string, userID *uint) ([]FileE
 			Firstname:      req.Firstname,
 			Lastname:       req.Lastname,
 			Status:         req.Status,
+			RequestType:    req.RequestType,
 			ReviewComment:  req.ReviewComment,
 			CreatedAt:      req.CreatedAt,
 			Details:        details,
@@ -1379,6 +1561,9 @@ func (fs *FileService) GetEditRequests(statusCSV *string, userID *uint) ([]FileE
 			IsEdited:       req.IsEdited,
 			Consent:        req.Consent,
 			ArchiveConsent: req.ArchiveConsent,
+			FileID:         req.FileID,
+			FileName:       req.FileName,
+			Stories:        storiesByRequest[req.RequestID],
 		})
 	}
 
@@ -1502,6 +1687,10 @@ func (fs *FileService) ReviewEditRequest(
 		var req FileEditRequest
 		if err := tx.Where("request_id = ?", requestID).First(&req).Error; err != nil {
 			return err
+		}
+
+		if req.RequestType == fileEditRequestTypeAchieverStory {
+			return fmt.Errorf("achiever story requests must be reviewed with story decisions")
 		}
 
 		currentFile := File{ID: req.FileID, Version: 1}
@@ -1683,6 +1872,122 @@ func (fs *FileService) ReviewEditRequest(
 	}
 
 	fs.triggerReviewEmailAsync(reviewedRequest)
+
+	return nil
+}
+
+// ReviewAchieverStoryRequest completes an achiever-story request only after
+// every submitted story has a decision. Approved stories become visible in the
+// row's public story viewer; rejected stories remain private to the request.
+func (fs *FileService) ReviewAchieverStoryRequest(
+	requestID uint,
+	reviewComment string,
+	storyReviews []AchieverStoryReviewInput,
+	userID uint,
+) error {
+	if requestID == 0 {
+		return fmt.Errorf("request_id is required")
+	}
+
+	var reviewedRequest *FileEditRequest
+	if err := fs.DB.Transaction(func(tx *gorm.DB) error {
+		var req FileEditRequest
+		if err := tx.Where("request_id = ?", requestID).First(&req).Error; err != nil {
+			return err
+		}
+		if req.RequestType != fileEditRequestTypeAchieverStory {
+			return fmt.Errorf("request is not an achiever story request")
+		}
+		if req.Status != fileEditRequestStatusPending {
+			return fmt.Errorf("request has already been reviewed")
+		}
+
+		if err := reviewAchieverStoryRequest(tx, requestID, storyReviews, userID); err != nil {
+			return err
+		}
+
+		reviewedByID := int(userID)
+		reviewComment = strings.TrimSpace(reviewComment)
+		if err := tx.Model(&FileEditRequest{}).
+			Where("request_id = ?", requestID).
+			Updates(map[string]interface{}{
+				"status":           fileEditRequestStatusCompleted,
+				"reviewed_by":      reviewedByID,
+				"reviewer_comment": reviewComment,
+			}).Error; err != nil {
+			return err
+		}
+
+		req.Status = fileEditRequestStatusCompleted
+		req.ReviewComment = reviewComment
+		req.ReviewedBy = &reviewedByID
+		reviewedRequest = &req
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	fs.triggerReviewEmailAsync(reviewedRequest)
+	return nil
+}
+
+func reviewAchieverStoryRequest(tx *gorm.DB, requestID uint, reviews []AchieverStoryReviewInput, reviewerID uint) error {
+	var stories []AchieverStory
+	if err := tx.Where("request_id = ?", requestID).Order("id ASC").Find(&stories).Error; err != nil {
+		return err
+	}
+	if len(stories) == 0 {
+		return fmt.Errorf("achiever story request has no stories")
+	}
+	if len(reviews) == 0 {
+		return fmt.Errorf("approve or reject every achiever story before completing the request")
+	}
+
+	storyIDs := make(map[uint]struct{}, len(stories))
+	for _, story := range stories {
+		storyIDs[story.ID] = struct{}{}
+	}
+
+	now := time.Now()
+	reviewerIDPtr := uint(reviewerID)
+	for _, review := range reviews {
+		if review.StoryID == 0 {
+			return fmt.Errorf("story_id is required")
+		}
+		if _, ok := storyIDs[review.StoryID]; !ok {
+			return fmt.Errorf("story %d does not belong to request", review.StoryID)
+		}
+
+		decision := strings.ToLower(strings.TrimSpace(review.Status))
+		if decision != ReviewStatusApproved && decision != ReviewStatusRejected {
+			return fmt.Errorf("story status must be approved or rejected")
+		}
+		comment := strings.TrimSpace(review.ReviewComment)
+		if decision == ReviewStatusRejected && comment == "" {
+			return fmt.Errorf("review comment is required for rejected stories")
+		}
+
+		if err := tx.Model(&AchieverStory{}).
+			Where("id = ? AND request_id = ?", review.StoryID, requestID).
+			Updates(map[string]interface{}{
+				"status":           decision,
+				"reviewed_by":      reviewerIDPtr,
+				"reviewer_comment": comment,
+				"reviewed_at":      now,
+			}).Error; err != nil {
+			return err
+		}
+	}
+
+	var pendingCount int64
+	if err := tx.Model(&AchieverStory{}).
+		Where("request_id = ? AND status = ?", requestID, fileEditRequestStatusPending).
+		Count(&pendingCount).Error; err != nil {
+		return err
+	}
+	if pendingCount > 0 {
+		return fmt.Errorf("approve or reject every achiever story before completing the request")
+	}
 
 	return nil
 }
@@ -1957,6 +2262,29 @@ func (fs *FileService) OpenAchieverStoryHandle(ctx context.Context, id uint) (io
 	if err := fs.DB.Where("id = ? AND status = ?", id, "approved").First(&story).Error; err != nil {
 		return nil, "", "", "", err
 	}
+	return fs.openAchieverStoryDocument(ctx, story)
+}
+
+// OpenRequestedAchieverStoryHandle lets the submitter or an administrator
+// preview a pending document during the request workflow. Other users cannot
+// use this route to access an unapproved story.
+func (fs *FileService) OpenRequestedAchieverStoryHandle(ctx context.Context, id uint, userID uint, isAdmin bool) (io.ReadCloser, string, string, string, error) {
+	query := fs.DB.Table((AchieverStory{}).TableName()+" s").
+		Select("s.*").
+		Joins("JOIN file_edit_request r ON r.request_id = s.request_id").
+		Where("s.id = ?", id)
+	if !isAdmin {
+		query = query.Where("r.user_id = ?", userID)
+	}
+
+	var story AchieverStory
+	if err := query.First(&story).Error; err != nil {
+		return nil, "", "", "", err
+	}
+	return fs.openAchieverStoryDocument(ctx, story)
+}
+
+func (fs *FileService) openAchieverStoryDocument(ctx context.Context, story AchieverStory) (io.ReadCloser, string, string, string, error) {
 	if story.StoryType != "document" {
 		return nil, "", "", "", fmt.Errorf("requested story is not a document")
 	}

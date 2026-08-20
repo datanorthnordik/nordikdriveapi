@@ -1551,6 +1551,28 @@ func TestFileController_AllEndpoints_AllScenarios(t *testing.T) {
 		}
 	})
 
+	t.Run("CreateAchieverStoryRequest - submits pending text story", func(t *testing.T) {
+		svc := &fakeFileService{}
+		fc := &FileController{FileService: svc, LogService: &fakeLogService{}}
+		r := setupRouterForController(fc)
+
+		invalid := newJSONReq(http.MethodPost, "/api/file/achiever-stories/request", nil, authHeaders)
+		assertStatus(t, doReq(r, invalid), http.StatusBadRequest)
+
+		req := newJSONReq(http.MethodPost, "/api/file/achiever-stories/request", AchieverStoryRequestInput{
+			FileID:    49,
+			RowID:     120739,
+			StoryType: "text",
+			StoryText: "A submitted story",
+		}, authHeaders)
+		w := doReq(r, req)
+		assertStatus(t, w, http.StatusOK)
+		requireContains(t, w.Body.String(), "Achiever story submitted for review")
+		if svc.Called["CreateAchieverStoryRequest"] != 1 {
+			t.Fatalf("expected CreateAchieverStoryRequest once, got %+v", svc.Called)
+		}
+	})
+
 	t.Run("DownloadAchieverStory - streams inline PDF", func(t *testing.T) {
 		content := []byte("%PDF-1.4 story")
 		svc := &fakeFileService{

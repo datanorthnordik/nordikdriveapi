@@ -28,8 +28,10 @@ type FileServicePort interface {
 	RevertFile(filename string, version int, userID uint) error
 
 	CreateEditRequest(input EditRequestInput, userID uint) (*FileEditRequest, error)
+	CreateAchieverStoryRequest(input AchieverStoryRequestInput, userID uint) (*FileEditRequest, error)
 	GetEditRequests(statusCSV *string, userID *uint) ([]FileEditRequestWithUser, error)
 	ReviewEditRequest(requestID uint, status string, reviewComment string, updates []FileEditRequestDetails, userId uint) error
+	ReviewAchieverStoryRequest(requestID uint, reviewComment string, storyReviews []AchieverStoryReviewInput, userId uint) error
 
 	ReviewPhotos(reviews []PhotoReviewInput, reviewerID uint) error
 
@@ -45,6 +47,7 @@ type FileServicePort interface {
 	// return ReadCloser so controller can stream without accessing handle.Reader field
 	OpenMediaHandle(ctx context.Context, id uint, kind string) (io.ReadCloser, string, string, string, error)
 	OpenAchieverStoryHandle(ctx context.Context, id uint) (io.ReadCloser, string, string, string, error)
+	OpenRequestedAchieverStoryHandle(ctx context.Context, id uint, userID uint, isAdmin bool) (io.ReadCloser, string, string, string, error)
 }
 
 type LogServicePort interface {
