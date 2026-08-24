@@ -8,7 +8,7 @@ import (
 
 // AchieverStory is a row-scoped survivor/achiever story. A row can have more
 // than one story and each story can be a stored document, written content, or
-// an externally hosted video.
+// a stored/externally hosted video.
 type AchieverStory struct {
 	ID          uint `gorm:"primaryKey" json:"id"`
 	FileID      uint `gorm:"not null;index" json:"file_id"`

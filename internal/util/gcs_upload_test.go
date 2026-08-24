@@ -45,6 +45,28 @@ func TestRowPrefix(t *testing.T) {
 	}
 }
 
+func TestSplitBase64DataURL(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		wantPayload string
+		wantType    string
+	}{
+		{name: "video", input: "data:video/mp4;base64,payload", wantPayload: "payload", wantType: "video/mp4"},
+		{name: "pdf case insensitive", input: "DATA:APPLICATION/PDF;base64,cGRm", wantPayload: "cGRm", wantType: "application/pdf"},
+		{name: "legacy photo payload", input: "cGhvdG8=", wantPayload: "cGhvdG8=", wantType: "image/jpeg"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payload, contentType := splitBase64DataURL(test.input)
+			if payload != test.wantPayload || contentType != test.wantType {
+				t.Fatalf("got payload=%q contentType=%q; want payload=%q contentType=%q", payload, contentType, test.wantPayload, test.wantType)
+			}
+		})
+	}
+}
+
 func TestPublicGCSURL(t *testing.T) {
 	got := PublicGCSURL("my-bucket", "folder/file.jpg")
 	want := "https://storage.googleapis.com/my-bucket/folder/file.jpg"

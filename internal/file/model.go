@@ -191,6 +191,7 @@ type AchieverStoryRequestInput struct {
 	StoryType string         `json:"story_type"`
 	StoryText string         `json:"story_text"`
 	VideoURL  string         `json:"video_url"`
+	Video     *DocumentInput `json:"video"`
 	Document  *DocumentInput `json:"document"`
 }
 

@@ -2822,10 +2822,19 @@ func TestFileService_AchieverStoryRequestLifecycle(t *testing.T) {
 		formSubmissionGoHook = prevGo
 	})
 	formSubmissionGoHook = func(func()) {}
+	var uploadedData string
+	var uploadedPath string
+	uploadToGCSHook = func(data, bucket, objectPath string) (string, int64, error) {
+		uploadedData = data
+		uploadedPath = objectPath
+		return "gs://" + bucket + "/" + objectPath, int64(len(data)), nil
+	}
 
 	request, err := svc.CreateAchieverStoryRequest(AchieverStoryRequestInput{
 		FileID:    master.ID,
 		RowID:     row.ID,
+		FirstName: "Jane",
+		LastName:  "Doe",
 		StoryType: "text",
 		StoryText: "A survivor's written achiever story.",
 	}, user.ID)
@@ -2840,8 +2849,12 @@ func TestFileService_AchieverStoryRequestLifecycle(t *testing.T) {
 	if err := db.Where("request_id = ?", request.RequestID).First(&story).Error; err != nil {
 		t.Fatalf("load pending story: %v", err)
 	}
-	if story.Status != fileEditRequestStatusPending || story.StoryText == "" {
+	if story.Status != fileEditRequestStatusPending || story.StoryText == "" ||
+		story.ContentType != "application/pdf" || story.FileName != "Jane_Doe_story.pdf" || story.StoryURL == "" {
 		t.Fatalf("unexpected pending story: %#v", story)
+	}
+	if !strings.HasPrefix(uploadedData, "data:application/pdf;base64,") || !strings.HasSuffix(uploadedPath, "Jane_Doe_story.pdf") {
+		t.Fatalf("text story was not uploaded as PDF: data prefix=%q path=%q", uploadedData[:min(len(uploadedData), 32)], uploadedPath)
 	}
 
 	if err := svc.ReviewAchieverStoryRequest(request.RequestID, "", nil, 99); err == nil {
@@ -2859,7 +2872,6 @@ func TestFileService_AchieverStoryRequestLifecycle(t *testing.T) {
 		t.Fatalf("published stories = %#v, err=%v", published, err)
 	}
 
-	var uploadedPath string
 	uploadToGCSHook = func(_, bucket, objectPath string) (string, int64, error) {
 		uploadedPath = objectPath
 		return "gs://" + bucket + "/" + objectPath, 12, nil
@@ -2875,6 +2887,49 @@ func TestFileService_AchieverStoryRequestLifecycle(t *testing.T) {
 	}
 	if !strings.HasPrefix(uploadedPath, "achiever-stories/requests/") || !strings.HasSuffix(uploadedPath, "story.docx") {
 		t.Fatalf("unexpected story upload path %q", uploadedPath)
+	}
+
+	videoRequest, err := svc.CreateAchieverStoryRequest(AchieverStoryRequestInput{
+		FileID:    master.ID,
+		RowID:     row.ID,
+		StoryType: "video",
+		Video: &DocumentInput{
+			Filename:   "survivor-story.mp4",
+			MimeType:   "video/mp4",
+			Size:       1024,
+			DataBase64: "data:video/mp4;base64,ZA==",
+		},
+	}, user.ID)
+	if err != nil {
+		t.Fatalf("create uploaded video story request: %v", err)
+	}
+	var uploadedVideo AchieverStory
+	if err := db.Where("request_id = ?", videoRequest.RequestID).First(&uploadedVideo).Error; err != nil {
+		t.Fatalf("load uploaded video story: %v", err)
+	}
+	if uploadedVideo.VideoURL != "" || uploadedVideo.StoryURL == "" || uploadedVideo.FileName != "survivor-story.mp4" || uploadedVideo.ContentType != "video/mp4" {
+		t.Fatalf("unexpected uploaded video story: %#v", uploadedVideo)
+	}
+	if !strings.HasSuffix(uploadedPath, "survivor-story.mp4") {
+		t.Fatalf("unexpected video upload path %q", uploadedPath)
+	}
+
+	linkedVideoURL := "https://www.youtube.com/watch?v=survivor-story"
+	linkRequest, err := svc.CreateAchieverStoryRequest(AchieverStoryRequestInput{
+		FileID:    master.ID,
+		RowID:     row.ID,
+		StoryType: "video",
+		VideoURL:  linkedVideoURL,
+	}, user.ID)
+	if err != nil {
+		t.Fatalf("create linked video story request: %v", err)
+	}
+	var linkedVideo AchieverStory
+	if err := db.Where("request_id = ?", linkRequest.RequestID).First(&linkedVideo).Error; err != nil {
+		t.Fatalf("load linked video story: %v", err)
+	}
+	if linkedVideo.VideoURL != linkedVideoURL || linkedVideo.StoryURL != "" || linkedVideo.FileName != "" {
+		t.Fatalf("unexpected linked video story: %#v", linkedVideo)
 	}
 
 	_, err = svc.CreateAchieverStoryRequest(AchieverStoryRequestInput{
