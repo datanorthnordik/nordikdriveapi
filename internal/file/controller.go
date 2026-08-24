@@ -833,8 +833,8 @@ func (fc *FileController) CreateEditRequest(c *gin.Context) {
 	})
 }
 
-// CreateAchieverStoryRequest accepts a proposed text, video link, PDF, or Word
-// story. The story remains pending until an administrator completes its review.
+// CreateAchieverStoryRequest accepts proposed text, an uploaded/linked video,
+// PDF, or Word story. The story remains pending until an administrator reviews it.
 func (fc *FileController) CreateAchieverStoryRequest(c *gin.Context) {
 	var input AchieverStoryRequestInput
 	if err := c.ShouldBindJSON(&input); err != nil {

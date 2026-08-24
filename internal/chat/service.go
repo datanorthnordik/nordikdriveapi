@@ -36,6 +36,10 @@ type ChatService struct {
 
 	datasetCache           sync.Map
 	structuredDatasetCache sync.Map
+	databaseDimensionCache sync.Map
+	fastAnswerCacheMu      sync.Mutex
+	fastAnswerCache        map[string]*ChatResult
+	fastAnswerCacheOrder   []string
 	QueryStrategy          ChatQueryStrategy
 }
 

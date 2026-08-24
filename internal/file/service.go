@@ -1329,18 +1329,39 @@ func (fs *FileService) CreateAchieverStoryRequest(input AchieverStoryRequestInpu
 			ContentType: contentType,
 		}
 
-		if storyType == "document" {
-			doc := input.Document
-			fileName := storyStorageFilename(doc.Filename)
+		var storedFile *DocumentInput
+		switch storyType {
+		case "text":
+			pdfData, err := buildAchieverStoryPDFDataURL(
+				achieverStoryPDFTitle(input.FirstName, input.LastName),
+				strings.TrimSpace(input.StoryText),
+			)
+			if err != nil {
+				return fmt.Errorf("create story PDF: %w", err)
+			}
+			storedFile = &DocumentInput{
+				Filename:   achieverStoryPDFFilename(input.FirstName, input.LastName),
+				MimeType:   "application/pdf",
+				DataBase64: pdfData,
+			}
+			story.ContentType = "application/pdf"
+		case "video":
+			storedFile = input.Video
+		case "document":
+			storedFile = input.Document
+		}
+
+		if storedFile != nil {
+			fileName := storyStorageFilename(storedFile.Filename)
 			objectPath := fmt.Sprintf(
 				"achiever-stories/requests/%d/%s_%s",
 				request.RequestID,
 				time.Now().UTC().Format("20060102150405"),
 				fileName,
 			)
-			storyURL, sizeBytes, err := uploadToGCSHook(doc.DataBase64, "nordik-drive-photos", objectPath)
+			storyURL, sizeBytes, err := uploadToGCSHook(storedFile.DataBase64, "nordik-drive-photos", objectPath)
 			if err != nil {
-				return fmt.Errorf("upload story document: %w", err)
+				return fmt.Errorf("upload story file: %w", err)
 			}
 			story.StoryURL = storyURL
 			story.FileName = fileName
@@ -1372,15 +1393,44 @@ func validateAchieverStoryRequest(input AchieverStoryRequestInput) (storyType st
 		if strings.TrimSpace(input.StoryText) == "" {
 			return "", "", fmt.Errorf("story_text is required")
 		}
-		return storyType, "text/plain", nil
+		return storyType, "application/pdf", nil
 	case "video":
 		videoURL := strings.TrimSpace(input.VideoURL)
-		parsed, parseErr := url.ParseRequestURI(videoURL)
-		if parseErr != nil || parsed.Scheme == "" || parsed.Host == "" ||
-			(parsed.Scheme != "https" && parsed.Scheme != "http") {
-			return "", "", fmt.Errorf("video_url must be a valid http or https URL")
+		if videoURL != "" && input.Video != nil {
+			return "", "", fmt.Errorf("provide either video_url or video, not both")
 		}
-		return storyType, "", nil
+		if videoURL != "" {
+			parsed, parseErr := url.ParseRequestURI(videoURL)
+			if parseErr != nil || parsed.Scheme == "" || parsed.Host == "" ||
+				(parsed.Scheme != "https" && parsed.Scheme != "http") {
+				return "", "", fmt.Errorf("video_url must be a valid http or https URL")
+			}
+			return storyType, "", nil
+		}
+		if input.Video == nil {
+			return "", "", fmt.Errorf("video_url or video is required")
+		}
+		if strings.TrimSpace(input.Video.DataBase64) == "" {
+			return "", "", fmt.Errorf("video data is required")
+		}
+		if input.Video.Size > 20*1024*1024 {
+			return "", "", fmt.Errorf("uploaded video must be 20 MB or smaller")
+		}
+
+		name := strings.ToLower(strings.TrimSpace(input.Video.Filename))
+		mime := strings.ToLower(strings.TrimSpace(input.Video.MimeType))
+		switch {
+		case strings.HasSuffix(name, ".mp4") || strings.HasSuffix(name, ".m4v") || mime == "video/mp4" || mime == "video/x-m4v":
+			return storyType, "video/mp4", nil
+		case strings.HasSuffix(name, ".webm") || mime == "video/webm":
+			return storyType, "video/webm", nil
+		case strings.HasSuffix(name, ".ogg") || strings.HasSuffix(name, ".ogv") || mime == "video/ogg":
+			return storyType, "video/ogg", nil
+		case strings.HasSuffix(name, ".mov") || mime == "video/quicktime":
+			return storyType, "video/quicktime", nil
+		default:
+			return "", "", fmt.Errorf("uploaded video must be an MP4, WebM, OGG, or MOV file")
+		}
 	case "document":
 		if input.Document == nil {
 			return "", "", fmt.Errorf("document is required")
@@ -2285,8 +2335,8 @@ func (fs *FileService) OpenRequestedAchieverStoryHandle(ctx context.Context, id 
 }
 
 func (fs *FileService) openAchieverStoryDocument(ctx context.Context, story AchieverStory) (io.ReadCloser, string, string, string, error) {
-	if story.StoryType != "document" {
-		return nil, "", "", "", fmt.Errorf("requested story is not a document")
+	if strings.TrimSpace(story.StoryURL) == "" {
+		return nil, "", "", "", fmt.Errorf("story has no stored file")
 	}
 
 	bucketName, objectPath, err := parseGSURL(story.StoryURL)
@@ -2317,7 +2367,7 @@ func (fs *FileService) openAchieverStoryDocument(ctx context.Context, story Achi
 	}
 
 	disposition := "attachment"
-	if strings.HasPrefix(contentType, "image/") || contentType == "application/pdf" {
+	if strings.HasPrefix(contentType, "image/") || strings.HasPrefix(contentType, "video/") || contentType == "application/pdf" {
 		disposition = "inline"
 	}
 

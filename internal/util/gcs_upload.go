@@ -21,11 +21,10 @@ func UploadPhotoToGCS(base64Data, bucketName, objectName string) (string, int64,
 	}
 	defer client.Close()
 
-	// strip "data:image/jpeg;base64," prefix
-	if strings.Contains(base64Data, ",") {
-		parts := strings.Split(base64Data, ",")
-		base64Data = parts[1]
-	}
+	// Preserve the media type from a data URL. This uploader is also used for
+	// story PDFs, documents, and videos despite its historical photo-specific
+	// name, so forcing image/jpeg would give those GCS objects bad metadata.
+	base64Data, contentType := splitBase64DataURL(base64Data)
 
 	data, err := base64.StdEncoding.DecodeString(base64Data)
 	if err != nil {
@@ -33,7 +32,7 @@ func UploadPhotoToGCS(base64Data, bucketName, objectName string) (string, int64,
 	}
 
 	w := client.Bucket(bucketName).Object(objectName).NewWriter(ctx)
-	w.ContentType = "image/jpeg"
+	w.ContentType = contentType
 
 	sizeBytes, err := w.Write(data)
 	if err != nil {
@@ -48,6 +47,24 @@ func UploadPhotoToGCS(base64Data, bucketName, objectName string) (string, int64,
 	url := fmt.Sprintf("gs://%s/%s", bucketName, objectName)
 
 	return url, int64(sizeBytes), nil
+}
+
+func splitBase64DataURL(value string) (payload string, contentType string) {
+	contentType = "image/jpeg"
+	comma := strings.IndexByte(value, ',')
+	if comma < 0 {
+		return value, contentType
+	}
+
+	metadata := value[:comma]
+	if strings.HasPrefix(strings.ToLower(metadata), "data:") {
+		mediaSpec := strings.SplitN(metadata, ";", 2)[0]
+		mediaType := strings.TrimSpace(mediaSpec[len("data:"):])
+		if mediaType != "" {
+			contentType = strings.ToLower(mediaType)
+		}
+	}
+	return value[comma+1:], contentType
 }
 
 func SanitizePart(s string) string {

@@ -378,6 +378,17 @@ CREATE INDEX IF NOT EXISTS idx_file_data_normalized_status
 CREATE INDEX IF NOT EXISTS idx_file_data_normalized_source_updated
     ON file_data_normalized(source_updated_at);
 
+-- NIA database-first chat routes scope every query to one ready normalized
+-- file version, then group or filter by these canonical dimensions.
+CREATE INDEX IF NOT EXISTS idx_fdn_nia_scope_community
+    ON file_data_normalized(file_id, version, normalization_version, status, canonical_community);
+
+CREATE INDEX IF NOT EXISTS idx_fdn_nia_scope_school
+    ON file_data_normalized(file_id, version, normalization_version, status, canonical_school);
+
+CREATE INDEX IF NOT EXISTS idx_fdn_nia_scope_name
+    ON file_data_normalized(file_id, version, normalization_version, status, canonical_name, source_row_id);
+
 CREATE TABLE IF NOT EXISTS file_daily_honours (
     id SERIAL PRIMARY KEY,
     file_id INT NOT NULL REFERENCES file(id) ON DELETE CASCADE,
