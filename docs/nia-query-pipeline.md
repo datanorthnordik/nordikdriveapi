@@ -17,8 +17,10 @@ NIA uses the cheapest reliable execution path that can answer each question.
    - Handles supported canonical, date/death, and record-level cases that are not suitable for the SQL planner.
 4. **Constrained answer generation**
    - Sends only the user's question and the compact, verified query result to Gemini Flash.
+   - Includes the file title and its short `file.description` as dataset-scope context.
    - The model writes the final natural-language answer but does not filter, count, compare, or select facts.
    - Complete-list prompts require every returned value to be preserved without truncation.
+   - Structured or malformed JSON envelopes are unwrapped or replaced before an answer reaches the UI.
    - The verified result remains available as a fail-safe if generation is temporarily unavailable.
 5. **Structured retrieval**
    - Selects and projects only relevant normalized rows.
@@ -44,6 +46,8 @@ Text filters are matched against actual canonical community and school values, n
 Questions involving narrative interpretation, unsupported filters, ambiguous entities, audio, or details that cannot be proven from a deterministic query continue through structured retrieval and the model.
 
 This separation keeps factual work deterministic while ensuring the user-facing answer is written by the LLM. Routed prompts contain only the compact query result rather than the whole dataset, keeping token use and latency low.
+
+`db-init/init.sql` backfills concise descriptions for blank existing files and file-version rows while preserving curator-written descriptions. The Shingwauk/Wawanosh master-list pattern is described as a survivor master file so terms such as "impacted" are interpreted in dataset scope; rankings still mean the largest number of listed matching individuals, not a claim about relative severity.
 
 ## Diagnostics
 

@@ -260,6 +260,42 @@ ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
 ALTER TABLE file_version
 ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
 
+-- NIA uses this short description as dataset-level context. Keep curator-written
+-- descriptions, and backfill every older file that predates the description
+-- field. Counts, rankings, and lists still come from the file rows themselves.
+UPDATE file
+SET description = CASE
+    WHEN LOWER(filename) LIKE '%shingwauk%'
+         AND LOWER(filename) LIKE '%wawanosh%'
+         AND LOWER(filename) LIKE '%master%list%'
+        THEN 'Master list of residential school survivors impacted by Shingwauk Residential School, including Wawanosh records.'
+    WHEN LOWER(filename) LIKE '%shingwauk%'
+         AND LOWER(filename) LIKE '%master%list%'
+        THEN 'Master list of residential school survivors impacted by Shingwauk Residential School.'
+    WHEN LOWER(filename) LIKE '%wawanosh%'
+         AND LOWER(filename) LIKE '%master%list%'
+        THEN 'Master list of residential school survivors impacted by Wawanosh Residential School.'
+    WHEN LOWER(filename) LIKE '%confirmed%'
+         AND LOWER(filename) LIKE '%shingwauk%'
+        THEN 'Confirmed death records associated with Shingwauk and Wawanosh Residential Schools.'
+    WHEN LOWER(filename) LIKE '%survivor%'
+        THEN 'Residential school survivor records represented in this file.'
+    WHEN LOWER(filename) LIKE '%deceased%'
+         OR LOWER(filename) LIKE '%death%'
+         OR LOWER(filename) LIKE '%coroner%'
+        THEN 'Records of deceased individuals represented in this file.'
+    ELSE 'Records represented in the ' || filename || ' dataset.'
+END
+WHERE BTRIM(COALESCE(description, '')) = '';
+
+-- Version rows receive the same scope as their current file unless a curator
+-- already supplied version-specific context.
+UPDATE file_version AS fv
+SET description = f.description
+FROM file AS f
+WHERE fv.file_id = f.id
+  AND BTRIM(COALESCE(fv.description, '')) = '';
+
 CREATE INDEX IF NOT EXISTS idx_file_version_file_version
     ON file_version(file_id, version);
 

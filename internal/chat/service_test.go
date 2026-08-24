@@ -288,6 +288,11 @@ func rawAnswer(text string) *genai.GenerateContentResponse {
 }
 
 func verifiedRoutedAnswer(t *testing.T, contents []*genai.Content) *genai.GenerateContentResponse {
+	payload := routedAnswerPayloadFromPrompt(t, contents)
+	return rawAnswer(payload.VerifiedQueryResult)
+}
+
+func routedAnswerPayloadFromPrompt(t *testing.T, contents []*genai.Content) routedAnswerPayload {
 	t.Helper()
 	if len(contents) == 0 || len(contents[0].Parts) == 0 {
 		t.Fatal("expected routed answer prompt")
@@ -305,7 +310,7 @@ func verifiedRoutedAnswer(t *testing.T, contents []*genai.Content) *genai.Genera
 	if strings.TrimSpace(payload.VerifiedQueryResult) == "" {
 		t.Fatal("expected non-empty verified query result")
 	}
-	return rawAnswer(payload.VerifiedQueryResult)
+	return payload
 }
 
 func strconvQuote(v string) string {
@@ -383,6 +388,31 @@ func TestResolveChatResponse_FallsBackToRawText(t *testing.T) {
 	}
 	if matchedRowID != nil {
 		t.Fatalf("matched row = %#v", matchedRowID)
+	}
+}
+
+func TestResolveChatResponse_RecoversAnswerFromMalformedStructuredJSON(t *testing.T) {
+	raw := `{"answer":"Garden River has the largest number of listed survivors.","matched_row_ref":null}`
+	// Simulate the occasional unescaped quote that makes an otherwise standard
+	// structured response invalid JSON.
+	raw = strings.Replace(raw, `survivors.",`, `survivors".",`, 1)
+
+	answer, matchedRowID := resolveChatResponse(raw, nil)
+	if strings.Contains(answer, `"answer"`) || strings.Contains(answer, `"matched_row_ref"`) {
+		t.Fatalf("structured response leaked into display answer: %q", answer)
+	}
+	if !strings.Contains(answer, "Garden River") {
+		t.Fatalf("expected recovered human-readable answer, got %q", answer)
+	}
+	if matchedRowID != nil {
+		t.Fatalf("matched row = %#v", matchedRowID)
+	}
+}
+
+func TestResolveChatResponse_NeverReturnsRawJSONObject(t *testing.T) {
+	answer, _ := resolveChatResponse(`{"unexpected":"shape"}`, nil)
+	if strings.HasPrefix(strings.TrimSpace(answer), "{") || strings.Contains(answer, `"unexpected"`) {
+		t.Fatalf("raw JSON leaked into display answer: %q", answer)
 	}
 }
 
@@ -2075,6 +2105,57 @@ func TestChatService_Chat_AnswersGroupExtremeWithNamesFromDatabase(t *testing.T)
 	}
 }
 
+func TestChatService_Chat_AnswersCommunityImpactFromDatabaseUsingDatasetDescription(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	const filename = "Shingwauk And Wawanosh Students Master List"
+	const description = "Master list of residential school survivors impacted by Shingwauk Residential School, including Wawanosh records."
+	expectChatFileLookup(mock, filename, description)
+	expectDatabaseDimensionValues(mock, "community",
+		databaseDimensionValue{Normalized: "garden river", Display: "Garden River", Count: 3},
+		databaseDimensionValue{Normalized: "batchawana bay", Display: "Batchawana Bay", Count: 1},
+	)
+
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiGenerateContentHook = oldGenerate
+	})
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, model string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		if model != chatFastModel {
+			t.Fatalf("model = %q want %q", model, chatFastModel)
+		}
+		payload := routedAnswerPayloadFromPrompt(t, contents)
+		if payload.DatasetTitle != filename || payload.DatasetDescription != description {
+			t.Fatalf("missing dataset scope in routed prompt: %#v", payload)
+		}
+		if !strings.Contains(payload.VerifiedQueryResult, "Garden River") || !strings.Contains(payload.VerifiedQueryResult, "3") {
+			t.Fatalf("missing verified group result: %#v", payload)
+		}
+		// Even if the model ignores the plain-text instruction and returns the
+		// standard structured envelope, only its answer text may reach the UI.
+		return rawAnswer(`{"answer":"Garden River has the largest number of listed Shingwauk survivors, with 3 individuals.","matched_row_ref":null}`), nil
+	}
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	result, err := cs.Chat("What community is more impacted?", nil, filename, nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if result.Answer != "Garden River has the largest number of listed Shingwauk survivors, with 3 individuals." {
+		t.Fatalf("unexpected answer: %q", result.Answer)
+	}
+	if strings.HasPrefix(strings.TrimSpace(result.Answer), "{") {
+		t.Fatalf("JSON leaked into answer: %q", result.Answer)
+	}
+	if result.Debug == nil || result.Debug.RetrievalMode != "database_group_extreme" || result.Debug.ExecutionMode != "database_llm" {
+		t.Fatalf("expected database impact route with LLM answer, got %#v", result.Debug)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
 func TestChatService_Chat_AnswersFilteredRecordListFromDatabase(t *testing.T) {
 	db, mock, cleanup := newMockDBChatSvc(t)
 	defer cleanup()
@@ -2213,7 +2294,7 @@ func TestChatService_FinalizeRoutedChatAnswer_RetainsVerifiedResultOnModelFailur
 	}
 	cs := &ChatService{Client: &genai.Client{}}
 
-	finalized := cs.finalizeRoutedChatAnswer(context.Background(), "List every community", result)
+	finalized := cs.finalizeRoutedChatAnswer(context.Background(), ChatQueryInput{Question: "List every community"}, result)
 	if finalized.Answer != "The communities are Garden River and Walpole Island." {
 		t.Fatalf("verified fallback answer changed: %q", finalized.Answer)
 	}
@@ -2299,6 +2380,8 @@ func TestPlanDatabaseChatQuestion_CoversCommonCheapQuestions(t *testing.T) {
 		{question: "Compare the communities", operation: databaseOperationGroupSummary},
 		{question: "Give me a breakdown by school", operation: databaseOperationGroupSummary},
 		{question: "What are the top communities?", operation: databaseOperationGroupExtreme},
+		{question: "What community is more impacted?", operation: databaseOperationGroupExtreme},
+		{question: "Which community has highest amount of individuals?", operation: databaseOperationGroupExtreme},
 		{question: "What is the total number of records?", operation: databaseOperationCount},
 		{question: "Does Garden River have any students?", operation: databaseOperationExistence},
 		{question: "What columns are available?", operation: databaseOperationFieldCatalog},
@@ -2313,6 +2396,27 @@ func TestPlanDatabaseChatQuestion_CoversCommonCheapQuestions(t *testing.T) {
 			}
 			if plan.Operation != test.operation {
 				t.Fatalf("operation = %q want %q", plan.Operation, test.operation)
+			}
+		})
+	}
+}
+
+func TestDatabasePlanSupportsCommunityImpactPhrases(t *testing.T) {
+	questions := []string{
+		"What community is more impacted?",
+		"Which community has highest amount of individuals?",
+		"Which community has the maximum number of people?",
+	}
+
+	for _, question := range questions {
+		t.Run(question, func(t *testing.T) {
+			plan, ok := planDatabaseChatQuestion(question)
+			if !ok || plan.Operation != databaseOperationGroupExtreme || plan.Field != "community" || plan.Extreme != "highest" {
+				t.Fatalf("unexpected database plan: %#v, ok=%v", plan, ok)
+			}
+			ctx := buildDeterministicQuestionContext(nil, question)
+			if !databasePlanSupportsContext(plan, ctx) {
+				t.Fatalf("expected database plan to accept context: %#v", ctx)
 			}
 		})
 	}
