@@ -124,7 +124,7 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 			return cached, nil
 		}
 		if routed, ok := cs.tryDatabaseChat(input); ok {
-			routed = cs.finalizeRoutedChatAnswer(context.Background(), input.Question, routed)
+			routed = cs.finalizeRoutedChatAnswer(context.Background(), input, routed)
 			if routed.Debug != nil {
 				routed.Debug.TotalMillis = time.Since(totalStart).Milliseconds()
 			}
@@ -136,7 +136,7 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 			return nil, err
 		}
 		if ok {
-			routed = cs.finalizeRoutedChatAnswer(context.Background(), input.Question, routed)
+			routed = cs.finalizeRoutedChatAnswer(context.Background(), input, routed)
 			if routed.Debug != nil {
 				routed.Debug.TotalMillis = time.Since(totalStart).Milliseconds()
 			}
@@ -377,6 +377,12 @@ func resolveChatResponse(raw string, rowRefToID map[string]int) (string, *int) {
 
 	structured, ok := parseStructuredChatResponse(raw)
 	if !ok {
+		if answer := extractMalformedStructuredChatAnswer(raw); answer != "" {
+			return answer, nil
+		}
+		if looksLikeJSONChatResponse(raw) {
+			return "I'm sorry, I couldn't format that answer correctly. Please try again.", nil
+		}
 		return raw, nil
 	}
 
@@ -387,6 +393,70 @@ func resolveChatResponse(raw string, rowRefToID map[string]int) (string, *int) {
 
 	matchedRowID := resolveMatchedRowRef(structured.MatchedRowRef, rowRefToID)
 	return answer, matchedRowID
+}
+
+func looksLikeJSONChatResponse(raw string) bool {
+	text := strings.TrimSpace(raw)
+	if strings.HasPrefix(text, "```json") || strings.HasPrefix(text, "```JSON") {
+		return true
+	}
+	return strings.HasPrefix(text, "{") || strings.HasPrefix(text, "[")
+}
+
+// extractMalformedStructuredChatAnswer prevents a nearly-correct model JSON
+// response from leaking into the UI. It only activates when an answer property
+// is followed by the expected matched_row_ref property, and uses the last quote
+// before that property so an accidental unescaped quote inside the answer does
+// not truncate the recovered text.
+func extractMalformedStructuredChatAnswer(raw string) string {
+	text := strings.TrimSpace(raw)
+	if text == "" || (!strings.HasPrefix(text, "{") && !strings.HasPrefix(text, "```")) {
+		return ""
+	}
+
+	answerKey := strings.Index(text, `"answer"`)
+	if answerKey < 0 {
+		return ""
+	}
+	valueText := text[answerKey+len(`"answer"`):]
+	colon := strings.IndexByte(valueText, ':')
+	if colon < 0 {
+		return ""
+	}
+	valueText = strings.TrimLeft(valueText[colon+1:], " \t\r\n")
+	if !strings.HasPrefix(valueText, `"`) {
+		return ""
+	}
+	valueText = valueText[1:]
+
+	matchedKey := strings.Index(valueText, `"matched_row_ref"`)
+	if matchedKey < 0 {
+		return ""
+	}
+	beforeMatchedKey := strings.TrimSpace(valueText[:matchedKey])
+	beforeMatchedKey = strings.TrimSuffix(beforeMatchedKey, ",")
+	beforeMatchedKey = strings.TrimSpace(beforeMatchedKey)
+	endQuote := strings.LastIndexByte(beforeMatchedKey, '"')
+	if endQuote < 0 {
+		return ""
+	}
+
+	candidate := strings.TrimSpace(beforeMatchedKey[:endQuote])
+	if candidate == "" {
+		return ""
+	}
+	if decoded, err := strconv.Unquote(`"` + candidate + `"`); err == nil {
+		return strings.TrimSpace(decoded)
+	}
+
+	// The JSON was malformed, so decode the common escapes conservatively while
+	// retaining the human-readable answer instead of exposing the whole object.
+	candidate = strings.ReplaceAll(candidate, `\n`, "\n")
+	candidate = strings.ReplaceAll(candidate, `\r`, "\r")
+	candidate = strings.ReplaceAll(candidate, `\t`, "\t")
+	candidate = strings.ReplaceAll(candidate, `\"`, `"`)
+	candidate = strings.ReplaceAll(candidate, `\\`, `\`)
+	return strings.TrimSpace(candidate)
 }
 
 func parseStructuredChatResponse(raw string) (*chatStructuredResponse, bool) {

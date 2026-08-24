@@ -48,10 +48,12 @@ type deterministicGroupedCount struct {
 }
 
 var deterministicRouteNoiseTokens = map[string]struct{}{
-	"bottom": {}, "breakdown": {}, "compare": {}, "comparison": {}, "count": {}, "counts": {}, "distribution": {},
-	"each": {}, "fewest": {}, "highest": {}, "largest": {}, "least": {}, "many": {},
-	"most": {}, "number": {}, "numbers": {}, "occur": {}, "occurred": {}, "per": {}, "smallest": {}, "total": {},
-	"top": {}, "happen": {}, "happened": {},
+	"affected": {}, "amount": {}, "amounts": {}, "bottom": {}, "breakdown": {}, "compare": {}, "comparison": {},
+	"count": {}, "counts": {}, "distribution": {}, "each": {}, "fewest": {}, "greatest": {}, "highest": {},
+	"impact": {}, "impacted": {}, "individual": {}, "individuals": {}, "largest": {}, "least": {}, "many": {},
+	"max": {}, "maximum": {}, "min": {}, "minimum": {}, "most": {}, "number": {}, "numbers": {}, "people": {},
+	"person": {}, "persons": {}, "record": {}, "records": {}, "occur": {}, "occurred": {}, "per": {},
+	"smallest": {}, "total": {}, "top": {}, "happen": {}, "happened": {},
 }
 
 var deterministicLookupFieldPhrases = []struct {
@@ -983,9 +985,23 @@ func looksLikeDeterministicDeathYearQuestion(normalizedQuestion string) bool {
 
 func deterministicGroupExtreme(normalizedQuestion string) string {
 	switch {
-	case strings.Contains(normalizedQuestion, "highest"), strings.Contains(normalizedQuestion, "most"), strings.Contains(normalizedQuestion, "largest"), containsStructuredToken(normalizedQuestion, "top"):
+	case strings.Contains(normalizedQuestion, "highest"),
+		strings.Contains(normalizedQuestion, "most"),
+		strings.Contains(normalizedQuestion, "largest"),
+		strings.Contains(normalizedQuestion, "greatest"),
+		strings.Contains(normalizedQuestion, "more impacted"),
+		strings.Contains(normalizedQuestion, "more affected"),
+		containsStructuredToken(normalizedQuestion, "maximum"),
+		containsStructuredToken(normalizedQuestion, "max"),
+		containsStructuredToken(normalizedQuestion, "top"):
 		return "highest"
-	case strings.Contains(normalizedQuestion, "lowest"), strings.Contains(normalizedQuestion, "least"), strings.Contains(normalizedQuestion, "fewest"), strings.Contains(normalizedQuestion, "smallest"), containsStructuredToken(normalizedQuestion, "bottom"):
+	case strings.Contains(normalizedQuestion, "lowest"),
+		strings.Contains(normalizedQuestion, "least"),
+		strings.Contains(normalizedQuestion, "fewest"),
+		strings.Contains(normalizedQuestion, "smallest"),
+		containsStructuredToken(normalizedQuestion, "minimum"),
+		containsStructuredToken(normalizedQuestion, "min"),
+		containsStructuredToken(normalizedQuestion, "bottom"):
 		return "lowest"
 	default:
 		return ""
