@@ -85,6 +85,7 @@ func setupRouterForController(fc *FileController) *gin.Engine {
 		g.POST("/replace", fc.ReplaceFile)
 		g.POST("/revert", fc.RevertFile)
 		g.POST("/edit/request", fc.CreateEditRequest)
+		g.POST("/achiever-stories/request", fc.CreateAchieverStoryRequest)
 		g.GET("/edit/request", fc.GetEditRequests)
 		g.GET("/edit/photos/:requestId", fc.GetPhotosByRequest)
 		g.GET("/edit/docs/:requestId", fc.GetDocsByRequest)
@@ -94,6 +95,7 @@ func setupRouterForController(fc *FileController) *gin.Engine {
 		g.GET("/photo/:photoId", fc.GetPhoto)
 		g.GET("/doc/:docId", fc.GetDoc)
 		g.GET("/achiever-stories/download/:storyId", fc.DownloadAchieverStory)
+		g.GET("/achiever-stories/request/download/:storyId", fc.DownloadRequestedAchieverStory)
 		g.PUT("/approve/request", fc.ReviewEditRequest)
 		g.POST("/photos/review", fc.ReviewPhotos)
 		g.POST("/doc/download/:id", fc.DownloadMediaByID)
@@ -185,6 +187,7 @@ type fakeFileService struct {
 
 	LastApproveReqID uint
 	LastApproveBy    uint
+	LastStoryRequest AchieverStoryRequestInput
 
 	LastReviewer string
 
@@ -309,12 +312,23 @@ func (f *fakeFileService) CreateEditRequest(input EditRequestInput, userID uint)
 	f.bump("CreateEditRequest")
 	return &FileEditRequest{RequestID: 123}, nil
 }
+func (f *fakeFileService) CreateAchieverStoryRequest(input AchieverStoryRequestInput, userID uint) (*FileEditRequest, error) {
+	f.bump("CreateAchieverStoryRequest")
+	f.LastStoryRequest = input
+	return &FileEditRequest{RequestID: 124, RequestType: fileEditRequestTypeAchieverStory}, nil
+}
 func (f *fakeFileService) GetEditRequests(statusCSV *string, userID *uint) ([]FileEditRequestWithUser, error) {
 	f.bump("GetEditRequests")
 	return []FileEditRequestWithUser{}, nil
 }
 func (f *fakeFileService) ReviewEditRequest(requestID uint, status string, reviewComment string, updates []FileEditRequestDetails, userId uint) error {
 	f.bump("ReviewEditRequest")
+	f.LastApproveReqID = requestID
+	f.LastApproveBy = userId
+	return nil
+}
+func (f *fakeFileService) ReviewAchieverStoryRequest(requestID uint, reviewComment string, storyReviews []AchieverStoryReviewInput, userId uint) error {
+	f.bump("ReviewAchieverStoryRequest")
 	f.LastApproveReqID = requestID
 	f.LastApproveBy = userId
 	return nil
@@ -363,5 +377,9 @@ func (f *fakeFileService) OpenMediaHandle(ctx context.Context, id uint, kind str
 }
 func (f *fakeFileService) OpenAchieverStoryHandle(ctx context.Context, id uint) (io.ReadCloser, string, string, string, error) {
 	f.bump("OpenAchieverStoryHandle")
+	return f.AchieverStoryRCOut, f.AchieverStoryFNOut, f.AchieverStoryCTOut, f.AchieverStoryDispOut, f.AchieverStoryErr
+}
+func (f *fakeFileService) OpenRequestedAchieverStoryHandle(ctx context.Context, id uint, userID uint, isAdmin bool) (io.ReadCloser, string, string, string, error) {
+	f.bump("OpenRequestedAchieverStoryHandle")
 	return f.AchieverStoryRCOut, f.AchieverStoryFNOut, f.AchieverStoryCTOut, f.AchieverStoryDispOut, f.AchieverStoryErr
 }

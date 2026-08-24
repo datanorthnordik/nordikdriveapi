@@ -32,12 +32,16 @@ type AchieverStory struct {
 	AncestryDetails         string         `gorm:"type:text" json:"ancestry_details"`
 	DerivationSources       pq.StringArray `gorm:"type:text[];default:'{}'" json:"derivation_sources"`
 
-	SourceWorkbook string    `gorm:"type:varchar(512)" json:"source_workbook"`
-	SourceSheet    string    `gorm:"type:varchar(255)" json:"source_sheet"`
-	SourceRow      int       `json:"source_row"`
-	CreatedBy      *uint     `json:"created_by"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	SourceWorkbook  string     `gorm:"type:varchar(512)" json:"source_workbook"`
+	SourceSheet     string     `gorm:"type:varchar(255)" json:"source_sheet"`
+	SourceRow       int        `json:"source_row"`
+	RequestID       *uint      `gorm:"index" json:"request_id"`
+	CreatedBy       *uint      `json:"created_by"`
+	ReviewedBy      *uint      `json:"reviewed_by"`
+	ReviewerComment string     `gorm:"type:text;not null;default:''" json:"reviewer_comment"`
+	ReviewedAt      *time.Time `json:"reviewed_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 func (AchieverStory) TableName() string { return "file_row_achiever_stories" }

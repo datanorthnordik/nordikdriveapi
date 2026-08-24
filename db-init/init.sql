@@ -514,6 +514,7 @@ CREATE TABLE IF NOT EXISTS file_edit_request (
     created_at TIMESTAMP DEFAULT NOW(),
     row_id INT NULL,
     is_edited BOOLEAN DEFAULT TRUE,
+    request_type VARCHAR(30) NOT NULL DEFAULT 'edit',
     file_id INT NOT NULL REFERENCES file(id) ON DELETE CASCADE,
     reviewed_by INT REFERENCES users(id) ON DELETE SET NULL,
     reviewer_comment TEXT,
@@ -533,11 +534,28 @@ ALTER TABLE file_edit_request
 ADD CONSTRAINT file_edit_request_status_check
 CHECK (status IN ('pending', 'completed'));
 
+ALTER TABLE file_edit_request
+ADD COLUMN IF NOT EXISTS request_type VARCHAR(30) NOT NULL DEFAULT 'edit';
+
+UPDATE file_edit_request
+SET request_type = 'edit'
+WHERE request_type IS NULL OR BTRIM(request_type) = '';
+
+ALTER TABLE file_edit_request
+DROP CONSTRAINT IF EXISTS file_edit_request_type_check;
+
+ALTER TABLE file_edit_request
+ADD CONSTRAINT file_edit_request_type_check
+CHECK (request_type IN ('edit', 'achiever_story'));
+
 CREATE INDEX IF NOT EXISTS idx_file_edit_request_file_row
     ON file_edit_request(file_id, row_id);
 
 CREATE INDEX IF NOT EXISTS idx_file_edit_request_file_status_created
     ON file_edit_request(file_id, status, created_at, request_id);
+
+CREATE INDEX IF NOT EXISTS idx_file_edit_request_type_status_created
+    ON file_edit_request(request_type, status, created_at, request_id);
 
 
 CREATE TABLE file_edit_request_photos (
@@ -893,19 +911,44 @@ CREATE TABLE IF NOT EXISTS file_row_achiever_stories (
     source_workbook VARCHAR(512) NOT NULL DEFAULT '',
     source_sheet VARCHAR(255) NOT NULL DEFAULT '',
     source_row INT NOT NULL DEFAULT 0,
+    request_id INT NULL REFERENCES file_edit_request(request_id) ON DELETE SET NULL,
     created_by INT NULL REFERENCES users(id) ON DELETE SET NULL,
+    reviewed_by INT NULL REFERENCES users(id) ON DELETE SET NULL,
+    reviewer_comment TEXT NOT NULL DEFAULT '',
+    reviewed_at TIMESTAMP NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT uq_file_row_achiever_story_source
-        UNIQUE (file_id, source_workbook, source_sheet, row_id, source_row)
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE file_row_achiever_stories
+ADD COLUMN IF NOT EXISTS request_id INT NULL REFERENCES file_edit_request(request_id) ON DELETE SET NULL;
+
+ALTER TABLE file_row_achiever_stories
+ADD COLUMN IF NOT EXISTS reviewed_by INT NULL REFERENCES users(id) ON DELETE SET NULL;
+
+ALTER TABLE file_row_achiever_stories
+ADD COLUMN IF NOT EXISTS reviewer_comment TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE file_row_achiever_stories
+ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMP NULL;
+
+-- Imported stories retain a source-specific uniqueness rule. User submissions
+-- intentionally have no import source and may be added more than once per row.
+ALTER TABLE file_row_achiever_stories
+DROP CONSTRAINT IF EXISTS uq_file_row_achiever_story_source;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_file_row_achiever_story_source
+    ON file_row_achiever_stories(file_id, source_workbook, source_sheet, row_id, source_row)
+    WHERE source_workbook <> '' OR source_sheet <> '' OR source_row <> 0;
 
 CREATE INDEX IF NOT EXISTS idx_achiever_story_file_row
     ON file_row_achiever_stories(file_id, row_id);
 
 CREATE INDEX IF NOT EXISTS idx_achiever_story_file_type
     ON file_row_achiever_stories(file_id, story_type);
+
+CREATE INDEX IF NOT EXISTS idx_achiever_story_request
+    ON file_row_achiever_stories(request_id);
 
 CREATE OR REPLACE FUNCTION set_achiever_story_updated_at()
 RETURNS TRIGGER AS $$
