@@ -48,9 +48,10 @@ type deterministicGroupedCount struct {
 }
 
 var deterministicRouteNoiseTokens = map[string]struct{}{
-	"count": {}, "counts": {}, "each": {}, "fewest": {}, "highest": {}, "largest": {}, "least": {}, "many": {},
+	"bottom": {}, "breakdown": {}, "compare": {}, "comparison": {}, "count": {}, "counts": {}, "distribution": {},
+	"each": {}, "fewest": {}, "highest": {}, "largest": {}, "least": {}, "many": {},
 	"most": {}, "number": {}, "numbers": {}, "occur": {}, "occurred": {}, "per": {}, "smallest": {}, "total": {},
-	"happen": {}, "happened": {},
+	"top": {}, "happen": {}, "happened": {},
 }
 
 var deterministicLookupFieldPhrases = []struct {
@@ -94,6 +95,9 @@ func (cs *ChatService) tryDeterministicChat(input ChatQueryInput) (*ChatResult, 
 	filteredCommunities := normalizeCommunities(input.Communities)
 	route, ok := buildDeterministicChatRoute(dataset.rows, question, filteredCommunities)
 	if !ok {
+		route, ok = cs.tryConfiguredDistinctValuesRoute(input.FileID, dataset.rows, question, filteredCommunities)
+	}
+	if !ok {
 		return nil, false, nil
 	}
 
@@ -130,6 +134,9 @@ func buildDeterministicChatRoute(rows []cachedStructuredChatRow, question string
 		return route, true
 	}
 	if route, ok := tryDeterministicGroupExtremeRoute(rows, communities, cloneDeterministicQuestionContext(ctx)); ok {
+		return route, true
+	}
+	if route, ok := tryDeterministicDistinctGroupValuesRoute(rows, communities, cloneDeterministicQuestionContext(ctx)); ok {
 		return route, true
 	}
 	if route, ok := tryDeterministicGroupSummaryRoute(rows, communities, cloneDeterministicQuestionContext(ctx)); ok {
@@ -454,6 +461,46 @@ func tryDeterministicGroupExtremeRoute(rows []cachedStructuredChatRow, communiti
 	return deterministicChatRoute{
 		QueryType:     "group_extreme",
 		RetrievalMode: "deterministic_group_extreme",
+		Answer:        answer,
+		RowsSelected:  len(selectedIndexes),
+	}, true
+}
+
+func tryDeterministicDistinctGroupValuesRoute(rows []cachedStructuredChatRow, communities []string, ctx deterministicQuestionContext) (deterministicChatRoute, bool) {
+	if !looksLikeDeterministicDistinctValueListQuestion(ctx.NormalizedQuestion) {
+		return deterministicChatRoute{}, false
+	}
+
+	field, _, ok := detectDeterministicGroupField(ctx.NormalizedQuestion)
+	if !ok {
+		return deterministicChatRoute{}, false
+	}
+	if hasUnsupportedDistinctValueListTokens(ctx.Profile.Tokens, ctx.ConsumedTokens, deterministicGroupQuestionAliases(field)) {
+		return deterministicChatRoute{}, false
+	}
+
+	selectedIndexes := applyDeterministicFilters(rows, communities, ctx.Filters)
+	grouped := buildDeterministicGroupedCounts(rows, selectedIndexes, field)
+	sort.Slice(grouped, func(i, j int) bool {
+		return strings.ToLower(grouped[i].Display) < strings.ToLower(grouped[j].Display)
+	})
+
+	displays := make([]string, 0, len(grouped))
+	for _, item := range grouped {
+		displays = append(displays, item.Display)
+	}
+
+	dimension := deterministicGroupDimension(field)
+	answer := fmt.Sprintf("I couldn't find any %s values in the matching data.", dimension)
+	if len(displays) == 1 {
+		answer = fmt.Sprintf("The %s in the data is %s.", dimension, displays[0])
+	} else if len(displays) > 1 {
+		answer = fmt.Sprintf("The %d %s in the data are %s.", len(displays), deterministicGroupDimensionPlural(field), joinNaturalStrings(displays))
+	}
+
+	return deterministicChatRoute{
+		QueryType:     "distinct_values",
+		RetrievalMode: "deterministic_distinct_values",
 		Answer:        answer,
 		RowsSelected:  len(selectedIndexes),
 	}, true
@@ -790,7 +837,8 @@ func looksLikeDeterministicCountQuestion(normalizedQuestion string) bool {
 	return strings.Contains(normalizedQuestion, "how many") ||
 		strings.Contains(normalizedQuestion, "count ") ||
 		strings.HasPrefix(normalizedQuestion, "count") ||
-		strings.Contains(normalizedQuestion, "number of")
+		strings.Contains(normalizedQuestion, "number of") ||
+		questionMentionsAny(normalizedQuestion, "total records", "total students", "total entries", "total people", "total individuals")
 }
 
 func looksLikeDeterministicExistenceQuestion(normalizedQuestion string) bool {
@@ -798,7 +846,9 @@ func looksLikeDeterministicExistenceQuestion(normalizedQuestion string) bool {
 		strings.HasPrefix(normalizedQuestion, "is there any ") ||
 		strings.HasPrefix(normalizedQuestion, "did any ") ||
 		strings.HasPrefix(normalizedQuestion, "do any ") ||
-		strings.HasPrefix(normalizedQuestion, "does any ")
+		strings.HasPrefix(normalizedQuestion, "does any ") ||
+		(strings.HasPrefix(normalizedQuestion, "does ") && strings.Contains(normalizedQuestion, " have any ")) ||
+		(strings.HasPrefix(normalizedQuestion, "do ") && strings.Contains(normalizedQuestion, " have any "))
 }
 
 func looksLikeDeterministicGroupSummaryQuestion(normalizedQuestion string) bool {
@@ -807,11 +857,105 @@ func looksLikeDeterministicGroupSummaryQuestion(normalizedQuestion string) bool 
 		"by communities", "per communities", "each communities",
 		"by school", "per school", "each school",
 		"by schools", "per schools", "each schools",
+		"compare communities", "compare the communities", "community comparison", "communities comparison",
+		"compare schools", "compare the schools", "school comparison", "schools comparison",
+		"community breakdown", "communities breakdown", "breakdown of communities", "distribution across communities",
+		"school breakdown", "schools breakdown", "breakdown of schools", "distribution across schools",
 	}
 	for _, signal := range signals {
 		if strings.Contains(normalizedQuestion, signal) {
 			return true
 		}
+	}
+	return false
+}
+
+func looksLikeDeterministicDistinctValueListQuestion(normalizedQuestion string) bool {
+	if normalizedQuestion == "" {
+		return false
+	}
+
+	if strings.HasPrefix(normalizedQuestion, "list ") {
+		return true
+	}
+
+	allValuePrefixes := []string{
+		"give me all ",
+		"give me the list of ",
+		"give me a list of ",
+		"show me all ",
+		"show all ",
+		"show me the list of ",
+		"tell me all ",
+		"what are all ",
+		"which are all ",
+	}
+	for _, prefix := range allValuePrefixes {
+		if strings.HasPrefix(normalizedQuestion, prefix) {
+			return true
+		}
+	}
+
+	inventorySignals := []string{
+		"in the list",
+		"in this list",
+		"in the data",
+		"in this data",
+		"in the dataset",
+		"in this dataset",
+		"in the file",
+		"in this file",
+		"are represented",
+		"is represented",
+		"are available",
+		"is available",
+	}
+	for _, signal := range inventorySignals {
+		if strings.Contains(normalizedQuestion, signal) {
+			return strings.HasPrefix(normalizedQuestion, "what ") ||
+				strings.HasPrefix(normalizedQuestion, "which ") ||
+				strings.HasPrefix(normalizedQuestion, "give ") ||
+				strings.HasPrefix(normalizedQuestion, "show ") ||
+				strings.HasPrefix(normalizedQuestion, "tell ")
+		}
+	}
+
+	return false
+}
+
+func deterministicGroupQuestionAliases(field string) []string {
+	switch field {
+	case "community":
+		return []string{"community", "communities", "first nation", "first nations", "reserve", "reserves", "band", "bands"}
+	case "school":
+		return []string{"school", "schools", "residential school", "residential schools", "institution", "institutions"}
+	default:
+		return nil
+	}
+}
+
+func hasUnsupportedDistinctValueListTokens(tokens []string, consumed map[string]struct{}, fieldAliases []string) bool {
+	allowed := map[string]struct{}{
+		"all": {}, "available": {}, "distinct": {}, "every": {}, "file": {}, "files": {}, "give": {},
+		"count": {}, "list": {}, "lists": {}, "many": {}, "number": {}, "represent": {}, "represented": {},
+		"show": {}, "tell": {}, "value": {}, "values": {},
+	}
+	for _, alias := range fieldAliases {
+		for _, token := range strings.Fields(normalizeChatSearchValue(alias)) {
+			for _, variant := range chatQueryTokenVariants(token) {
+				allowed[variant] = struct{}{}
+			}
+		}
+	}
+
+	for _, token := range tokens {
+		if _, ok := consumed[token]; ok {
+			continue
+		}
+		if _, ok := allowed[token]; ok {
+			continue
+		}
+		return true
 	}
 	return false
 }
@@ -839,9 +983,9 @@ func looksLikeDeterministicDeathYearQuestion(normalizedQuestion string) bool {
 
 func deterministicGroupExtreme(normalizedQuestion string) string {
 	switch {
-	case strings.Contains(normalizedQuestion, "highest"), strings.Contains(normalizedQuestion, "most"), strings.Contains(normalizedQuestion, "largest"):
+	case strings.Contains(normalizedQuestion, "highest"), strings.Contains(normalizedQuestion, "most"), strings.Contains(normalizedQuestion, "largest"), containsStructuredToken(normalizedQuestion, "top"):
 		return "highest"
-	case strings.Contains(normalizedQuestion, "lowest"), strings.Contains(normalizedQuestion, "least"), strings.Contains(normalizedQuestion, "fewest"), strings.Contains(normalizedQuestion, "smallest"):
+	case strings.Contains(normalizedQuestion, "lowest"), strings.Contains(normalizedQuestion, "least"), strings.Contains(normalizedQuestion, "fewest"), strings.Contains(normalizedQuestion, "smallest"), containsStructuredToken(normalizedQuestion, "bottom"):
 		return "lowest"
 	default:
 		return ""
@@ -938,6 +1082,17 @@ func deterministicGroupDimension(field string) string {
 		return "school"
 	default:
 		return "group"
+	}
+}
+
+func deterministicGroupDimensionPlural(field string) string {
+	switch field {
+	case "community":
+		return "communities"
+	case "school":
+		return "schools"
+	default:
+		return "groups"
 	}
 }
 

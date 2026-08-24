@@ -115,6 +115,39 @@ func expectChatNormalizedRowsLookup(mock sqlmock.Sqlmock, rows ...string) {
 		WillReturnRows(result)
 }
 
+func expectDatabaseDimensionValues(mock sqlmock.Sqlmock, field string, values ...databaseDimensionValue) {
+	column := "canonical_" + field
+	result := sqlmock.NewRows([]string{"normalized", "display", "record_count"})
+	for _, value := range values {
+		result.AddRow(value.Normalized, value.Display, value.Count)
+	}
+	mock.ExpectQuery(`(?i)select.*` + column + `.*record_count.*from.*file_data_normalized.*group by.*` + column).
+		WillReturnRows(result)
+}
+
+func expectDatabaseCount(mock sqlmock.Sqlmock, count int64) {
+	mock.ExpectQuery(`(?i)select.*count.*from.*file_data_normalized`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(count))
+}
+
+func expectDatabaseNamedRecords(mock sqlmock.Sqlmock, records ...databaseNamedRecord) {
+	result := sqlmock.NewRows([]string{"source_row_id", "display_name"})
+	for _, record := range records {
+		result.AddRow(record.SourceRowID, record.DisplayName)
+	}
+	mock.ExpectQuery(`(?i)select.*source_row_id.*display_name.*from.*file_data_normalized.*order by.*canonical_name.*source_row_id`).
+		WillReturnRows(result)
+}
+
+func expectDatabaseConfiguredValues(mock sqlmock.Sqlmock, values ...databaseConfiguredValue) {
+	result := sqlmock.NewRows([]string{"display_value", "record_count"})
+	for _, value := range values {
+		result.AddRow(value.Display, value.Count)
+	}
+	mock.ExpectQuery(`(?i)select.*display_value.*count.*from.*jsonb_extract_path_text.*file_data_normalized`).
+		WillReturnRows(result)
+}
+
 func normalizedChatRowColumns(row string) (string, string, string, string) {
 	var payload map[string]any
 	_ = json.Unmarshal([]byte(row), &payload)
@@ -252,6 +285,27 @@ func rawAnswer(text string) *genai.GenerateContentResponse {
 	var out genai.GenerateContentResponse
 	_ = json.Unmarshal([]byte(`{"candidates":[{"content":{"parts":[{"text":`+strconvQuote(text)+`}]}}]}`), &out)
 	return &out
+}
+
+func verifiedRoutedAnswer(t *testing.T, contents []*genai.Content) *genai.GenerateContentResponse {
+	t.Helper()
+	if len(contents) == 0 || len(contents[0].Parts) == 0 {
+		t.Fatal("expected routed answer prompt")
+	}
+	prompt := contents[0].Parts[0].Text
+	const marker = "INPUT JSON:\n"
+	markerIndex := strings.LastIndex(prompt, marker)
+	if markerIndex < 0 {
+		t.Fatalf("expected verified query result payload in prompt, got:\n%s", prompt)
+	}
+	var payload routedAnswerPayload
+	if err := json.Unmarshal([]byte(prompt[markerIndex+len(marker):]), &payload); err != nil {
+		t.Fatalf("decode routed answer payload: %v", err)
+	}
+	if strings.TrimSpace(payload.VerifiedQueryResult) == "" {
+		t.Fatal("expected non-empty verified query result")
+	}
+	return rawAnswer(payload.VerifiedQueryResult)
 }
 
 func strconvQuote(v string) string {
@@ -1210,9 +1264,11 @@ func TestChatService_Chat_RoutesCountQueryDeterministically(t *testing.T) {
 		genaiGenerateContentHook = oldGenerate
 	})
 
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-		t.Fatal("expected deterministic count route without LLM generation")
-		return nil, nil
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, model string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		if model != chatFastModel {
+			t.Fatalf("model = %q want %q", model, chatFastModel)
+		}
+		return verifiedRoutedAnswer(t, contents), nil
 	}
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
@@ -1229,14 +1285,14 @@ func TestChatService_Chat_RoutesCountQueryDeterministically(t *testing.T) {
 	if result.Debug.Strategy != "deterministic_router" {
 		t.Fatalf("strategy = %q want deterministic_router", result.Debug.Strategy)
 	}
-	if result.Debug.ExecutionMode != "deterministic" {
-		t.Fatalf("execution mode = %q want deterministic", result.Debug.ExecutionMode)
+	if result.Debug.ExecutionMode != "deterministic_llm" {
+		t.Fatalf("execution mode = %q want deterministic_llm", result.Debug.ExecutionMode)
 	}
 	if result.Debug.QueryType != "count" {
 		t.Fatalf("query type = %q want count", result.Debug.QueryType)
 	}
-	if result.Debug.PromptBytes != 0 {
-		t.Fatalf("expected zero prompt bytes for deterministic route, got %#v", result.Debug)
+	if result.Debug.PromptBytes == 0 || result.Debug.UsedModel != chatFastModel {
+		t.Fatalf("expected compact Flash prompt for deterministic route, got %#v", result.Debug)
 	}
 }
 
@@ -1267,9 +1323,8 @@ func TestChatService_Chat_RoutesFieldLookupDeterministically(t *testing.T) {
 		genaiGenerateContentHook = oldGenerate
 	})
 
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-		t.Fatal("expected deterministic field lookup without LLM generation")
-		return nil, nil
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		return verifiedRoutedAnswer(t, contents), nil
 	}
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
@@ -1332,9 +1387,8 @@ func TestChatService_Chat_RoutesGroupExtremeDeterministically(t *testing.T) {
 		genaiGenerateContentHook = oldGenerate
 	})
 
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-		t.Fatal("expected deterministic grouped route without LLM generation")
-		return nil, nil
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		return verifiedRoutedAnswer(t, contents), nil
 	}
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
@@ -1412,9 +1466,8 @@ func TestChatService_Chat_RoutesDeathGroupExtremeDeterministically(t *testing.T)
 		genaiGenerateContentHook = oldGenerate
 	})
 
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-		t.Fatal("expected deterministic death grouped route without LLM generation")
-		return nil, nil
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		return verifiedRoutedAnswer(t, contents), nil
 	}
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
@@ -1480,9 +1533,8 @@ func TestChatService_Chat_RoutesDeathGroupExtremeWithNamesDeterministically(t *t
 		genaiGenerateContentHook = oldGenerate
 	})
 
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-		t.Fatal("expected deterministic death grouped route with names without LLM generation")
-		return nil, nil
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		return verifiedRoutedAnswer(t, contents), nil
 	}
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
@@ -1576,9 +1628,8 @@ func TestChatService_Chat_RoutesDeathDatasetCommunityExtremeDeterministically(t 
 		genaiGenerateContentHook = oldGenerate
 	})
 
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-		t.Fatal("expected deterministic death dataset community route without LLM generation")
-		return nil, nil
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		return verifiedRoutedAnswer(t, contents), nil
 	}
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
@@ -1638,9 +1689,8 @@ func TestChatService_Chat_RoutesLowestGroupExtremeDeterministically(t *testing.T
 		genaiGenerateContentHook = oldGenerate
 	})
 
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-		t.Fatal("expected deterministic grouped route without LLM generation")
-		return nil, nil
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		return verifiedRoutedAnswer(t, contents), nil
 	}
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
@@ -1653,6 +1703,618 @@ func TestChatService_Chat_RoutesLowestGroupExtremeDeterministically(t *testing.T
 	}
 	if result.Debug == nil || result.Debug.QueryType != "group_extreme" {
 		t.Fatalf("expected deterministic group_extreme debug, got %#v", result.Debug)
+	}
+}
+
+func TestChatService_Chat_ListsAllCommunitiesDeterministically(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	communityNames := []string{
+		"Walpole Island",
+		"Garden River",
+		"Batchawana Bay",
+		"Sagamok",
+		"Serpent River",
+		"Thessalon",
+		"Nipissing",
+		"Dokis",
+		"Whitefish River",
+		"Garden River",
+	}
+	rows := make([]string, 0, len(communityNames))
+	for idx, community := range communityNames {
+		rows = append(rows, normalizedChatRowJSON(
+			map[string]any{
+				"name":      "Student " + strconv.Itoa(idx+1),
+				"community": community,
+			},
+			withCanonical(map[string]any{
+				"display_name": "Student " + strconv.Itoa(idx+1),
+				"community":    community,
+			}),
+		))
+	}
+	expectChatNormalizedRowsLookup(mock, rows...)
+
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiGenerateContentHook = oldGenerate
+	})
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		return verifiedRoutedAnswer(t, contents), nil
+	}
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	result, err := cs.Chat("Give me all communities in the list", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if result.Debug == nil || result.Debug.QueryType != "distinct_values" || result.Debug.ExecutionMode != "deterministic_llm" {
+		t.Fatalf("expected deterministic distinct-values debug, got %#v", result.Debug)
+	}
+	if result.Debug.PromptBytes == 0 || result.Debug.UsedModel != chatFastModel {
+		t.Fatalf("expected compact Flash answer prompt, got %#v", result.Debug)
+	}
+	if !strings.Contains(result.Answer, "The 9 communities in the data are") {
+		t.Fatalf("unexpected answer: %q", result.Answer)
+	}
+	for _, community := range communityNames[:9] {
+		if !strings.Contains(result.Answer, community) {
+			t.Fatalf("expected %q in answer: %q", community, result.Answer)
+		}
+	}
+	if strings.Count(result.Answer, "Garden River") != 1 {
+		t.Fatalf("expected duplicate communities to be removed: %q", result.Answer)
+	}
+	if strings.Index(result.Answer, "Batchawana Bay") > strings.Index(result.Answer, "Dokis") ||
+		strings.Index(result.Answer, "Dokis") > strings.Index(result.Answer, "Garden River") {
+		t.Fatalf("expected communities to be sorted alphabetically: %q", result.Answer)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatService_Chat_ListsConfiguredCanonicalSchoolsWithinCommunityFilter(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	expectChatNormalizedRowsLookup(
+		mock,
+		normalizedChatRowJSON(
+			map[string]any{"name": "Alice", "community": "Garden River", "school": "Shingwauk"},
+			withCanonical(map[string]any{"display_name": "Alice", "community": "Garden River", "school": "Shingwauk"}),
+		),
+		normalizedChatRowJSON(
+			map[string]any{"name": "Bob", "community": "Batchawana Bay", "school": "Wawanosh"},
+			withCanonical(map[string]any{"display_name": "Bob", "community": "Batchawana Bay", "school": "Wawanosh"}),
+		),
+	)
+
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiGenerateContentHook = oldGenerate
+	})
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		return verifiedRoutedAnswer(t, contents), nil
+	}
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	result, err := cs.Chat("What schools are in the data?", nil, "sheet.xlsx", []string{"Garden River"})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if result.Answer != "The school in the data is Shingwauk." {
+		t.Fatalf("unexpected answer: %q", result.Answer)
+	}
+	if result.Debug == nil || result.Debug.QueryType != "distinct_values" || result.Debug.RowsSelected != 1 {
+		t.Fatalf("expected filtered deterministic distinct-values debug, got %#v", result.Debug)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestLooksLikeDeterministicDistinctValueListQuestion_DoesNotStealDetailRequests(t *testing.T) {
+	if looksLikeDeterministicDistinctValueListQuestion("give me details about alice's community") {
+		t.Fatal("expected a person detail request to remain on the normal lookup path")
+	}
+	if !looksLikeDeterministicDistinctValueListQuestion("give me all communities in the list") {
+		t.Fatal("expected an explicit distinct-value request to use the deterministic path")
+	}
+
+	rows := []cachedStructuredChatRow{
+		{
+			CanonicalName:   "alice",
+			CanonicalSchool: "shingwauk",
+			DefaultBundle: structuredChatDefaultBundle{
+				Name:   "Alice",
+				School: "Shingwauk",
+			},
+		},
+	}
+	ctx := buildDeterministicQuestionContext(rows, "Give me all schools attended by Alice")
+	if _, ok := tryDeterministicDistinctGroupValuesRoute(rows, nil, ctx); ok {
+		t.Fatal("expected a person-specific school request not to become a whole-dataset distinct list")
+	}
+}
+
+func TestChatService_Chat_ListsDataConfigFieldValuesDeterministically(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	mock.ExpectQuery(`(?i)select.*config.*from.*data_config.*where.*file_id.*is_active.*order.*updated_at.*id.*limit`).
+		WithArgs(int64(1), true, 1).
+		WillReturnRows(sqlmock.NewRows([]string{"config"}).AddRow(`{
+			"source_file": {
+				"data_config": {
+					"fields": [
+						{"key":"first_language","label":"First Language","source_field":"First Language"}
+					]
+				}
+			}
+		}`))
+	expectDatabaseConfiguredValues(mock,
+		databaseConfiguredValue{Display: "Anishinaabemowin", Count: 1},
+		databaseConfiguredValue{Display: "Cree", Count: 2},
+	)
+
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiGenerateContentHook = oldGenerate
+	})
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		return verifiedRoutedAnswer(t, contents), nil
+	}
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	result, err := cs.Chat("Give me all first languages in the list", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if result.Answer != "I found 2 distinct values for First Language: Anishinaabemowin and Cree." {
+		t.Fatalf("unexpected answer: %q", result.Answer)
+	}
+	if result.Debug == nil || result.Debug.QueryType != "distinct_values" || result.Debug.RetrievalMode != "database_config_distinct_values" {
+		t.Fatalf("expected configured deterministic distinct-values debug, got %#v", result.Debug)
+	}
+	if result.Debug.PromptBytes == 0 || result.Debug.UsedModel != chatFastModel || result.Debug.ExecutionMode != "database_llm" {
+		t.Fatalf("expected configured answer rendered by Flash, got %#v", result.Debug)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatService_Chat_AnswersFilteredCountFromDatabase(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	expectDatabaseDimensionValues(mock, "community",
+		databaseDimensionValue{Normalized: "garden river", Display: "Garden River", Count: 2},
+		databaseDimensionValue{Normalized: "batchawana bay", Display: "Batchawana Bay", Count: 1},
+	)
+	expectDatabaseDimensionValues(mock, "school",
+		databaseDimensionValue{Normalized: "shingwauk", Display: "Shingwauk", Count: 3},
+	)
+	expectDatabaseCount(mock, 2)
+
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiGenerateContentHook = oldGenerate
+	})
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, model string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		if model != chatFastModel {
+			t.Fatalf("model = %q want %q", model, chatFastModel)
+		}
+		_ = verifiedRoutedAnswer(t, contents)
+		return rawAnswer("There are 2 students from Garden River."), nil
+	}
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	result, err := cs.Chat("How many students are from Garden River?", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if result.Answer != "There are 2 students from Garden River." {
+		t.Fatalf("unexpected answer: %q", result.Answer)
+	}
+	if result.Debug == nil || result.Debug.Strategy != "database_router" || result.Debug.RetrievalMode != "database_count" {
+		t.Fatalf("expected database count route, got %#v", result.Debug)
+	}
+	if result.Debug.PromptBytes == 0 || result.Debug.UsedModel != chatFastModel || result.Debug.ExecutionMode != "database_llm" {
+		t.Fatalf("expected database result rendered by Flash, got %#v", result.Debug)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatService_Chat_AnswersExistenceFromDatabase(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	expectDatabaseDimensionValues(mock, "community",
+		databaseDimensionValue{Normalized: "garden river", Display: "Garden River", Count: 2},
+	)
+	expectDatabaseDimensionValues(mock, "school")
+	expectDatabaseCount(mock, 2)
+
+	cs := &ChatService{DB: db}
+	result, err := cs.Chat("Are there any students from Garden River?", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if result.Answer != "Yes, I found 2 matching records." {
+		t.Fatalf("unexpected answer: %q", result.Answer)
+	}
+	if result.Debug == nil || result.Debug.RetrievalMode != "database_existence" {
+		t.Fatalf("expected database existence route, got %#v", result.Debug)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatService_Chat_AnswersDistinctCommunityListFromDatabase(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	communityValues := []databaseDimensionValue{
+		{Normalized: "garden river", Display: "Garden River", Count: 2},
+		{Normalized: "batchawana bay", Display: "Batchawana Bay", Count: 1},
+		{Normalized: "walpole island", Display: "Walpole Island", Count: 3},
+	}
+	expectDatabaseDimensionValues(mock, "community", communityValues...)
+
+	cs := &ChatService{DB: db}
+	result, err := cs.Chat("Give me all communities in the list", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if result.Answer != "The 3 communities in the data are Batchawana Bay, Garden River, and Walpole Island." {
+		t.Fatalf("unexpected answer: %q", result.Answer)
+	}
+	if result.Debug == nil || result.Debug.Strategy != "database_router" || result.Debug.RetrievalMode != "database_distinct_values" || result.Debug.RowsSelected != 6 {
+		t.Fatalf("expected database distinct-values route, got %#v", result.Debug)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatService_Chat_AnswersDistinctCommunityCountFromDatabase(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	communityValues := []databaseDimensionValue{
+		{Normalized: "garden river", Display: "Garden River", Count: 2},
+		{Normalized: "batchawana bay", Display: "Batchawana Bay", Count: 1},
+	}
+	expectDatabaseDimensionValues(mock, "community", communityValues...)
+
+	cs := &ChatService{DB: db}
+	result, err := cs.Chat("How many communities are in the list?", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if result.Answer != "I found 2 distinct communities in the matching data." {
+		t.Fatalf("unexpected answer: %q", result.Answer)
+	}
+	if result.Debug == nil || result.Debug.RetrievalMode != "database_distinct_count" {
+		t.Fatalf("expected database distinct-count route, got %#v", result.Debug)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatService_Chat_AnswersGroupSummaryFromDatabase(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	communityValues := []databaseDimensionValue{
+		{Normalized: "garden river", Display: "Garden River", Count: 3},
+		{Normalized: "batchawana bay", Display: "Batchawana Bay", Count: 1},
+	}
+	expectDatabaseDimensionValues(mock, "community", communityValues...)
+
+	cs := &ChatService{DB: db}
+	result, err := cs.Chat("How many students are there per community?", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if result.Answer != "By community, the matching records break down as Garden River (3) and Batchawana Bay (1)." {
+		t.Fatalf("unexpected answer: %q", result.Answer)
+	}
+	if result.Debug == nil || result.Debug.RetrievalMode != "database_group_summary" || result.Debug.RowsSelected != 4 {
+		t.Fatalf("expected database group-summary route, got %#v", result.Debug)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatService_Chat_AnswersGroupExtremeWithNamesFromDatabase(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	communityValues := []databaseDimensionValue{
+		{Normalized: "garden river", Display: "Garden River", Count: 2},
+		{Normalized: "batchawana bay", Display: "Batchawana Bay", Count: 1},
+	}
+	expectDatabaseDimensionValues(mock, "community", communityValues...)
+	expectDatabaseNamedRecords(mock,
+		databaseNamedRecord{SourceRowID: 1, DisplayName: "Alice Johnson"},
+		databaseNamedRecord{SourceRowID: 2, DisplayName: "Bob Thomas"},
+	)
+
+	cs := &ChatService{DB: db}
+	result, err := cs.Chat("Which community has the most students, and what are their names?", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !strings.Contains(result.Answer, "Garden River has the highest") || !strings.Contains(result.Answer, "Alice Johnson and Bob Thomas") {
+		t.Fatalf("unexpected answer: %q", result.Answer)
+	}
+	if result.Debug == nil || result.Debug.RetrievalMode != "database_group_extreme" {
+		t.Fatalf("expected database group-extreme route, got %#v", result.Debug)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatService_Chat_AnswersFilteredRecordListFromDatabase(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	expectDatabaseDimensionValues(mock, "community",
+		databaseDimensionValue{Normalized: "garden river", Display: "Garden River", Count: 2},
+	)
+	expectDatabaseDimensionValues(mock, "school")
+	expectDatabaseNamedRecords(mock,
+		databaseNamedRecord{SourceRowID: 1, DisplayName: "Alice Johnson"},
+		databaseNamedRecord{SourceRowID: 2, DisplayName: "Bob Thomas"},
+	)
+
+	cs := &ChatService{DB: db}
+	result, err := cs.Chat("List all students from Garden River", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if result.Answer != "I found 2 matching records: Alice Johnson and Bob Thomas." {
+		t.Fatalf("unexpected answer: %q", result.Answer)
+	}
+	if result.Debug == nil || result.Debug.RetrievalMode != "database_record_list" || result.Debug.RowsSelected != 2 {
+		t.Fatalf("expected database record-list route, got %#v", result.Debug)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatService_Chat_CachesFastAnswerByFileVersionAndQuestion(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	expectDatabaseDimensionValues(mock, "community",
+		databaseDimensionValue{Normalized: "garden river", Display: "Garden River", Count: 2},
+	)
+	expectDatabaseDimensionValues(mock, "school")
+	expectDatabaseCount(mock, 2)
+	expectChatFileLookup(mock, "sheet.xlsx")
+
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiGenerateContentHook = oldGenerate
+	})
+	modelCalls := 0
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		modelCalls++
+		return verifiedRoutedAnswer(t, contents), nil
+	}
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	first, err := cs.Chat("How many students are from Garden River?", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("first chat: %v", err)
+	}
+	second, err := cs.Chat("How many students are from Garden River?", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("second chat: %v", err)
+	}
+	if first.Answer != second.Answer {
+		t.Fatalf("cached answer mismatch: first=%q second=%q", first.Answer, second.Answer)
+	}
+	if modelCalls != 1 {
+		t.Fatalf("routed answer model calls = %d want 1", modelCalls)
+	}
+	if second.Debug == nil || second.Debug.Strategy != "fast_answer_cache" || second.Debug.ExecutionMode != "cache" {
+		t.Fatalf("expected versioned fast-answer cache, got %#v", second.Debug)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatService_Chat_CachesRepeatedTextModelAnswer(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	expectChatNormalizedRowsLookup(
+		mock,
+		normalizedChatRowJSON(
+			map[string]any{"name": "Alice", "has_notes": true},
+			withCanonical(map[string]any{"display_name": "Alice"}),
+			withNarrative(map[string]any{"notes": "Alice appears in the register."}),
+		),
+	)
+	expectChatFileLookup(mock, "sheet.xlsx")
+
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiGenerateContentHook = oldGenerate
+	})
+	calls := 0
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		calls++
+		return jsonStructuredAnswer("Alice appears in the register.", nil), nil
+	}
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	question := "Explain the notes for Alice in a warm paragraph"
+	first, err := cs.Chat(question, nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("first chat: %v", err)
+	}
+	second, err := cs.Chat(question, nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("second chat: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("model calls = %d want 1", calls)
+	}
+	if first.Answer != second.Answer || second.Debug == nil || second.Debug.ExecutionMode != "cache" || second.Debug.UsedModel != "" {
+		t.Fatalf("expected cached text-model answer, first=%#v second=%#v", first, second)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatService_FinalizeRoutedChatAnswer_RetainsVerifiedResultOnModelFailure(t *testing.T) {
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiGenerateContentHook = oldGenerate
+	})
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		return nil, errors.New("temporary model failure")
+	}
+
+	result := &ChatResult{
+		Answer: "The communities are Garden River and Walpole Island.",
+		Debug: &ChatDebugMetrics{
+			ExecutionMode: "database",
+		},
+	}
+	cs := &ChatService{Client: &genai.Client{}}
+
+	finalized := cs.finalizeRoutedChatAnswer(context.Background(), "List every community", result)
+	if finalized.Answer != "The communities are Garden River and Walpole Island." {
+		t.Fatalf("verified fallback answer changed: %q", finalized.Answer)
+	}
+	if finalized.Debug == nil || finalized.Debug.ExecutionMode != "database_fallback" || finalized.Debug.PromptBytes == 0 {
+		t.Fatalf("expected routed model fallback diagnostics, got %#v", finalized.Debug)
+	}
+}
+
+func TestChatService_Chat_AnswersDatasetOverviewFromDatabase(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	expectDatabaseCount(mock, 5)
+	expectDatabaseDimensionValues(mock, "community",
+		databaseDimensionValue{Normalized: "garden river", Display: "Garden River", Count: 3},
+		databaseDimensionValue{Normalized: "batchawana bay", Display: "Batchawana Bay", Count: 2},
+	)
+	expectDatabaseDimensionValues(mock, "school",
+		databaseDimensionValue{Normalized: "shingwauk", Display: "Shingwauk", Count: 5},
+	)
+
+	cs := &ChatService{DB: db}
+	result, err := cs.Chat("Give me an overview of the dataset", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !strings.Contains(result.Answer, "5 records across 2 distinct communities and 1 distinct school") ||
+		!strings.Contains(result.Answer, "Garden River (3)") ||
+		!strings.Contains(result.Answer, "Shingwauk (5)") {
+		t.Fatalf("unexpected answer: %q", result.Answer)
+	}
+	if result.Debug == nil || result.Debug.RetrievalMode != "database_dataset_overview" || result.Debug.RowsSelected != 5 {
+		t.Fatalf("expected database dataset-overview route, got %#v", result.Debug)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatService_Chat_AnswersFieldCatalogFromDataConfig(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectChatFileLookup(mock, "sheet.xlsx")
+	mock.ExpectQuery(`(?i)select.*config.*from.*data_config.*where.*file_id.*is_active.*order.*updated_at.*id.*limit`).
+		WithArgs(int64(1), true, 1).
+		WillReturnRows(sqlmock.NewRows([]string{"config"}).AddRow(`{
+			"source_file": {
+				"data_config": {
+					"fields": [
+						{"key":"student_name","label":"Student Name"},
+						{"key":"community","label":"Community"},
+						{"key":"first_language","label":"First Language"}
+					]
+				}
+			}
+		}`))
+
+	cs := &ChatService{DB: db}
+	result, err := cs.Chat("What fields are available?", nil, "sheet.xlsx", nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if result.Answer != "The 3 configured fields are Community, First Language, and Student Name." {
+		t.Fatalf("unexpected answer: %q", result.Answer)
+	}
+	if result.Debug == nil || result.Debug.RetrievalMode != "database_field_catalog" {
+		t.Fatalf("expected database field-catalog route, got %#v", result.Debug)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestPlanDatabaseChatQuestion_CoversCommonCheapQuestions(t *testing.T) {
+	tests := []struct {
+		question  string
+		operation databaseChatOperation
+	}{
+		{question: "Show students in Garden River", operation: databaseOperationRecordList},
+		{question: "Who is from Garden River?", operation: databaseOperationRecordList},
+		{question: "Compare the communities", operation: databaseOperationGroupSummary},
+		{question: "Give me a breakdown by school", operation: databaseOperationGroupSummary},
+		{question: "What are the top communities?", operation: databaseOperationGroupExtreme},
+		{question: "What is the total number of records?", operation: databaseOperationCount},
+		{question: "Does Garden River have any students?", operation: databaseOperationExistence},
+		{question: "What columns are available?", operation: databaseOperationFieldCatalog},
+		{question: "Summarize dataset", operation: databaseOperationDatasetView},
+	}
+
+	for _, test := range tests {
+		t.Run(test.question, func(t *testing.T) {
+			plan, ok := planDatabaseChatQuestion(test.question)
+			if !ok {
+				t.Fatalf("expected database plan for %q", test.question)
+			}
+			if plan.Operation != test.operation {
+				t.Fatalf("operation = %q want %q", plan.Operation, test.operation)
+			}
+		})
 	}
 }
 
@@ -1855,9 +2517,8 @@ func TestChatService_Chat_RoutesDeathYearExtremeDeterministicallyForDeathDataset
 		genaiGenerateContentHook = oldGenerate
 	})
 
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-		t.Fatal("expected deterministic death-year route without LLM generation")
-		return nil, nil
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		return verifiedRoutedAnswer(t, contents), nil
 	}
 
 	cs := &ChatService{DB: db, Client: &genai.Client{}}
@@ -1873,7 +2534,7 @@ func TestChatService_Chat_RoutesDeathYearExtremeDeterministicallyForDeathDataset
 	}
 }
 
-func TestChatService_Chat_UsesProPrimaryForBroadCompactPrompt(t *testing.T) {
+func TestChatService_Chat_UsesFlashPrimaryForBroadCompactPrompt(t *testing.T) {
 	db, mock, cleanup := newMockDBChatSvc(t)
 	defer cleanup()
 
@@ -1903,8 +2564,8 @@ func TestChatService_Chat_UsesProPrimaryForBroadCompactPrompt(t *testing.T) {
 	calls := 0
 	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, model string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
 		calls++
-		if calls == 1 && model != "gemini-2.5-pro" {
-			t.Fatalf("expected pro as primary model for broad compact prompt, got %q", model)
+		if calls == 1 && model != "gemini-2.5-flash" {
+			t.Fatalf("expected flash as primary model for broad compact prompt, got %q", model)
 		}
 		return jsonStructuredAnswer("I found 20 matching student records.", nil), nil
 	}
@@ -1917,11 +2578,11 @@ func TestChatService_Chat_UsesProPrimaryForBroadCompactPrompt(t *testing.T) {
 	if result.Debug == nil {
 		t.Fatal("expected debug metrics")
 	}
-	if result.Debug.PrimaryModel != "gemini-2.5-pro" {
-		t.Fatalf("primary model = %q want gemini-2.5-pro", result.Debug.PrimaryModel)
+	if result.Debug.PrimaryModel != "gemini-2.5-flash" {
+		t.Fatalf("primary model = %q want gemini-2.5-flash", result.Debug.PrimaryModel)
 	}
-	if result.Debug.UsedModel != "gemini-2.5-pro" {
-		t.Fatalf("used model = %q want gemini-2.5-pro", result.Debug.UsedModel)
+	if result.Debug.UsedModel != "gemini-2.5-flash" {
+		t.Fatalf("used model = %q want gemini-2.5-flash", result.Debug.UsedModel)
 	}
 }
 
