@@ -12,7 +12,10 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"google.golang.org/api/googleapi"
@@ -1294,9 +1297,13 @@ func TestChatService_Chat_RoutesCountQueryDeterministically(t *testing.T) {
 		genaiGenerateContentHook = oldGenerate
 	})
 
-	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, model string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-		if model != chatFastModel {
-			t.Fatalf("model = %q want %q", model, chatFastModel)
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		if model != routedAnswerFastModel {
+			t.Fatalf("model = %q want %q", model, routedAnswerFastModel)
+		}
+		if config == nil || config.Temperature == nil || *config.Temperature != 0 || config.CandidateCount != 1 ||
+			config.MaxOutputTokens < minRoutedAnswerOutputTokens || config.ResponseMIMEType != "text/plain" || config.SystemInstruction == nil {
+			t.Fatalf("unexpected routed generation config: %#v", config)
 		}
 		return verifiedRoutedAnswer(t, contents), nil
 	}
@@ -1321,7 +1328,7 @@ func TestChatService_Chat_RoutesCountQueryDeterministically(t *testing.T) {
 	if result.Debug.QueryType != "count" {
 		t.Fatalf("query type = %q want count", result.Debug.QueryType)
 	}
-	if result.Debug.PromptBytes == 0 || result.Debug.UsedModel != chatFastModel {
+	if result.Debug.PromptBytes == 0 || result.Debug.UsedModel != routedAnswerFastModel {
 		t.Fatalf("expected compact Flash prompt for deterministic route, got %#v", result.Debug)
 	}
 }
@@ -1784,7 +1791,7 @@ func TestChatService_Chat_ListsAllCommunitiesDeterministically(t *testing.T) {
 	if result.Debug == nil || result.Debug.QueryType != "distinct_values" || result.Debug.ExecutionMode != "deterministic_llm" {
 		t.Fatalf("expected deterministic distinct-values debug, got %#v", result.Debug)
 	}
-	if result.Debug.PromptBytes == 0 || result.Debug.UsedModel != chatFastModel {
+	if result.Debug.PromptBytes == 0 || result.Debug.UsedModel != routedAnswerFastModel {
 		t.Fatalf("expected compact Flash answer prompt, got %#v", result.Debug)
 	}
 	if !strings.Contains(result.Answer, "The 9 communities in the data are") {
@@ -1912,7 +1919,7 @@ func TestChatService_Chat_ListsDataConfigFieldValuesDeterministically(t *testing
 	if result.Debug == nil || result.Debug.QueryType != "distinct_values" || result.Debug.RetrievalMode != "database_config_distinct_values" {
 		t.Fatalf("expected configured deterministic distinct-values debug, got %#v", result.Debug)
 	}
-	if result.Debug.PromptBytes == 0 || result.Debug.UsedModel != chatFastModel || result.Debug.ExecutionMode != "database_llm" {
+	if result.Debug.PromptBytes == 0 || result.Debug.UsedModel != routedAnswerFastModel || result.Debug.ExecutionMode != "database_llm" {
 		t.Fatalf("expected configured answer rendered by Flash, got %#v", result.Debug)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -1939,8 +1946,8 @@ func TestChatService_Chat_AnswersFilteredCountFromDatabase(t *testing.T) {
 		genaiGenerateContentHook = oldGenerate
 	})
 	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, model string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-		if model != chatFastModel {
-			t.Fatalf("model = %q want %q", model, chatFastModel)
+		if model != routedAnswerFastModel {
+			t.Fatalf("model = %q want %q", model, routedAnswerFastModel)
 		}
 		_ = verifiedRoutedAnswer(t, contents)
 		return rawAnswer("There are 2 students from Garden River."), nil
@@ -1957,7 +1964,7 @@ func TestChatService_Chat_AnswersFilteredCountFromDatabase(t *testing.T) {
 	if result.Debug == nil || result.Debug.Strategy != "database_router" || result.Debug.RetrievalMode != "database_count" {
 		t.Fatalf("expected database count route, got %#v", result.Debug)
 	}
-	if result.Debug.PromptBytes == 0 || result.Debug.UsedModel != chatFastModel || result.Debug.ExecutionMode != "database_llm" {
+	if result.Debug.PromptBytes == 0 || result.Debug.UsedModel != routedAnswerFastModel || result.Debug.ExecutionMode != "database_llm" {
 		t.Fatalf("expected database result rendered by Flash, got %#v", result.Debug)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -2122,8 +2129,8 @@ func TestChatService_Chat_AnswersCommunityImpactFromDatabaseUsingDatasetDescript
 		genaiGenerateContentHook = oldGenerate
 	})
 	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, model string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-		if model != chatFastModel {
-			t.Fatalf("model = %q want %q", model, chatFastModel)
+		if model != routedAnswerFastModel {
+			t.Fatalf("model = %q want %q", model, routedAnswerFastModel)
 		}
 		payload := routedAnswerPayloadFromPrompt(t, contents)
 		if payload.DatasetTitle != filename || payload.DatasetDescription != description {
@@ -2231,6 +2238,140 @@ func TestChatService_Chat_CachesFastAnswerByFileVersionAndQuestion(t *testing.T)
 	}
 }
 
+func TestChatService_TryCoalescedFastTextChat_SharesDatabaseAndRendererWork(t *testing.T) {
+	db, mock, cleanup := newMockDBChatSvc(t)
+	defer cleanup()
+
+	expectDatabaseDimensionValues(mock, "community",
+		databaseDimensionValue{Normalized: "garden river", Display: "Garden River", Count: 2},
+	)
+	expectDatabaseDimensionValues(mock, "school")
+	expectDatabaseCount(mock, 2)
+
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiGenerateContentHook = oldGenerate
+	})
+	var modelCalls atomic.Int32
+	modelStarted := make(chan struct{})
+	releaseModel := make(chan struct{})
+	var startedOnce sync.Once
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		modelCalls.Add(1)
+		startedOnce.Do(func() { close(modelStarted) })
+		<-releaseModel
+		return verifiedRoutedAnswer(t, contents), nil
+	}
+
+	cs := &ChatService{DB: db, Client: &genai.Client{}}
+	input := ChatQueryInput{FileID: 1, Version: 1, FileName: "sheet.xlsx", Question: "How many students are from Garden River?"}
+	const requestCount = 8
+	results := make([]*ChatResult, requestCount)
+	errs := make([]error, requestCount)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < requestCount; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			<-start
+			results[index], _, errs[index] = cs.tryCoalescedFastTextChat(input)
+		}(i)
+	}
+	close(start)
+	select {
+	case <-modelStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for routed renderer")
+	}
+	// Give the other goroutines time to join the in-flight request.
+	time.Sleep(20 * time.Millisecond)
+	close(releaseModel)
+	wg.Wait()
+
+	if modelCalls.Load() != 1 {
+		t.Fatalf("model calls = %d want 1", modelCalls.Load())
+	}
+	for index := range results {
+		if errs[index] != nil || results[index] == nil || !strings.Contains(results[index].Answer, "2") {
+			t.Fatalf("request %d result=%#v err=%v", index, results[index], errs[index])
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestChatService_GenerateCoalescedFullTextAnswer_SharesModelRequest(t *testing.T) {
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiGenerateContentHook = oldGenerate
+	})
+	var modelCalls atomic.Int32
+	modelStarted := make(chan struct{})
+	releaseModel := make(chan struct{})
+	var startedOnce sync.Once
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		modelCalls.Add(1)
+		startedOnce.Do(func() { close(modelStarted) })
+		<-releaseModel
+		return rawAnswer("Shared answer."), nil
+	}
+
+	cs := &ChatService{Client: &genai.Client{}}
+	input := ChatQueryInput{FileID: 1, Version: 1, Question: "Explain the notes"}
+	const requestCount = 8
+	answers := make([]string, requestCount)
+	errs := make([]error, requestCount)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < requestCount; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			<-start
+			answers[index], _, errs[index] = cs.generateCoalescedFullTextAnswer(context.Background(), input, "prompt", chatFastModel, chatQualityModel)
+		}(i)
+	}
+	close(start)
+	select {
+	case <-modelStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for full renderer")
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(releaseModel)
+	wg.Wait()
+
+	if modelCalls.Load() != 1 {
+		t.Fatalf("model calls = %d want 1", modelCalls.Load())
+	}
+	for index := range answers {
+		if errs[index] != nil || answers[index] != "Shared answer." {
+			t.Fatalf("request %d answer=%q err=%v", index, answers[index], errs[index])
+		}
+	}
+}
+
+func TestRoutedAnswerLimitsScaleWithoutTruncatingLists(t *testing.T) {
+	if got := routedAnswerOutputTokenLimit("Two records."); got != minRoutedAnswerOutputTokens {
+		t.Fatalf("short answer token limit = %d want %d", got, minRoutedAnswerOutputTokens)
+	}
+	medium := strings.Repeat("Community Name, ", 200)
+	if got := routedAnswerOutputTokenLimit(medium); got <= minRoutedAnswerOutputTokens || got >= maxRoutedAnswerOutputTokens {
+		t.Fatalf("medium answer token limit = %d", got)
+	}
+	if got := routedAnswerOutputTokenLimit(strings.Repeat("Community Name, ", 2000)); got != maxRoutedAnswerOutputTokens {
+		t.Fatalf("large answer token limit = %d want %d", got, maxRoutedAnswerOutputTokens)
+	}
+	if got := routedAnswerGenerationTimeout("Two records."); got != minRoutedAnswerTimeout {
+		t.Fatalf("short answer timeout = %s want %s", got, minRoutedAnswerTimeout)
+	}
+	if got := routedAnswerGenerationTimeout(strings.Repeat("x", 10000)); got != maxRoutedAnswerTimeout {
+		t.Fatalf("large answer timeout = %s want %s", got, maxRoutedAnswerTimeout)
+	}
+}
+
 func TestChatService_Chat_CachesRepeatedTextModelAnswer(t *testing.T) {
 	db, mock, cleanup := newMockDBChatSvc(t)
 	defer cleanup()
@@ -2300,6 +2441,52 @@ func TestChatService_FinalizeRoutedChatAnswer_RetainsVerifiedResultOnModelFailur
 	}
 	if finalized.Debug == nil || finalized.Debug.ExecutionMode != "database_fallback" || finalized.Debug.PromptBytes == 0 {
 		t.Fatalf("expected routed model fallback diagnostics, got %#v", finalized.Debug)
+	}
+	input := ChatQueryInput{FileID: 1, Version: 1, Question: "List every community"}
+	cs.storeFastChatAnswer(input, finalized)
+	if _, ok := cs.getFastChatAnswer(input); ok {
+		t.Fatal("model-fallback answer must not prevent the next request from retrying generation")
+	}
+}
+
+func TestChatService_FinalizeRoutedChatAnswer_FallsBackWhenLiteModelIsUnavailable(t *testing.T) {
+	oldGenerate := genaiGenerateContentHook
+	t.Cleanup(func() {
+		genaiGenerateContentHook = oldGenerate
+	})
+	models := make([]string, 0, 2)
+	genaiGenerateContentHook = func(_ *genai.Client, _ context.Context, model string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+		models = append(models, model)
+		if model == routedAnswerFastModel {
+			return nil, errors.New("model unavailable")
+		}
+		return rawAnswer("Garden River has the largest number of listed survivors."), nil
+	}
+
+	result := &ChatResult{
+		Answer: "Garden River has the highest number of matching records.",
+		Debug:  &ChatDebugMetrics{ExecutionMode: "database"},
+	}
+	cs := &ChatService{Client: &genai.Client{}}
+	finalized := cs.finalizeRoutedChatAnswer(context.Background(), ChatQueryInput{Question: "Which community is most impacted?"}, result)
+
+	if finalized.Answer != "Garden River has the largest number of listed survivors." {
+		t.Fatalf("unexpected fallback-model answer: %q", finalized.Answer)
+	}
+	if finalized.Debug == nil || finalized.Debug.ExecutionMode != "database_llm" || finalized.Debug.UsedModel != chatFastModel {
+		t.Fatalf("unexpected fallback-model diagnostics: %#v", finalized.Debug)
+	}
+	if len(models) != 2 || models[0] != routedAnswerFastModel || models[1] != chatFastModel {
+		t.Fatalf("model sequence = %#v", models)
+	}
+}
+
+func TestFastChatAnswerCacheKey_ChangesWithDatasetDescription(t *testing.T) {
+	base := ChatQueryInput{FileID: 1, Version: 1, Question: "Which community is most impacted?"}
+	withDescription := base
+	withDescription.FileDescription = "Master list of Shingwauk residential school survivors."
+	if fastChatAnswerCacheKey(base) == fastChatAnswerCacheKey(withDescription) {
+		t.Fatal("dataset-description change must invalidate cached wording")
 	}
 }
 

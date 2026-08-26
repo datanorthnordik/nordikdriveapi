@@ -21,6 +21,7 @@ import (
 	f "nordik-drive-api/internal/file"
 
 	"golang.org/x/oauth2/google"
+	"golang.org/x/sync/singleflight"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/genai"
 	"gorm.io/gorm"
@@ -37,9 +38,12 @@ type ChatService struct {
 	datasetCache           sync.Map
 	structuredDatasetCache sync.Map
 	databaseDimensionCache sync.Map
-	fastAnswerCacheMu      sync.Mutex
+	fastAnswerCacheMu      sync.RWMutex
 	fastAnswerCache        map[string]*ChatResult
 	fastAnswerCacheOrder   []string
+	fileLookupGroup        singleflight.Group
+	fastRouteGroup         singleflight.Group
+	fullGenerationGroup    singleflight.Group
 	QueryStrategy          ChatQueryStrategy
 }
 
@@ -97,6 +101,18 @@ func (cs *ChatService) generateFromPromptWithModels(
 	primaryModel string,
 	fallbackModel string,
 ) (answer string, usedModel string, err error) {
+	return cs.generateFromPromptWithModelsConfig(ctx, prompt, audioBytes, audioMime, primaryModel, fallbackModel, nil)
+}
+
+func (cs *ChatService) generateFromPromptWithModelsConfig(
+	ctx context.Context,
+	prompt string,
+	audioBytes []byte,
+	audioMime string,
+	primaryModel string,
+	fallbackModel string,
+	config *genai.GenerateContentConfig,
+) (answer string, usedModel string, err error) {
 	if cs.Client == nil {
 		return "", "", fmt.Errorf("genai client not initialized")
 	}
@@ -116,7 +132,7 @@ func (cs *ChatService) generateFromPromptWithModels(
 		{Role: "user", Parts: parts},
 	}
 
-	genResp, usedModel, err := cs.generateWithModelFallback(ctx, primaryModel, fallbackModel, contents, nil)
+	genResp, usedModel, err := cs.generateWithModelFallback(ctx, primaryModel, fallbackModel, contents, config)
 	if err != nil {
 		return "", usedModel, err
 	}

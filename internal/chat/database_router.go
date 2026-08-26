@@ -23,7 +23,7 @@ const (
 	databaseOperationRecordList    databaseChatOperation = "record_list"
 	databaseOperationDatasetView   databaseChatOperation = "dataset_overview"
 	databaseOperationFieldCatalog  databaseChatOperation = "field_catalog"
-	maxFastChatAnswers                                   = 512
+	maxFastChatAnswers                                   = 2048
 )
 
 type databaseChatPlan struct {
@@ -151,10 +151,10 @@ func (cs *ChatService) getFastChatAnswer(input ChatQueryInput) (*ChatResult, boo
 	if cs == nil {
 		return nil, false
 	}
-	cs.fastAnswerCacheMu.Lock()
+	cs.fastAnswerCacheMu.RLock()
 	result := cs.fastAnswerCache[fastChatAnswerCacheKey(input)]
 	cloned := cloneChatResult(result)
-	cs.fastAnswerCacheMu.Unlock()
+	cs.fastAnswerCacheMu.RUnlock()
 	if cloned == nil {
 		return nil, false
 	}
@@ -172,6 +172,12 @@ func (cs *ChatService) getFastChatAnswer(input ChatQueryInput) (*ChatResult, boo
 
 func (cs *ChatService) storeFastChatAnswer(input ChatQueryInput, result *ChatResult) {
 	if cs == nil || result == nil {
+		return
+	}
+	// A verified direct answer returned during a model timeout remains available
+	// to the current callers, but is not cached so the next request can retry the
+	// required LLM rendering pass.
+	if result.Debug != nil && strings.HasSuffix(result.Debug.ExecutionMode, "_fallback") {
 		return
 	}
 	key := fastChatAnswerCacheKey(input)
@@ -194,7 +200,14 @@ func (cs *ChatService) storeFastChatAnswer(input ChatQueryInput, result *ChatRes
 func fastChatAnswerCacheKey(input ChatQueryInput) string {
 	communities := normalizeCommunities(input.Communities)
 	sort.Strings(communities)
-	return fmt.Sprintf("%d:%d:%s:%s", input.FileID, input.Version, strings.Join(communities, "\x1f"), normalizeChatSearchValue(input.Question))
+	return fmt.Sprintf(
+		"%d:%d:%s:%s:%s",
+		input.FileID,
+		input.Version,
+		strings.Join(communities, "\x1f"),
+		normalizeChatSearchValue(input.FileDescription),
+		normalizeChatSearchValue(input.Question),
+	)
 }
 
 func cloneChatResult(result *ChatResult) *ChatResult {

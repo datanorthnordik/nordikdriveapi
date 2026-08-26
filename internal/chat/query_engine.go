@@ -90,19 +90,11 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 		return nil, fmt.Errorf("db not initialized")
 	}
 
-	var file f.File
-	fileQuery := cs.DB.Select("id, version, description").Where("filename = ?", filename).Order("version DESC")
-	if err := fileQuery.First(&file).Error; err != nil {
-		if isMissingDescriptionColumnError(err) {
-			if fallbackErr := cs.DB.Select("id, version").Where("filename = ?", filename).Order("version DESC").First(&file).Error; fallbackErr != nil {
-				return nil, fmt.Errorf("file not found")
-			}
-		} else {
-			return nil, fmt.Errorf("file not found")
-		}
+	file, err := cs.lookupChatFile(filename)
+	if err != nil {
+		return nil, err
 	}
 
-	strategy := cs.getQueryStrategy()
 	input := ChatQueryInput{
 		FileID:          file.ID,
 		Version:         file.Version,
@@ -117,30 +109,14 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 		// database query, then the broader in-memory deterministic router. A
 		// compact LLM pass turns verified routed results into the final response;
 		// only questions these paths cannot prove use full structured retrieval.
-		if cached, ok := cs.getFastChatAnswer(input); ok {
-			if cached.Debug != nil {
-				cached.Debug.TotalMillis = time.Since(totalStart).Milliseconds()
-			}
-			return cached, nil
-		}
-		if routed, ok := cs.tryDatabaseChat(input); ok {
-			routed = cs.finalizeRoutedChatAnswer(context.Background(), input, routed)
-			if routed.Debug != nil {
-				routed.Debug.TotalMillis = time.Since(totalStart).Milliseconds()
-			}
-			cs.storeFastChatAnswer(input, routed)
-			return routed, nil
-		}
-		routed, ok, err := cs.tryDeterministicChat(input)
+		routed, ok, err := cs.tryCoalescedFastTextChat(input)
 		if err != nil {
 			return nil, err
 		}
 		if ok {
-			routed = cs.finalizeRoutedChatAnswer(context.Background(), input, routed)
 			if routed.Debug != nil {
 				routed.Debug.TotalMillis = time.Since(totalStart).Milliseconds()
 			}
-			cs.storeFastChatAnswer(input, routed)
 			return routed, nil
 		}
 	}
@@ -148,6 +124,7 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 		return nil, fmt.Errorf("genai client not initialized")
 	}
 
+	strategy := cs.getQueryStrategy()
 	prepared, err := strategy.Prepare(cs, ChatQueryInput{
 		FileID:          input.FileID,
 		Version:         input.Version,
@@ -181,7 +158,13 @@ func (cs *ChatService) Chat(question string, audioFile *multipart.FileHeader, fi
 
 	primaryModel, fallbackModel := selectChatModelPlan(prepared.Debug, len(audioBytes) > 0)
 	generationStart := time.Now()
-	answer, usedModel, err := cs.generateFromPromptWithModels(ctx, prepared.Prompt, audioBytes, audioMime, primaryModel, fallbackModel)
+	var answer string
+	var usedModel string
+	if len(audioBytes) == 0 {
+		answer, usedModel, err = cs.generateCoalescedFullTextAnswer(ctx, input, prepared.Prompt, primaryModel, fallbackModel)
+	} else {
+		answer, usedModel, err = cs.generateFromPromptWithModels(ctx, prepared.Prompt, audioBytes, audioMime, primaryModel, fallbackModel)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("generation error (%s): %w", usedModel, err)
 	}
