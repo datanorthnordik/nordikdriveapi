@@ -6,6 +6,15 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"google.golang.org/genai"
+)
+
+const (
+	minRoutedAnswerOutputTokens int32 = 128
+	maxRoutedAnswerOutputTokens int32 = 8192
+	minRoutedAnswerTimeout            = 3 * time.Second
+	maxRoutedAnswerTimeout            = 8 * time.Second
 )
 
 const routedAnswerInstruction = `You are NIA's final answer writer.
@@ -49,24 +58,44 @@ func (cs *ChatService) finalizeRoutedChatAnswer(ctx context.Context, input ChatQ
 	if err != nil {
 		return result
 	}
-	prompt := routedAnswerInstruction + "\n\nINPUT JSON:\n" + string(payload)
+	userPrompt := "INPUT JSON:\n" + string(payload)
+	debugPrompt := routedAnswerInstruction + "\n\n" + userPrompt
+	config := routedAnswerGenerationConfig(result.Answer)
+
+	generationContext, cancel := context.WithTimeout(ctx, routedAnswerGenerationTimeout(result.Answer))
+	defer cancel()
 
 	generationStart := time.Now()
-	answer, usedModel, generationErr := cs.generateFromPromptWithModels(
-		ctx,
-		prompt,
+	answer, usedModel, generationErr := cs.generateFromPromptWithModelsConfig(
+		generationContext,
+		userPrompt,
 		nil,
 		"",
+		routedAnswerFastModel,
 		chatFastModel,
-		chatQualityModel,
+		config,
 	)
+	// A newly introduced regional/model permission issue should not disable LLM
+	// rendering. Retry through the established chat model only when the Lite
+	// request itself failed before its built-in rate-limit fallback was used.
+	if generationErr != nil && usedModel == routedAnswerFastModel && generationContext.Err() == nil {
+		answer, usedModel, generationErr = cs.generateFromPromptWithModelsConfig(
+			generationContext,
+			userPrompt,
+			nil,
+			"",
+			chatFastModel,
+			chatQualityModel,
+			config,
+		)
+	}
 	generationMillis := time.Since(generationStart).Milliseconds()
 
 	if result.Debug != nil {
 		result.Debug.PromptProjectionMode = "verified_query_result"
-		result.Debug.PromptChars = utf8.RuneCountInString(prompt)
-		result.Debug.PromptBytes = len([]byte(prompt))
-		result.Debug.PrimaryModel = chatFastModel
+		result.Debug.PromptChars = utf8.RuneCountInString(debugPrompt)
+		result.Debug.PromptBytes = len([]byte(debugPrompt))
+		result.Debug.PrimaryModel = routedAnswerFastModel
 		result.Debug.UsedModel = usedModel
 		result.Debug.GenerationMillis = generationMillis
 	}
@@ -86,4 +115,42 @@ func (cs *ChatService) finalizeRoutedChatAnswer(ctx context.Context, input ChatQ
 		result.Debug.ExecutionMode += "_llm"
 	}
 	return result
+}
+
+func routedAnswerGenerationConfig(verifiedAnswer string) *genai.GenerateContentConfig {
+	temperature := float32(0)
+	return &genai.GenerateContentConfig{
+		SystemInstruction: &genai.Content{
+			Parts: []*genai.Part{{Text: routedAnswerInstruction}},
+		},
+		Temperature:      &temperature,
+		CandidateCount:   1,
+		MaxOutputTokens:  routedAnswerOutputTokenLimit(verifiedAnswer),
+		ResponseMIMEType: "text/plain",
+	}
+}
+
+func routedAnswerOutputTokenLimit(verifiedAnswer string) int32 {
+	// Proper nouns and dates can tokenize more densely than normal prose. Half
+	// the verified character count plus headroom avoids truncating full lists
+	// while keeping short count/existence responses tightly bounded.
+	estimated := int32(utf8.RuneCountInString(verifiedAnswer)/2 + 64)
+	if estimated < minRoutedAnswerOutputTokens {
+		return minRoutedAnswerOutputTokens
+	}
+	if estimated > maxRoutedAnswerOutputTokens {
+		return maxRoutedAnswerOutputTokens
+	}
+	return estimated
+}
+
+func routedAnswerGenerationTimeout(verifiedAnswer string) time.Duration {
+	// Short answers receive a strict tail-latency cap. Complete lists receive
+	// extra time proportional to their verified size, up to a fixed maximum.
+	extra := time.Duration(utf8.RuneCountInString(verifiedAnswer)/1000) * time.Second
+	timeout := minRoutedAnswerTimeout + extra
+	if timeout > maxRoutedAnswerTimeout {
+		return maxRoutedAnswerTimeout
+	}
+	return timeout
 }

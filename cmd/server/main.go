@@ -40,10 +40,20 @@ func main() {
 		" port=" + cfg.DBPort +
 		" sslmode=disable"
 
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{PrepareStmt: true})
 	if err != nil {
 		log.Fatal("Failed to connect to database:", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		log.Fatal("Failed to configure database pool:", err)
+	}
+	// Bound connection growth per Cloud Run instance while retaining enough warm
+	// connections for concurrent chat metadata and aggregate queries.
+	sqlDB.SetMaxOpenConns(25)
+	sqlDB.SetMaxIdleConns(10)
+	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
+	sqlDB.SetConnMaxLifetime(30 * time.Minute)
 	r := gin.Default()
 
 	r.Use(cors.New(cors.Config{
