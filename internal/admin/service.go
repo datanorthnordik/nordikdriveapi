@@ -21,6 +21,8 @@ import (
 	"gorm.io/gorm"
 )
 
+const maxMediaZipFiles = 5000
+
 type AdminService struct {
 	DB *gorm.DB
 
@@ -984,14 +986,15 @@ func (as *AdminService) StreamMediaZip(ctx context.Context, out io.Writer, req A
 	if err != nil {
 		return err
 	}
+
+	// The database query stops as soon as it proves this request is too large,
+	// keeping metadata memory bounded for broad admin filters.
+	if len(rows) > maxMediaZipFiles {
+		return fmt.Errorf("too many files to zip (limit %d). narrow your filters", maxMediaZipFiles)
+	}
 	rows = dedupeMediaZipRows(rows)
 	if len(rows) == 0 {
 		return fmt.Errorf("no media found for the selected filters")
-	}
-
-	// hard safety guard
-	if len(rows) > 5000 {
-		return fmt.Errorf("too many files to zip (%d). narrow your filters", len(rows))
 	}
 
 	// stable ordering
@@ -1033,7 +1036,7 @@ func (as *AdminService) StreamMediaZip(ctx context.Context, out io.Writer, req A
 			baseName = sanitizeFilename(r.FileName)
 		}
 		if baseName == "" {
-			_, obj, _ := parseGSURLAdmin(r.PhotoURL)
+			_, obj, _ := parseGSURLAdmin(r.ObjectURL)
 			baseName = sanitizeFilename(path.Base(obj))
 			if baseName == "" {
 				baseName = fmt.Sprintf("file_%d", r.ID)
@@ -1048,7 +1051,7 @@ func (as *AdminService) StreamMediaZip(ctx context.Context, out io.Writer, req A
 			return err
 		}
 
-		bucket, objectPath, err := parseGSURLAdmin(r.PhotoURL)
+		bucket, objectPath, err := parseGSURLAdmin(r.ObjectURL)
 		if err != nil {
 			return err
 		}
@@ -1086,41 +1089,63 @@ func (as *AdminService) loadMediaRows(requestIDs []uint, docType string, onlyApp
 	if docType == "" {
 		docType = "all"
 	}
-	if docType != "all" && docType != "photos" && docType != "document" {
-		return nil, fmt.Errorf("invalid document_type: %s (use all/photos/document)", docType)
+	if docType != "all" && docType != "photos" && docType != "document" && docType != "stories" {
+		return nil, fmt.Errorf("invalid document_type: %s (use all/photos/document/stories)", docType)
 	}
 
-	q := as.DB.Table("file_edit_request_photos p").
-		Joins("JOIN file_edit_request r ON r.request_id = p.request_id").
-		Select(`
-			p.id,
-			p.request_id,
-			p.row_id,
-			p.photo_url,
-			COALESCE(p.file_name,'') AS file_name,
-			COALESCE(p.document_type,'') AS document_type,
-			COALESCE(p.document_category,'') AS document_category,
-			r.user_id AS user_id,
-			COALESCE(r.firstname,'') AS user_first,
-			COALESCE(r.lastname,'') AS user_last
-		`).
-		Where("p.request_id IN ?", requestIDs)
+	var q *gorm.DB
+	statusColumn := "p.status"
+	if docType == "stories" {
+		statusColumn = "s.status"
+		q = as.DB.Table("file_row_achiever_stories s").
+			Joins("JOIN file_edit_request r ON r.request_id = s.request_id").
+			Select(`
+				s.id,
+				s.request_id,
+				s.row_id,
+				s.story_url AS photo_url,
+				COALESCE(s.file_name,'') AS file_name,
+				'stories' AS document_type,
+				COALESCE(s.story_type,'') AS document_category,
+				r.user_id AS user_id,
+				COALESCE(r.firstname,'') AS user_first,
+				COALESCE(r.lastname,'') AS user_last
+			`).
+			Where("s.request_id IN ?", requestIDs).
+			Where("COALESCE(s.story_url, '') <> ''")
+	} else {
+		q = as.DB.Table("file_edit_request_photos p").
+			Joins("JOIN file_edit_request r ON r.request_id = p.request_id").
+			Select(`
+				p.id,
+				p.request_id,
+				p.row_id,
+				p.photo_url,
+				COALESCE(p.file_name,'') AS file_name,
+				COALESCE(p.document_type,'') AS document_type,
+				COALESCE(p.document_category,'') AS document_category,
+				r.user_id AS user_id,
+				COALESCE(r.firstname,'') AS user_first,
+				COALESCE(r.lastname,'') AS user_last
+			`).
+			Where("p.request_id IN ?", requestIDs)
 
-	if docType != "all" {
-		q = q.Where("p.document_type = ?", docType)
+		if docType != "all" {
+			q = q.Where("p.document_type = ?", docType)
+		}
 	}
 
 	if onlyApproved != nil {
 		if *onlyApproved {
-			q = q.Where("p.status = ?", "approved")
+			q = q.Where(statusColumn+" = ?", "approved")
 		} else {
-			q = q.Where("p.status <> ?", "approved")
+			q = q.Where(statusColumn+" <> ?", "approved")
 		}
 	}
 
 	var out []mediaZipRow
 	if err := q.
-		Order("r.user_id ASC, p.document_type ASC, p.request_id ASC, p.id ASC").
+		Limit(maxMediaZipFiles + 1).
 		Scan(&out).Error; err != nil {
 		return nil, err
 	}
@@ -1138,7 +1163,7 @@ func dedupeMediaZipRows(rows []mediaZipRow) []mediaZipRow {
 	for _, row := range rows {
 		keyParts := []string{
 			strings.ToLower(strings.TrimSpace(row.DocumentType)),
-			strings.TrimSpace(row.PhotoURL),
+			strings.TrimSpace(row.ObjectURL),
 		}
 		if keyParts[1] == "" {
 			keyParts = append(keyParts, strings.TrimSpace(row.FileName))
@@ -1167,9 +1192,12 @@ func buildZipEntryPath(r mediaZipRow, byUser bool, byType bool) string {
 	}
 
 	if byType {
-		if r.DocumentType == "photos" {
+		switch r.DocumentType {
+		case "photos":
 			parts = append(parts, "photos")
-		} else {
+		case "stories":
+			parts = append(parts, "stories")
+		default:
 			parts = append(parts, "documents")
 		}
 	}

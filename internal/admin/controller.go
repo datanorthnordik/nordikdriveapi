@@ -164,6 +164,8 @@ func buildMediaZipFilename(req AdminDownloadMediaRequest, now time.Time) string 
 		docType = "photos"
 	case "doc", "document":
 		docType = "documents"
+	case "stories":
+		docType = "stories"
 	}
 
 	scope := "filtered"

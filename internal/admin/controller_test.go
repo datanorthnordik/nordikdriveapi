@@ -268,6 +268,14 @@ func TestBuildMediaZipFilename(t *testing.T) {
 			},
 			want: "files_filtered_not_approved_20260714_101112.zip",
 		},
+		{
+			name: "single request survivor stories",
+			req: AdminDownloadMediaRequest{
+				RequestIDs:   []uint{72},
+				DocumentType: "stories",
+			},
+			want: "stories_request_72_20260714_101112.zip",
+		},
 	}
 
 	for _, tt := range tests {

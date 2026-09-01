@@ -289,6 +289,63 @@ func Test_StreamMediaZip_Success_ZipsTwoFiles(t *testing.T) {
 	}
 }
 
+func Test_StreamMediaZip_StoriesOnly_ZipsStoredDocumentsAndVideos(t *testing.T) {
+	db, mock, cleanup := newMockDBForZip(t)
+	defer cleanup()
+
+	as := &AdminService{DB: db}
+
+	mock.ExpectQuery(`(?i)file_row_achiever_stories`).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "request_id", "row_id", "photo_url", "file_name", "document_type", "document_category",
+			"user_id", "user_first", "user_last",
+		}).
+			AddRow(uint(4), uint(20), 5, "gs://mybucket/stories/survivor.pdf", "survivor.pdf", "stories", "text", uint(7), "Jane", "Doe").
+			AddRow(uint(5), uint(21), 6, "gs://mybucket/stories/interview.mp4", "interview.mp4", "stories", "video", uint(7), "Jane", "Doe"))
+
+	fake := &fakeGCS{
+		objects: map[string]map[string]any{
+			"mybucket": {
+				path.Clean("stories/survivor.pdf"):  []byte("PDF-STORY"),
+				path.Clean("stories/interview.mp4"): []byte("VIDEO-STORY"),
+			},
+		},
+	}
+	old := newGCSClientHook
+	newGCSClientHook = func(ctx context.Context) (gcsClient, error) { return fake, nil }
+	t.Cleanup(func() { newGCSClientHook = old })
+
+	var out bytes.Buffer
+	err := as.StreamMediaZip(context.Background(), &out, AdminDownloadMediaRequest{
+		RequestIDs:       []uint{20, 21},
+		DocumentType:     "stories",
+		CategorizeByUser: true,
+		CategorizeByType: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+
+	zr, err := zip.NewReader(bytes.NewReader(out.Bytes()), int64(out.Len()))
+	if err != nil {
+		t.Fatalf("zip read: %v", err)
+	}
+	if len(zr.File) != 2 {
+		t.Fatalf("expected 2 story entries, got %d", len(zr.File))
+	}
+
+	names := []string{zr.File[0].Name, zr.File[1].Name}
+	joined := strings.Join(names, " | ")
+	if !strings.Contains(joined, "user_7_Jane Doe/stories/survivor.pdf") ||
+		!strings.Contains(joined, "user_7_Jane Doe/stories/interview.mp4") {
+		t.Fatalf("unexpected story zip names: %v", names)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
 func Test_StreamMediaZip_GCSReaderError(t *testing.T) {
 	db, mock, cleanup := newMockDBForZip(t)
 	defer cleanup()
