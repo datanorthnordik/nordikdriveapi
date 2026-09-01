@@ -208,3 +208,32 @@ func TestAdminService_loadMediaRows_OnlyApproved_UsesStatusColumn(t *testing.T) 
 		t.Fatalf("unmet expectations: %v", err)
 	}
 }
+
+func TestAdminService_loadMediaRows_StoriesOnly_UsesStoryStatusAndStoredFiles(t *testing.T) {
+	db, mock, sqlDB := newMockDB(t)
+	defer sqlDB.Close()
+
+	as := &AdminService{DB: db}
+	approved := true
+
+	mock.ExpectQuery(`(?i)from\s+file_row_achiever_stories\s+s.*story_url.*s\.status\s*=\s*\$[0-9]+`).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "request_id", "row_id", "photo_url", "file_name", "document_type", "document_category",
+			"user_id", "user_first", "user_last",
+		}).AddRow(
+			uint(2), uint(14), 8, "gs://bucket/stories/survivor.pdf", "survivor.pdf", "stories", "text",
+			uint(9), "Mary", "Smith",
+		))
+
+	rows, err := as.loadMediaRows([]uint{14}, "stories", &approved)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(rows) != 1 || rows[0].DocumentType != "stories" || rows[0].ObjectURL == "" {
+		t.Fatalf("unexpected rows: %#v", rows)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}

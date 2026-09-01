@@ -174,9 +174,9 @@ type adminSearchRow struct {
 type AdminDownloadMediaRequest struct {
 	RequestIDs       []uint   `json:"request_ids,omitempty"`
 	Clauses          []Clause `json:"clauses"`
-	DocumentType     string   `json:"document_type"`      // "all" | "photos" | "document"
+	DocumentType     string   `json:"document_type"`      // "all" | "photos" | "document" | "stories"
 	CategorizeByUser bool     `json:"categorize_by_user"` // /User_X/
-	CategorizeByType bool     `json:"categorize_by_type"` // /photos/ and /documents/
+	CategorizeByType bool     `json:"categorize_by_type"` // /photos/, /documents/, or /stories/
 	OnlyApproved     *bool    `json:"only_approved"`      // optional
 }
 
@@ -184,9 +184,9 @@ type mediaZipRow struct {
 	ID               uint
 	RequestID        uint
 	RowID            int
-	PhotoURL         string
+	ObjectURL        string `gorm:"column:photo_url"`
 	FileName         string
-	DocumentType     string // "photos" or "document"
+	DocumentType     string // "photos", "document", or "stories"
 	DocumentCategory string
 
 	UserID    uint
