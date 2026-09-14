@@ -11,6 +11,8 @@ import (
 const (
 	storyPDFMaxRunesPerLine = 82
 	storyPDFLinesPerPage    = 40
+	storyPDFPageWidth       = 612.0
+	storyPDFPageHeight      = 792.0
 )
 
 func achieverStoryPDFTitle(firstName, lastName string) string {
@@ -103,6 +105,310 @@ func buildAchieverStoryPDF(title, storyText string) ([]byte, error) {
 	}
 	fmt.Fprintf(&pdf, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xrefOffset)
 	return pdf.Bytes(), nil
+}
+
+func achieverStoryTemplatePDFTitle(firstName, lastName string) string {
+	name := strings.TrimSpace(strings.Join([]string{
+		strings.TrimSpace(firstName),
+		strings.TrimSpace(lastName),
+	}, " "))
+	if name == "" {
+		return "Achiever Story"
+	}
+	return name
+}
+
+func buildAchieverStoryTemplatePDFDataURL(title string, template AchieverStoryTemplateInput) (string, error) {
+	pdf, err := buildAchieverStoryTemplatePDF(title, template)
+	if err != nil {
+		return "", err
+	}
+	return "data:application/pdf;base64," + base64.StdEncoding.EncodeToString(pdf), nil
+}
+
+// buildAchieverStoryTemplatePDF renders the common achiever-story format used
+// by the supplied reference document: a blue name banner, a two-column
+// biography table, followed by the story and its sources. The layout engine is
+// deliberately dependency-free and creates continuation pages as required.
+func buildAchieverStoryTemplatePDF(title string, template AchieverStoryTemplateInput) ([]byte, error) {
+	if strings.TrimSpace(template.AchieversStory) == "" {
+		return nil, fmt.Errorf("achiever's story is empty")
+	}
+
+	doc := newAchieverStoryTemplatePDF(title)
+	rows := []struct {
+		label string
+		value string
+	}{
+		{label: "Date of birth", value: template.DateOfBirth},
+		{label: "Date of death", value: template.DateOfDeath},
+		{label: "Community", value: template.Community},
+		{label: "Parents", value: template.Parents},
+		{label: "Siblings", value: template.Siblings},
+		{label: "Spouse", value: template.Spouse},
+		{label: "Education", value: template.Education},
+		{label: "Residential school history", value: template.ResidentialSchoolHistory},
+		{label: "Note", value: template.Note},
+	}
+	for _, row := range rows {
+		doc.addTableRow(row.label, templateDisplayValue(row.value))
+	}
+
+	doc.addStory(strings.TrimSpace(template.AchieversStory), cleanStorySources(template.Sources))
+	return buildTemplatePDFDocument(doc.pageContents()), nil
+}
+
+const (
+	templatePDFMarginX         = 72.0
+	templatePDFContentWidth    = 468.0
+	templatePDFLabelWidth      = 112.0
+	templatePDFHeaderTop       = 86.0
+	templatePDFHeaderHeight    = 24.0
+	templatePDFTableTop        = 132.0
+	templatePDFBottom          = 720.0
+	templatePDFTableFontSize   = 10.5
+	templatePDFTableLineHeight = 14.5
+)
+
+type achieverStoryTemplatePDF struct {
+	title  string
+	pages  []strings.Builder
+	cursor float64
+}
+
+func newAchieverStoryTemplatePDF(title string) *achieverStoryTemplatePDF {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = "Achiever Story"
+	}
+	doc := &achieverStoryTemplatePDF{title: title}
+	doc.newPage()
+	return doc
+}
+
+func (doc *achieverStoryTemplatePDF) newPage() {
+	doc.pages = append(doc.pages, strings.Builder{})
+	doc.cursor = templatePDFTableTop
+
+	doc.write("q 0.133 0.310 0.525 rg %.2f %.2f %.2f %.2f re f Q\n",
+		templatePDFMarginX,
+		storyPDFPageHeight-templatePDFHeaderTop-templatePDFHeaderHeight,
+		templatePDFContentWidth,
+		templatePDFHeaderHeight,
+	)
+	titleX := (storyPDFPageWidth - approximatePDFTextWidth(doc.title, 16)) / 2
+	if titleX < templatePDFMarginX+6 {
+		titleX = templatePDFMarginX + 6
+	}
+	doc.writeText("F2", 16, titleX, templatePDFHeaderTop+18, doc.title, "1 1 1")
+}
+
+func (doc *achieverStoryTemplatePDF) addTableRow(label, value string) {
+	valueLines := wrapStoryPDFText(value, 68)
+	if len(valueLines) == 0 {
+		valueLines = []string{"Not recorded"}
+	}
+
+	firstSegment := true
+	for len(valueLines) > 0 {
+		segmentLabel := label
+		if !firstSegment {
+			segmentLabel += " (continued)"
+		}
+		labelLines := wrapStoryPDFText(segmentLabel, 18)
+		availableLines := int((templatePDFBottom - doc.cursor - 8) / templatePDFTableLineHeight)
+		if availableLines < len(labelLines) || availableLines < 1 {
+			doc.newPage()
+			continue
+		}
+
+		lineCount := len(valueLines)
+		if lineCount > availableLines {
+			lineCount = availableLines
+		}
+		segmentValues := valueLines[:lineCount]
+		valueLines = valueLines[lineCount:]
+
+		rowLineCount := len(segmentValues)
+		if len(labelLines) > rowLineCount {
+			rowLineCount = len(labelLines)
+		}
+		rowHeight := float64(rowLineCount)*templatePDFTableLineHeight + 8
+		doc.drawTableRow(labelLines, segmentValues, rowHeight)
+		doc.cursor += rowHeight
+		firstSegment = false
+
+		if len(valueLines) > 0 {
+			doc.newPage()
+		}
+	}
+}
+
+func (doc *achieverStoryTemplatePDF) drawTableRow(labelLines, valueLines []string, height float64) {
+	bottomY := storyPDFPageHeight - doc.cursor - height
+	valueX := templatePDFMarginX + templatePDFLabelWidth
+
+	doc.write("q 0.949 0.961 0.957 rg %.2f %.2f %.2f %.2f re f Q\n",
+		templatePDFMarginX, bottomY, templatePDFLabelWidth, height)
+	doc.write("q 0.820 0.851 0.843 RG 0.75 w %.2f %.2f %.2f %.2f re S %.2f %.2f m %.2f %.2f l S Q\n",
+		templatePDFMarginX, bottomY, templatePDFContentWidth, height,
+		valueX, bottomY, valueX, bottomY+height)
+
+	for index, line := range labelLines {
+		doc.writeText("F2", templatePDFTableFontSize, templatePDFMarginX+6,
+			doc.cursor+15+float64(index)*templatePDFTableLineHeight, line, "0.145 0.184 0.204")
+	}
+	for index, line := range valueLines {
+		doc.writeText("F1", templatePDFTableFontSize, valueX+6,
+			doc.cursor+15+float64(index)*templatePDFTableLineHeight, line, "0.145 0.184 0.204")
+	}
+}
+
+func (doc *achieverStoryTemplatePDF) addStory(story string, sources []string) {
+	doc.ensureStorySpace(false)
+	doc.cursor += 27
+	doc.writeText("F2", 11, templatePDFMarginX, doc.cursor, "Achiever's Story:", "0.08 0.08 0.08")
+	doc.cursor += 28
+
+	storyLines := wrapStoryPDFText(story, 86)
+	for _, line := range storyLines {
+		if doc.cursor+15 > templatePDFBottom {
+			doc.newPage()
+			doc.ensureStorySpace(true)
+		}
+		if line != "" {
+			doc.writeText("F1", 11, templatePDFMarginX, doc.cursor, line, "0.08 0.08 0.08")
+		}
+		doc.cursor += 15
+	}
+
+	if len(sources) == 0 {
+		return
+	}
+	if doc.cursor+42 > templatePDFBottom {
+		doc.newPage()
+	}
+	doc.cursor += 14
+	doc.writeText("F2", 11, templatePDFMarginX, doc.cursor, "Sources:", "0.08 0.08 0.08")
+	doc.cursor += 28
+
+	for sourceIndex, source := range sources {
+		for _, line := range wrapStoryPDFText(source, 86) {
+			if doc.cursor+15 > templatePDFBottom {
+				doc.newPage()
+				doc.writeText("F2", 11, templatePDFMarginX, doc.cursor, "Sources (continued):", "0.08 0.08 0.08")
+				doc.cursor += 28
+			}
+			doc.writeText("F1", 11, templatePDFMarginX, doc.cursor, line, "0.02 0.30 0.78")
+			doc.cursor += 15
+		}
+		if sourceIndex < len(sources)-1 {
+			doc.cursor += 5
+		}
+	}
+}
+
+func (doc *achieverStoryTemplatePDF) ensureStorySpace(continued bool) {
+	if doc.cursor+70 > templatePDFBottom {
+		doc.newPage()
+	}
+	if continued {
+		doc.writeText("F2", 11, templatePDFMarginX, doc.cursor, "Achiever's Story (continued):", "0.08 0.08 0.08")
+		doc.cursor += 28
+	}
+}
+
+func (doc *achieverStoryTemplatePDF) write(format string, args ...interface{}) {
+	page := &doc.pages[len(doc.pages)-1]
+	fmt.Fprintf(page, format, args...)
+}
+
+func (doc *achieverStoryTemplatePDF) writeText(font string, size, x, baselineFromTop float64, value, color string) {
+	doc.write("BT /%s %.2f Tf %s rg %.2f %.2f Td (%s) Tj ET\n",
+		font, size, color, x, storyPDFPageHeight-baselineFromTop, escapeStoryPDFText(value))
+}
+
+func (doc *achieverStoryTemplatePDF) pageContents() []string {
+	pages := make([]string, len(doc.pages))
+	for index := range doc.pages {
+		pages[index] = doc.pages[index].String()
+	}
+	return pages
+}
+
+func templateDisplayValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "Not recorded"
+	}
+	return value
+}
+
+func cleanStorySources(sources []string) []string {
+	cleaned := make([]string, 0, len(sources))
+	for _, source := range sources {
+		if source = strings.TrimSpace(source); source != "" {
+			cleaned = append(cleaned, source)
+		}
+	}
+	return cleaned
+}
+
+func approximatePDFTextWidth(value string, fontSize float64) float64 {
+	width := 0.0
+	for _, character := range value {
+		switch {
+		case unicode.IsSpace(character):
+			width += 0.28
+		case unicode.IsUpper(character):
+			width += 0.64
+		case unicode.IsPunct(character):
+			width += 0.31
+		default:
+			width += 0.52
+		}
+	}
+	return width * fontSize
+}
+
+func buildTemplatePDFDocument(pageContents []string) []byte {
+	const fixedObjectCount = 4 // catalog, pages, Helvetica, Helvetica-Bold
+	objects := make([][]byte, fixedObjectCount+len(pageContents)*2)
+	objects[0] = []byte("<< /Type /Catalog /Pages 2 0 R >>")
+	objects[2] = []byte("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>")
+	objects[3] = []byte("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>")
+
+	pageRefs := make([]string, 0, len(pageContents))
+	for pageIndex, content := range pageContents {
+		pageObjectID := fixedObjectCount + 1 + pageIndex*2
+		contentObjectID := pageObjectID + 1
+		pageRefs = append(pageRefs, fmt.Sprintf("%d 0 R", pageObjectID))
+		objects[pageObjectID-1] = []byte(fmt.Sprintf(
+			"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents %d 0 R >>",
+			contentObjectID,
+		))
+		objects[contentObjectID-1] = []byte(fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content))
+	}
+	objects[1] = []byte(fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", strings.Join(pageRefs, " "), len(pageContents)))
+
+	var pdf bytes.Buffer
+	pdf.WriteString("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n")
+	offsets := make([]int, len(objects)+1)
+	for index, object := range objects {
+		offsets[index+1] = pdf.Len()
+		fmt.Fprintf(&pdf, "%d 0 obj\n", index+1)
+		pdf.Write(object)
+		pdf.WriteString("\nendobj\n")
+	}
+
+	xrefOffset := pdf.Len()
+	fmt.Fprintf(&pdf, "xref\n0 %d\n", len(objects)+1)
+	pdf.WriteString("0000000000 65535 f \n")
+	for objectID := 1; objectID <= len(objects); objectID++ {
+		fmt.Fprintf(&pdf, "%010d 00000 n \n", offsets[objectID])
+	}
+	fmt.Fprintf(&pdf, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xrefOffset)
+	return pdf.Bytes()
 }
 
 func buildStoryPDFPageContent(title string, lines []string) string {

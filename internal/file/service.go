@@ -1316,6 +1316,10 @@ func (fs *FileService) CreateAchieverStoryRequest(input AchieverStoryRequestInpu
 
 		requestID := request.RequestID
 		createdBy := userID
+		storyText := strings.TrimSpace(input.StoryText)
+		if input.Template != nil {
+			storyText = strings.TrimSpace(input.Template.AchieversStory)
+		}
 		story := AchieverStory{
 			FileID:      input.FileID,
 			FileVersion: currentFile.Version,
@@ -1324,7 +1328,7 @@ func (fs *FileService) CreateAchieverStoryRequest(input AchieverStoryRequestInpu
 			CreatedBy:   &createdBy,
 			StoryType:   storyType,
 			Status:      fileEditRequestStatusPending,
-			StoryText:   strings.TrimSpace(input.StoryText),
+			StoryText:   storyText,
 			VideoURL:    strings.TrimSpace(input.VideoURL),
 			ContentType: contentType,
 		}
@@ -1332,10 +1336,19 @@ func (fs *FileService) CreateAchieverStoryRequest(input AchieverStoryRequestInpu
 		var storedFile *DocumentInput
 		switch storyType {
 		case "text":
-			pdfData, err := buildAchieverStoryPDFDataURL(
-				achieverStoryPDFTitle(input.FirstName, input.LastName),
-				strings.TrimSpace(input.StoryText),
-			)
+			var pdfData string
+			var err error
+			if input.Template != nil {
+				pdfData, err = buildAchieverStoryTemplatePDFDataURL(
+					achieverStoryTemplatePDFTitle(input.FirstName, input.LastName),
+					*input.Template,
+				)
+			} else {
+				pdfData, err = buildAchieverStoryPDFDataURL(
+					achieverStoryPDFTitle(input.FirstName, input.LastName),
+					storyText,
+				)
+			}
 			if err != nil {
 				return fmt.Errorf("create story PDF: %w", err)
 			}
@@ -1390,6 +1403,12 @@ func validateAchieverStoryRequest(input AchieverStoryRequestInput) (storyType st
 	storyType = strings.ToLower(strings.TrimSpace(input.StoryType))
 	switch storyType {
 	case "text":
+		if input.Template != nil {
+			if strings.TrimSpace(input.Template.AchieversStory) == "" {
+				return "", "", fmt.Errorf("template.achievers_story is required")
+			}
+			return storyType, "application/pdf", nil
+		}
 		if strings.TrimSpace(input.StoryText) == "" {
 			return "", "", fmt.Errorf("story_text is required")
 		}

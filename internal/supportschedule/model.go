@@ -42,6 +42,13 @@ const (
 	ZoomSyncDeleted      = "deleted"
 )
 
+var DefaultCallReasons = []string{
+	"Technical support",
+	"Account or access help",
+	"Document or data help",
+	"Training or guidance",
+}
+
 // Compatibility aliases keep existing API clients using the previous status
 // labels working while the persisted model uses request/call terminology.
 const (
@@ -199,6 +206,7 @@ type SettingsResponse struct {
 	AllowedDurations      []int  `json:"allowed_durations"`
 	DefaultDurationMinute int    `json:"default_duration_minutes"`
 	BookingHorizonDays    int    `json:"booking_horizon_days"`
+	CallReasons           []string `json:"call_reasons"`
 }
 
 type UpdateSettingsInput struct {
@@ -216,6 +224,7 @@ type AvailabilitySlot struct {
 }
 
 type AvailabilityResponse struct {
+	TimeZone         string             `json:"time_zone"`
 	Date             string             `json:"date"`
 	Duration         int                `json:"duration_minutes"`
 	AssignedStaff    *SupportUser       `json:"assigned_staff,omitempty"`
@@ -251,6 +260,8 @@ type CalendarResponse struct {
 type CreateCallInput struct {
 	ScheduledStart   string `json:"scheduled_start"`
 	DurationMinutes  int    `json:"duration_minutes"`
+	Reason           string `json:"reason"`
+	OtherReason      string `json:"other_reason"`
 	Subject          string `json:"subject"`
 	Message          string `json:"message"`
 	RequestedStaffID *uint  `json:"requested_staff_id"`

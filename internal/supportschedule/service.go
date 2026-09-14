@@ -20,6 +20,7 @@ var (
 	ErrUnavailable         = errors.New("requested support time is unavailable")
 	ErrNoSupportStaff      = errors.New("no support admin is available")
 	ErrInvalidStatusChange = errors.New("invalid support call status change")
+	ErrActiveCallExists    = errors.New("you already have an active support call; update the existing call instead")
 )
 
 type SupportScheduleMailer interface {
@@ -41,14 +42,10 @@ func (s *Service) now() time.Time {
 	return time.Now()
 }
 
-func (s *Service) location(settings *SupportScheduleSettings) (*time.Location, error) {
-	name := DefaultTimeZone
-	if settings != nil && strings.TrimSpace(settings.TimeZone) != "" {
-		name = strings.TrimSpace(settings.TimeZone)
-	}
-	loc, err := time.LoadLocation(name)
+func (s *Service) location(_ *SupportScheduleSettings) (*time.Location, error) {
+	loc, err := time.LoadLocation(DefaultTimeZone)
 	if err != nil {
-		return nil, fmt.Errorf("%w: invalid time zone", ErrInvalidInput)
+		return nil, fmt.Errorf("%w: Toronto time zone is unavailable", ErrInvalidInput)
 	}
 	return loc, nil
 }
@@ -82,12 +79,8 @@ func (s *Service) settings() (*SupportScheduleSettings, error) {
 	if err != nil {
 		return nil, err
 	}
-	canonicalTimeZone := strings.TrimSpace(settings.TimeZone)
-	if _, err := time.LoadLocation(canonicalTimeZone); err != nil {
-		canonicalTimeZone = DefaultTimeZone
-	}
-	if settings.TimeZone != canonicalTimeZone {
-		settings.TimeZone = canonicalTimeZone
+	if settings.TimeZone != DefaultTimeZone {
+		settings.TimeZone = DefaultTimeZone
 		if err := s.DB.Model(&settings).Update("time_zone", settings.TimeZone).Error; err != nil {
 			return nil, err
 		}
@@ -140,6 +133,7 @@ func settingsResponse(settings *SupportScheduleSettings) *SettingsResponse {
 		AllowedDurations:      durationList(settings),
 		DefaultDurationMinute: settings.DefaultDurationMinutes,
 		BookingHorizonDays:    settings.BookingHorizonDays,
+		CallReasons:           append([]string(nil), DefaultCallReasons...),
 	}
 }
 
@@ -159,9 +153,10 @@ func (s *Service) UpdateSettings(actorID uint, input UpdateSettingsInput) (*Sett
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(input.TimeZone) != "" {
-		settings.TimeZone = strings.TrimSpace(input.TimeZone)
+	if timeZone := strings.TrimSpace(input.TimeZone); timeZone != "" && timeZone != DefaultTimeZone {
+		return nil, fmt.Errorf("%w: time_zone must be %s", ErrInvalidInput, DefaultTimeZone)
 	}
+	settings.TimeZone = DefaultTimeZone
 	if _, err := s.location(settings); err != nil {
 		return nil, err
 	}
@@ -195,11 +190,8 @@ func (s *Service) UpdateSettings(actorID uint, input UpdateSettingsInput) (*Sett
 	return settingsResponse(settings), s.EnsureRollingSchedule()
 }
 
-func mustLocation(settings *SupportScheduleSettings) *time.Location {
-	loc, err := time.LoadLocation(settings.TimeZone)
-	if err != nil {
-		return time.Local
-	}
+func mustLocation(_ *SupportScheduleSettings) *time.Location {
+	loc, _ := time.LoadLocation(DefaultTimeZone)
 	return loc
 }
 
@@ -216,7 +208,7 @@ func parseDateAndTime(date, hhmm string, loc *time.Location) (time.Time, error) 
 }
 
 func windowForDate(settings *SupportScheduleSettings, date string) (time.Time, time.Time, error) {
-	loc, err := time.LoadLocation(settings.TimeZone)
+	loc, err := time.LoadLocation(DefaultTimeZone)
 	if err != nil {
 		return time.Time{}, time.Time{}, err
 	}
