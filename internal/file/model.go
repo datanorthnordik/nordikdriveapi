@@ -180,6 +180,23 @@ type DocumentInput struct {
 	DataBase64       string `json:"data_base64"`
 }
 
+// AchieverStoryTemplateInput contains the fields used to generate the common
+// achiever-story PDF. Date values intentionally remain strings: a source may
+// provide either an exact date or descriptive text such as "Not recorded".
+type AchieverStoryTemplateInput struct {
+	DateOfBirth              string   `json:"date_of_birth"`
+	DateOfDeath              string   `json:"date_of_death"`
+	Community                string   `json:"community"`
+	Parents                  string   `json:"parents"`
+	Siblings                 string   `json:"siblings"`
+	Spouse                   string   `json:"spouse"`
+	Education                string   `json:"education"`
+	ResidentialSchoolHistory string   `json:"residential_school_history"`
+	Note                     string   `json:"note"`
+	AchieversStory           string   `json:"achievers_story"`
+	Sources                  []string `json:"sources"`
+}
+
 // AchieverStoryRequestInput is a single proposed story for an existing master
 // list row. A user can submit more stories later; each is reviewed separately.
 type AchieverStoryRequestInput struct {
@@ -188,11 +205,12 @@ type AchieverStoryRequestInput struct {
 	FirstName string `json:"firstname"`
 	LastName  string `json:"lastname"`
 
-	StoryType string         `json:"story_type"`
-	StoryText string         `json:"story_text"`
-	VideoURL  string         `json:"video_url"`
-	Video     *DocumentInput `json:"video"`
-	Document  *DocumentInput `json:"document"`
+	StoryType string                      `json:"story_type"`
+	StoryText string                      `json:"story_text"`
+	VideoURL  string                      `json:"video_url"`
+	Video     *DocumentInput              `json:"video"`
+	Document  *DocumentInput              `json:"document"`
+	Template  *AchieverStoryTemplateInput `json:"template"`
 }
 
 type AchieverStoryReviewInput struct {

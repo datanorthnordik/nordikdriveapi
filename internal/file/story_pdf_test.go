@@ -30,6 +30,45 @@ func TestBuildAchieverStoryPDF(t *testing.T) {
 	}
 }
 
+func TestBuildAchieverStoryTemplatePDF(t *testing.T) {
+	template := AchieverStoryTemplateInput{
+		DateOfBirth:              "1956-02-15",
+		DateOfDeath:              "Not recorded. Would be 70 in 2026 if living.",
+		Community:                "Shoal Lake #126",
+		Parents:                  "Evelyn Fair and John Redsky Sr.",
+		Siblings:                 "June, Agnes, LeeAnn, John, Gerald, Leslie, Vernon, Earl, and Kelvin",
+		Spouse:                   "Not recorded",
+		Education:                "Grade 3 recorded at Shingwauk.",
+		ResidentialSchoolHistory: "Admitted to Shingwauk Indian Residential School in 1966.",
+		Note:                     "Recorded in the Achievers database as a traditional healer.",
+		AchieversStory:           strings.Repeat("A survivor story presented in the common format. ", 140),
+		Sources:                  []string{"https://example.org/source", "  ", "Community archive"},
+	}
+
+	pdf, err := buildAchieverStoryTemplatePDF("Thelma Fair", template)
+	if err != nil {
+		t.Fatalf("build template PDF: %v", err)
+	}
+	if !bytes.HasPrefix(pdf, []byte("%PDF-1.4")) {
+		t.Fatalf("expected PDF header, got %q", pdf[:min(len(pdf), 16)])
+	}
+	if pages := strings.Count(string(pdf), "/Type /Page") - 1; pages < 2 {
+		t.Fatalf("expected long template story to span multiple pages, got %d", pages)
+	}
+	if !bytes.Contains(pdf, []byte("0.133 0.310 0.525 rg")) {
+		t.Fatal("expected the common blue title banner")
+	}
+	if !bytes.Contains(pdf, []byte("/BaseFont /Helvetica-Bold")) {
+		t.Fatal("expected bold labels in the common template")
+	}
+}
+
+func TestBuildAchieverStoryTemplatePDFRequiresStory(t *testing.T) {
+	if _, err := buildAchieverStoryTemplatePDF("Jane Doe", AchieverStoryTemplateInput{}); err == nil {
+		t.Fatal("expected an empty template story to be rejected")
+	}
+}
+
 func TestValidateAchieverStoryVideoRequest(t *testing.T) {
 	base := AchieverStoryRequestInput{FileID: 49, RowID: 10, StoryType: "video"}
 
@@ -64,6 +103,28 @@ func TestValidateAchieverStoryVideoRequest(t *testing.T) {
 	tooLarge.Video = &videoCopy
 	if _, _, err = validateAchieverStoryRequest(tooLarge); err == nil || !strings.Contains(err.Error(), "20 MB") {
 		t.Fatalf("expected video size error, got %v", err)
+	}
+}
+
+func TestValidateAchieverStoryTemplateRequest(t *testing.T) {
+	input := AchieverStoryRequestInput{
+		FileID:    49,
+		RowID:     10,
+		StoryType: "text",
+		Template: &AchieverStoryTemplateInput{
+			DateOfBirth:    "Circa 1956",
+			AchieversStory: "A structured achiever story.",
+		},
+	}
+
+	storyType, contentType, err := validateAchieverStoryRequest(input)
+	if err != nil || storyType != "text" || contentType != "application/pdf" {
+		t.Fatalf("valid template rejected: type=%q contentType=%q err=%v", storyType, contentType, err)
+	}
+
+	input.Template.AchieversStory = " "
+	if _, _, err = validateAchieverStoryRequest(input); err == nil || !strings.Contains(err.Error(), "template.achievers_story") {
+		t.Fatalf("expected required template story error, got %v", err)
 	}
 }
 

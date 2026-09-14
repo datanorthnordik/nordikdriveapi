@@ -2857,6 +2857,36 @@ func TestFileService_AchieverStoryRequestLifecycle(t *testing.T) {
 		t.Fatalf("text story was not uploaded as PDF: data prefix=%q path=%q", uploadedData[:min(len(uploadedData), 32)], uploadedPath)
 	}
 
+	templateRequest, err := svc.CreateAchieverStoryRequest(AchieverStoryRequestInput{
+		FileID:    master.ID,
+		RowID:     row.ID,
+		FirstName: "Thelma",
+		LastName:  "Fair",
+		StoryType: "text",
+		Template: &AchieverStoryTemplateInput{
+			DateOfBirth:              "1956-02-15",
+			DateOfDeath:              "Not recorded. Would be 70 in 2026 if living.",
+			Community:                "Shoal Lake #126",
+			ResidentialSchoolHistory: "Attended Shingwauk Indian Residential School.",
+			AchieversStory:           "Thelma served her community as a traditional healer.",
+			Sources:                  []string{"https://example.org/source"},
+		},
+	}, user.ID)
+	if err != nil {
+		t.Fatalf("create structured story request: %v", err)
+	}
+	var templateStory AchieverStory
+	if err := db.Where("request_id = ?", templateRequest.RequestID).First(&templateStory).Error; err != nil {
+		t.Fatalf("load structured story: %v", err)
+	}
+	if templateStory.StoryText != "Thelma served her community as a traditional healer." ||
+		templateStory.ContentType != "application/pdf" || templateStory.StoryURL == "" {
+		t.Fatalf("unexpected structured story: %#v", templateStory)
+	}
+	if !strings.HasPrefix(uploadedData, "data:application/pdf;base64,") || !strings.HasSuffix(uploadedPath, "Thelma_Fair_story.pdf") {
+		t.Fatalf("structured story was not uploaded as PDF: data prefix=%q path=%q", uploadedData[:min(len(uploadedData), 32)], uploadedPath)
+	}
+
 	if err := svc.ReviewAchieverStoryRequest(request.RequestID, "", nil, 99); err == nil {
 		t.Fatal("expected a decision for the pending story")
 	}
