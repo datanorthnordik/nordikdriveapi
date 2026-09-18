@@ -204,7 +204,7 @@ func (doc *achieverStoryTemplatePDF) newPage() {
 }
 
 func (doc *achieverStoryTemplatePDF) addTableRow(label, value string) {
-	valueLines := wrapStoryPDFText(value, 68)
+	valueLines := wrapTemplatePDFText(value, templatePDFContentWidth-templatePDFLabelWidth-12, templatePDFTableFontSize)
 	if len(valueLines) == 0 {
 		valueLines = []string{"Not recorded"}
 	}
@@ -215,7 +215,7 @@ func (doc *achieverStoryTemplatePDF) addTableRow(label, value string) {
 		if !firstSegment {
 			segmentLabel += " (continued)"
 		}
-		labelLines := wrapStoryPDFText(segmentLabel, 18)
+		labelLines := wrapTemplatePDFText(segmentLabel, templatePDFLabelWidth-12, templatePDFTableFontSize*1.1)
 		availableLines := int((templatePDFBottom - doc.cursor - 8) / templatePDFTableLineHeight)
 		if availableLines < len(labelLines) || availableLines < 1 {
 			doc.newPage()
@@ -270,14 +270,20 @@ func (doc *achieverStoryTemplatePDF) addStory(story string, sources []string) {
 	doc.writeText("F2", 11, templatePDFMarginX, doc.cursor, "Achiever's Story:", "0.08 0.08 0.08")
 	doc.cursor += 28
 
-	storyLines := wrapStoryPDFText(story, 86)
+	storyLines := wrapTemplatePDFParagraphs(story, templatePDFContentWidth, 11)
 	for _, line := range storyLines {
 		if doc.cursor+15 > templatePDFBottom {
 			doc.newPage()
 			doc.ensureStorySpace(true)
 		}
-		if line != "" {
-			doc.writeText("F1", 11, templatePDFMarginX, doc.cursor, line, "0.08 0.08 0.08")
+		if line.text != "" {
+			wordSpacing := 0.0
+			if !line.lastInParagraph {
+				if spaces := strings.Count(line.text, " "); spaces > 0 {
+					wordSpacing = (templatePDFContentWidth - helveticaPDFTextWidth(line.text, 11)) / float64(spaces)
+				}
+			}
+			doc.writeSpacedText("F1", 11, templatePDFMarginX, doc.cursor, line.text, "0.08 0.08 0.08", wordSpacing)
 		}
 		doc.cursor += 15
 	}
@@ -293,7 +299,7 @@ func (doc *achieverStoryTemplatePDF) addStory(story string, sources []string) {
 	doc.cursor += 28
 
 	for sourceIndex, source := range sources {
-		for _, line := range wrapStoryPDFText(source, 86) {
+		for _, line := range wrapTemplatePDFText(source, templatePDFContentWidth, 11) {
 			if doc.cursor+15 > templatePDFBottom {
 				doc.newPage()
 				doc.writeText("F2", 11, templatePDFMarginX, doc.cursor, "Sources (continued):", "0.08 0.08 0.08")
@@ -326,6 +332,11 @@ func (doc *achieverStoryTemplatePDF) write(format string, args ...interface{}) {
 func (doc *achieverStoryTemplatePDF) writeText(font string, size, x, baselineFromTop float64, value, color string) {
 	doc.write("BT /%s %.2f Tf %s rg %.2f %.2f Td (%s) Tj ET\n",
 		font, size, color, x, storyPDFPageHeight-baselineFromTop, escapeStoryPDFText(value))
+}
+
+func (doc *achieverStoryTemplatePDF) writeSpacedText(font string, size, x, baselineFromTop float64, value, color string, wordSpacing float64) {
+	doc.write("BT /%s %.2f Tf %s rg %.2f %.2f Td %.3f Tw (%s) Tj ET\n",
+		font, size, color, x, storyPDFPageHeight-baselineFromTop, wordSpacing, escapeStoryPDFText(value))
 }
 
 func (doc *achieverStoryTemplatePDF) pageContents() []string {
@@ -369,6 +380,129 @@ func approximatePDFTextWidth(value string, fontSize float64) float64 {
 		}
 	}
 	return width * fontSize
+}
+
+type templatePDFLine struct {
+	text            string
+	lastInParagraph bool
+}
+
+// PDF's Helvetica font is proportional, so a character count cannot reliably
+// keep text inside the page margins. Widths are in thousandths of an em.
+func helveticaPDFTextWidth(value string, fontSize float64) float64 {
+	width := 0
+	for _, character := range value {
+		width += helveticaPDFGlyphWidth(character)
+	}
+	return float64(width) * fontSize / 1000
+}
+
+func helveticaPDFGlyphWidth(character rune) int {
+	switch character {
+	case ' ', '!', ',', '.', ':', ';', '[', '\\', ']', 'I':
+		return 278
+	case '\'':
+		return 191
+	case '\u2018', '\u2019':
+		return 222
+	case '"', '\u201c', '\u201d':
+		return 355
+	case '(', ')', '-', '`', 'r':
+		return 333
+	case '*':
+		return 389
+	case '/', 'i', 'j', 'l':
+		return 222
+	case 'f', 't':
+		return 278
+	case '|':
+		return 260
+	case '^':
+		return 469
+	case 'a', 'b', 'd', 'e', 'g', 'h', 'n', 'o', 'p', 'q', 'u', '_', '?', '$', '#',
+		'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'L':
+		return 556
+	case 'J', 'c', 'k', 's', 'v', 'x', 'y', 'z':
+		return 500
+	case 'M', 'm':
+		return 833
+	case 'C', 'D', 'H', 'N', 'R', 'U', 'w':
+		return 722
+	case 'G', 'O', 'Q':
+		return 778
+	case 'A', 'B', 'E', 'K', 'P', 'S', 'V', 'X', 'Y', '&':
+		return 667
+	case 'F', 'T', 'Z':
+		return 611
+	case 'W':
+		return 944
+	case '+', '<', '=', '>', '~':
+		return 584
+	case '@':
+		return 1015
+	case '%':
+		return 889
+	case '{', '}':
+		return 334
+	}
+	// Unlisted WinAnsi glyphs use a conservative width so they stay in bounds.
+	return 667
+}
+
+func wrapTemplatePDFText(value string, maxWidth, fontSize float64) []string {
+	wrapped := wrapTemplatePDFParagraphs(value, maxWidth, fontSize)
+	lines := make([]string, len(wrapped))
+	for index, line := range wrapped {
+		lines[index] = line.text
+	}
+	return lines
+}
+
+func wrapTemplatePDFParagraphs(value string, maxWidth, fontSize float64) []templatePDFLine {
+	value = strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", "\n"), "\r", "\n")
+	var lines []templatePDFLine
+	for _, paragraph := range strings.Split(value, "\n") {
+		words := strings.Fields(paragraph)
+		if len(words) == 0 {
+			lines = append(lines, templatePDFLine{lastInParagraph: true})
+			continue
+		}
+		current := ""
+		for _, word := range words {
+			if helveticaPDFTextWidth(word, fontSize) > maxWidth {
+				if current != "" {
+					lines = append(lines, templatePDFLine{text: current})
+					current = ""
+				}
+				chunk := ""
+				for _, character := range word {
+					candidate := chunk + string(character)
+					if chunk != "" && helveticaPDFTextWidth(candidate, fontSize) > maxWidth {
+						lines = append(lines, templatePDFLine{text: chunk})
+						chunk = ""
+					}
+					chunk += string(character)
+				}
+				current = chunk
+				continue
+			}
+			candidate := word
+			if current != "" {
+				candidate = current + " " + word
+			}
+			if helveticaPDFTextWidth(candidate, fontSize) > maxWidth {
+				lines = append(lines, templatePDFLine{text: current})
+				current = word
+			} else {
+				current = candidate
+			}
+		}
+		lines = append(lines, templatePDFLine{text: current, lastInParagraph: true})
+	}
+	for len(lines) > 0 && lines[len(lines)-1].text == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }
 
 func buildTemplatePDFDocument(pageContents []string) []byte {

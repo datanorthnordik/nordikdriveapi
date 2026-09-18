@@ -3,6 +3,7 @@ package file
 import (
 	"bytes"
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -60,6 +61,32 @@ func TestBuildAchieverStoryTemplatePDF(t *testing.T) {
 	}
 	if !bytes.Contains(pdf, []byte("/BaseFont /Helvetica-Bold")) {
 		t.Fatal("expected bold labels in the common template")
+	}
+}
+
+func TestTemplatePDFLongParagraphFitsAndAligns(t *testing.T) {
+	story := strings.Repeat("Buckley Petawabano was born near Lake Mistassini and later worked in Canadian television production. ", 8)
+	lines := wrapTemplatePDFParagraphs(story, templatePDFContentWidth, 11)
+	if len(lines) < 2 {
+		t.Fatal("expected multiple story lines")
+	}
+	for _, line := range lines {
+		if width := helveticaPDFTextWidth(line.text, 11); width > templatePDFContentWidth+0.001 {
+			t.Fatalf("line exceeds right margin: width %.2f, text %q", width, line.text)
+		}
+	}
+
+	doc := newAchieverStoryTemplatePDF("Buckley Petawabano")
+	doc.addStory(story, nil)
+	content := strings.Join(doc.pageContents(), "\n")
+	first := lines[0]
+	spacing := (templatePDFContentWidth - helveticaPDFTextWidth(first.text, 11)) / float64(strings.Count(first.text, " "))
+	if !strings.Contains(content, fmt.Sprintf("%.3f Tw (%s) Tj", spacing, escapeStoryPDFText(first.text))) {
+		t.Fatal("expected full story lines to be justified to the right margin")
+	}
+	last := lines[len(lines)-1]
+	if !strings.Contains(content, "0.000 Tw ("+escapeStoryPDFText(last.text)+") Tj") {
+		t.Fatal("expected the final paragraph line to remain left aligned")
 	}
 }
 
