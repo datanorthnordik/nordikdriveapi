@@ -226,6 +226,57 @@ func cloneChatResult(result *ChatResult) *ChatResult {
 	return &cloned
 }
 
+// databaseDistinctValuesResult is the memoized result of a configured
+// distinct-values aggregation.
+type databaseDistinctValuesResult struct {
+	Values       []string
+	RowsSelected int
+}
+
+// databaseQueryCacheKey identifies a database aggregation by the pinned inputs
+// that determine its result: file, version, community scope and row filters. It
+// deliberately excludes the question wording, so different phrasings that map
+// to the same aggregation share one cached result.
+func databaseQueryCacheKey(namespace string, input ChatQueryInput, filters deterministicRowFilter) string {
+	return fmt.Sprintf("%s\x1f%d\x1f%d\x1f%s\x1f%s",
+		namespace,
+		input.FileID,
+		input.Version,
+		strings.Join(normalizeCommunities(input.Communities), "\x1f"),
+		deterministicRowFilterCacheKey(filters),
+	)
+}
+
+func deterministicRowFilterCacheKey(filters deterministicRowFilter) string {
+	return strings.Join([]string{
+		filters.CommunityNormalized,
+		filters.SchoolNormalized,
+		filterStringPointerKey(filters.DeceasedStatus),
+		filterBoolPointerKey(filters.RequireDeathRecord),
+		filterBoolPointerKey(filters.RequireNotes),
+		filterBoolPointerKey(filters.RequireAddInfo),
+		filterBoolPointerKey(filters.RequireDeathDetails),
+		filterBoolPointerKey(filters.RequirePhotos),
+	}, "\x1f")
+}
+
+func filterStringPointerKey(value *string) string {
+	if value == nil {
+		return "\x00"
+	}
+	return "\x01" + *value
+}
+
+func filterBoolPointerKey(value *bool) string {
+	if value == nil {
+		return "\x00"
+	}
+	if *value {
+		return "\x01true"
+	}
+	return "\x01false"
+}
+
 func planDatabaseChatQuestion(question string) (databaseChatPlan, bool) {
 	normalizedQuestion := normalizeChatSearchValue(question)
 	if normalizedQuestion == "" {
@@ -593,21 +644,17 @@ func (cs *ChatService) databaseBaseQuery(input ChatQueryInput) *gorm.DB {
 }
 
 func (cs *ChatService) loadDatabaseDimensionValues(input ChatQueryInput, field string) ([]databaseDimensionValue, error) {
-	cacheKey := fmt.Sprintf("%d:%d:%s", input.FileID, input.Version, field)
-	if cached, ok := cs.databaseDimensionCache.Load(cacheKey); ok {
+	return cs.queryDatabaseDimensionCounts(input, field, deterministicRowFilter{})
+}
+
+func (cs *ChatService) queryDatabaseDimensionCounts(input ChatQueryInput, field string, filters deterministicRowFilter) ([]databaseDimensionValue, error) {
+	cacheKey := databaseQueryCacheKey("dimension", input, filters) + "\x1f" + field
+	if cached, ok := cs.databaseQueryCache.load(cacheKey); ok {
 		if values, ok := cached.([]databaseDimensionValue); ok {
 			return append([]databaseDimensionValue(nil), values...), nil
 		}
 	}
-	values, err := cs.queryDatabaseDimensionCounts(input, field, deterministicRowFilter{})
-	if err != nil {
-		return nil, err
-	}
-	cs.databaseDimensionCache.Store(cacheKey, append([]databaseDimensionValue(nil), values...))
-	return values, nil
-}
 
-func (cs *ChatService) queryDatabaseDimensionCounts(input ChatQueryInput, field string, filters deterministicRowFilter) ([]databaseDimensionValue, error) {
 	column, displayExpression, ok := databaseDimensionSQL(field)
 	if !ok {
 		return nil, fmt.Errorf("unsupported database dimension %q", field)
@@ -625,6 +672,7 @@ func (cs *ChatService) queryDatabaseDimensionCounts(input ChatQueryInput, field 
 		values[index].Normalized = normalizeChatSearchValue(values[index].Normalized)
 		values[index].Display = structuredFieldDisplay(values[index].Display, values[index].Normalized)
 	}
+	cs.databaseQueryCache.store(cacheKey, append([]databaseDimensionValue(nil), values...))
 	return values, nil
 }
 
@@ -664,14 +712,28 @@ func databaseRowFiltersEmpty(filters deterministicRowFilter) bool {
 }
 
 func (cs *ChatService) countDatabaseRows(input ChatQueryInput, filters deterministicRowFilter) (int, error) {
+	cacheKey := databaseQueryCacheKey("count", input, filters)
+	if cached, ok := cs.databaseQueryCache.load(cacheKey); ok {
+		if count, ok := cached.(int); ok {
+			return count, nil
+		}
+	}
 	var count int64
 	if err := applyDatabaseChatFilters(cs.databaseBaseQuery(input), input.Communities, filters).Count(&count).Error; err != nil {
 		return 0, err
 	}
-	return int(count), nil
+	result := int(count)
+	cs.databaseQueryCache.store(cacheKey, result)
+	return result, nil
 }
 
 func (cs *ChatService) queryDatabaseNamedRecords(input ChatQueryInput, filters deterministicRowFilter) ([]databaseNamedRecord, error) {
+	cacheKey := databaseQueryCacheKey("records", input, filters)
+	if cached, ok := cs.databaseQueryCache.load(cacheKey); ok {
+		if records, ok := cached.([]databaseNamedRecord); ok {
+			return append([]databaseNamedRecord(nil), records...), nil
+		}
+	}
 	const displayNameExpression = "COALESCE(NULLIF(row_data_normalized #>> '{chat,default_bundle,name}', ''), NULLIF(row_data_normalized #>> '{canonical,display_name}', ''), canonical_name)"
 	var records []databaseNamedRecord
 	query := applyDatabaseChatFilters(cs.databaseBaseQuery(input), input.Communities, filters).
@@ -681,12 +743,20 @@ func (cs *ChatService) queryDatabaseNamedRecords(input ChatQueryInput, filters d
 	if err := query.Scan(&records).Error; err != nil {
 		return nil, err
 	}
+	cs.databaseQueryCache.store(cacheKey, append([]databaseNamedRecord(nil), records...))
 	return records, nil
 }
 
 func (cs *ChatService) queryConfiguredDatabaseDistinctValues(input ChatQueryInput, field configuredDeterministicField, filters deterministicRowFilter) ([]string, int, error) {
 	if len(field.SourceNames) == 0 {
 		return nil, 0, fmt.Errorf("configured field has no source names")
+	}
+
+	cacheKey := databaseQueryCacheKey("distinct", input, filters) + "\x1f" + strings.Join(field.SourceNames, "\x1e")
+	if cached, ok := cs.databaseQueryCache.load(cacheKey); ok {
+		if result, ok := cached.(databaseDistinctValuesResult); ok {
+			return append([]string(nil), result.Values...), result.RowsSelected, nil
+		}
 	}
 
 	valueParts := make([]string, 0, len(field.SourceNames))
@@ -731,6 +801,10 @@ func (cs *ChatService) queryConfiguredDatabaseDistinctValues(input ChatQueryInpu
 	}
 	sort.Slice(values, func(i, j int) bool {
 		return strings.ToLower(values[i]) < strings.ToLower(values[j])
+	})
+	cs.databaseQueryCache.store(cacheKey, databaseDistinctValuesResult{
+		Values:       append([]string(nil), values...),
+		RowsSelected: rowsSelected,
 	})
 	return values, rowsSelected, nil
 }

@@ -35,9 +35,9 @@ type ChatService struct {
 	ProjectID string
 	Location  string
 
-	datasetCache           sync.Map
-	structuredDatasetCache sync.Map
-	databaseDimensionCache sync.Map
+	datasetCache           chatBoundedCache
+	structuredDatasetCache chatBoundedCache
+	databaseQueryCache     chatBoundedCache
 	fastAnswerCacheMu      sync.RWMutex
 	fastAnswerCache        map[string]*ChatResult
 	fastAnswerCacheOrder   []string

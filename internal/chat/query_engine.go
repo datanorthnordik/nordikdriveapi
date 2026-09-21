@@ -232,7 +232,7 @@ func (cs *ChatService) getPreparedChatDataset(fileID uint, version int, communit
 
 func (cs *ChatService) getOrLoadChatDataset(fileID uint, version int) (*chatDatasetCacheEntry, error) {
 	cacheKey := chatDatasetCacheKey(fileID, version)
-	if cached, ok := cs.datasetCache.Load(cacheKey); ok {
+	if cached, ok := cs.datasetCache.load(cacheKey); ok {
 		if entry, ok := cached.(*chatDatasetCacheEntry); ok {
 			return entry, nil
 		}
@@ -252,7 +252,7 @@ func (cs *ChatService) getOrLoadChatDataset(fileID uint, version int) (*chatData
 	}
 
 	entry := &chatDatasetCacheEntry{rows: rows}
-	actual, _ := cs.datasetCache.LoadOrStore(cacheKey, entry)
+	actual := cs.datasetCache.loadOrStore(cacheKey, entry)
 	if cached, ok := actual.(*chatDatasetCacheEntry); ok {
 		return cached, nil
 	}

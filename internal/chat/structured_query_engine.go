@@ -175,7 +175,7 @@ func (cs *ChatService) getPreparedStructuredChatDataset(fileID uint, version int
 
 func (cs *ChatService) getOrLoadStructuredChatDataset(fileID uint, version int) (*chatStructuredDatasetCacheEntry, error) {
 	cacheKey := chatDatasetCacheKey(fileID, version)
-	if cached, ok := cs.structuredDatasetCache.Load(cacheKey); ok {
+	if cached, ok := cs.structuredDatasetCache.load(cacheKey); ok {
 		if entry, ok := cached.(*chatStructuredDatasetCacheEntry); ok {
 			return entry, nil
 		}
@@ -207,7 +207,7 @@ func (cs *ChatService) getOrLoadStructuredChatDataset(fileID uint, version int) 
 	}
 
 	entry := &chatStructuredDatasetCacheEntry{rows: rows}
-	actual, _ := cs.structuredDatasetCache.LoadOrStore(cacheKey, entry)
+	actual := cs.structuredDatasetCache.loadOrStore(cacheKey, entry)
 	if cached, ok := actual.(*chatStructuredDatasetCacheEntry); ok {
 		return cached, nil
 	}
